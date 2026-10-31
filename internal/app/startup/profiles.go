@@ -176,6 +176,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		reason := "normal"
 		if resultErr != nil {
 			reason = "initialization_failure"
+			if errors.Is(resultErr, errRebuildNeeded) {
+				reason = "rebuild"
+			}
 		}
 		log.Info("app.stopped", "profile application cleanup completed", config.F("cleanup_reason", reason), config.F("duration_ms", time.Since(started).Milliseconds()))
 	}()
@@ -186,6 +189,10 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	if err != nil {
 		return &Error{Event: "app.profiles.init_failed", Message: "invalid profile routing", Cause: err}
 	}
+	rebuild := make(chan struct{}, 1)
+	reloader := NewReloader(cfg.ProfileRoot, cfg, directory, rootLog, rebuild)
+	reloader.Start(ctx)
+	maintenanceStops = append(maintenanceStops, reloader.Stop)
 	names := []string{"default"}
 	for name := range cfg.Profiles {
 		names = append(names, name)

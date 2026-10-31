@@ -45,7 +45,8 @@ headers, 32 env entries; map values ≤8,192 bytes, no newlines or NULs. stdio t
 bounded args/cwd/`env` and forbids transport/headers/auth keys; HTTP defaults to
 `streamable_http` (SSE is the opt-in) and may carry static headers plus tool include/exclude
 filters (empty include allows all, exclude wins). OAuth exists only on streamable HTTP and owns
-the `Authorization` header — a static one alongside is rejected. Restart reloads configuration;
+the `Authorization` header — a static one alongside is rejected. An automatic restart
+reloads configuration;
 inherited servers become independent profile-owned connections, with no runtime global
 administration and no encryption key.
 
@@ -65,6 +66,17 @@ clients, and metadata persist as 0600 files under `<profile>/mcp-tokens/` (0700)
 The boundary to internalize: endpoints, catalogs, commands, and credentials are trusted operator
 configuration — local HTTP endpoints and stdio commands run on operator trust, with no
 private-range filtering. This is not an SSRF/RCE boundary.
+
+## Management CLI
+
+`oswald mcp list|add|edit|remove|test` owns server lifecycle; all mutations run through the
+mediated write path (staged validation before write, previous bytes kept as last-known-good
+beside the file, atomic replace) — there is no generic `config set`; `oswald config` is
+read-only (`show|get|validate`). `list` never
+dials and never prints endpoints, headers, or secrets. `test` dials once via the same transport
+constructors as the runtime bridge. `remove` keeps `mcp-tokens/<server>.*` unless `--with-tokens`
+is passed. Flag secrets (`--oauth-client-secret`, header values) follow the `env set` posture:
+never echoed or logged.
 
 ## Tests
 

@@ -48,11 +48,14 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   `pending_dialogs`. Flat `{"success": true, ...}` envelopes inside the untrusted wrapper;
   oversized snapshots truncate at line boundaries with the full tree spilled to
   `cache/browser/scratch-<hash>.txt` for `read_file` paging.
-- `browser_vault_*` — four model-blind autofill tools over the same session: `list` (handles
+- `browser_vault_*` — six model-blind vault tools over the same session: `list` (handles
   plus metadata, never passwords), `fill` (login password or address fields, exact-origin bound,
-  card kinds refuse fail-closed), `save_login` (returns the operator `oswald vault add` command;
-  this session cannot prompt), `enter_code` (TOTP from a saved seed or `prompt_unavailable`).
-  Metadata-only history, hashed args, secret registry scrubbing on every browser output path.
+  card kinds refuse fail-closed), `save_login` (seals a user-supplied identifier/password/seed
+  to the current page origin), `save_address` (seals user-supplied address fields the same way),
+  `enter_code` (TOTP from a saved seed, or a save-first hint when none exists), `rm` (exact-handle
+  delete, irreversible). There is no vault CLI: chat is the only ingest path, so user-supplied
+  secrets transit tool args — metadata-only history, hashed args, secret registry scrubbing on
+  every browser output path.
 - `clarify` — blocking single-flight question form (1–5 questions, ≤4 choices each).
   Parks one pending ask per conversation (5-minute window) and walks the questions
   one at a time: each goes out as its own text, the user's reply answers it, and the

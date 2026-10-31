@@ -59,6 +59,13 @@ func readPrivateConfig(path string, optional bool) ([]byte, error) {
 // default environment first so inherited values resolve without duplication.
 func loadProfileEnvironment(root, source, profile string) (profileEnvironment, error) {
 	repairPrivateFile(filepath.Join(root, ".env"), source, profile)
+	return loadProfileEnvironmentStrict(root, source)
+}
+
+// loadProfileEnvironmentStrict reads one private .env file without repairing
+// permissions or logging. Validation and reload use it so a candidate never
+// mutates live state.
+func loadProfileEnvironmentStrict(root, source string) (profileEnvironment, error) {
 	data, err := readPrivateConfig(filepath.Join(root, ".env"), true)
 	if err != nil {
 		return nil, withConfigSource(err, source)

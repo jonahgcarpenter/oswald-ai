@@ -460,8 +460,8 @@ func TestRegisterBrowserProviderMatrix(t *testing.T) {
 	if len(browserNames) != 11 {
 		t.Fatalf("browser tools = %d, want 11", len(browserNames))
 	}
-	if got := len(toolbrowser.VaultNames()); got != 4 {
-		t.Fatalf("vault tools = %d, want 4", got)
+	if got := len(toolbrowser.VaultNames()); got != 6 {
+		t.Fatalf("vault tools = %d, want 6", got)
 	}
 	tests := []struct {
 		name      string

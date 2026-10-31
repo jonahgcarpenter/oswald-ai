@@ -85,14 +85,32 @@ In Discord servers and iMessage groups, slash commands must start with a mention
 
 Operator commands run from a terminal against your `.oswald/` root:
 
-| Command                        | Description                                                                              |
-| ------------------------------ | ---------------------------------------------------------------------------------------- |
-| `oswald setup`                 | Seed missing `config.yaml`/`.env`/`SOUL.md` entries for first install; never overwrites. |
-| `oswald start`                 | Run the Oswald service in the foreground.                                                |
-| `oswald profile create <name>` | Provision a new named profile subtree.                                                   |
-| `oswald profile delete <name>` | Remove a named profile subtree (refuses `default`, requires confirmation).               |
-| `oswald mcp auth <server>`     | Interactively authorize an MCP server (browser or device flow).                          |
-| `oswald gateway <name> <enable\|disable>` | Flip `platforms.<name>.enabled` for `discord`, `bluebubbles`, or `api` (restart to apply). |
+| Command                                  | Description                                                                                                     |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `oswald setup`                           | Seed missing `config.yaml`/`.env`/`SOUL.md` entries for first install; never overwrites.                        |
+| `oswald start`                           | Run the Oswald service in the foreground.                                                                       |
+| `oswald profile create\|rename\|delete`   | Provision, rename, or remove a named profile subtree (refuses `default` on delete, requires confirmation).      |
+| `oswald mcp list\|add\|edit\|remove\|test` | Manage profile MCP servers (add through staged validation, never prints secrets).                              |
+| `oswald mcp auth <server>`               | Interactively authorize an MCP server (browser or device flow).                                                 |
+| `oswald gateway show\|set-multiplex`      | Inspect routing and toggle multi-profile routing.                                                               |
+| `oswald gateway routes list\|add\|remove` | Manage `gateway.profile_routes` (add is staged-validated).                                                      |
+| `oswald platforms show\|enable\|disable`  | Inspect gateway platforms and flip `platforms.<name>.enabled` (service restarts automatically to apply).       |
+| `oswald platforms set <platform> [flags]` | Set listener/admission leaves for `discord`, `bluebubbles`, or `api` (admission applies live).                 |
+| `oswald providers list\|show\|add\|remove` | Manage LLM providers (`--profile` allowed).                                                                     |
+| `oswald model show\|set`                  | Manage model selection: `--provider`, `--default`, `--context-length` (`--profile` allowed).                    |
+| `oswald api show\|set-key\|clear-key`      | Manage the per-profile OpenAI gateway credential (`--profile` allowed, never printed).                          |
+| `oswald tools show\|set\|unset`            | Manage `web-search`, `image`, and `browser` backends (`--profile` allowed, secrets redacted).                   |
+| `oswald runtime show\|set`                | Inspect and set `runtime.log_level` (applies live).                                                             |
+| `oswald config show\|get\|validate`        | Inspect effective configuration (secrets redacted) and validate files; never writes.                            |
+| `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |
+
+Every mutating group validates through the staged startup pipeline before writing, so a rejected
+edit leaves files untouched; each command reports `applied live` vs `restarting service to
+apply`. Reads (`show`, `get`, `list`, `validate`) may name another profile; mutations stay
+fenced to the calling profile, and global sections plus profile lifecycle require the default
+scope — contradictions fail closed instead of landing elsewhere. Log-level and admission
+changes apply live; anything else triggers a supervised automatic restart of the service
+within seconds — no manual restart, no operator signal.
 
 ## Documentation
 

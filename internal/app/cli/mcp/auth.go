@@ -5,12 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 // auth runs the interactive OAuth authorization for one profile MCP server
@@ -18,7 +17,7 @@ import (
 func auth(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("oswald mcp auth", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	profileName := fs.String("profile", "default", "operator profile owning the MCP server")
+	profileName := profileFlag(fs)
 	flow := fs.String("flow", "", "OAuth flow: browser or device (default from configuration)")
 	noBrowser := fs.Bool("no-browser", false, "print the authorization URL and read a pasted response instead of opening a browser")
 	timeoutRaw := fs.String("timeout", "", "authorization wait bound, e.g. 300s (default from configuration)")
@@ -62,40 +61,35 @@ func auth(ctx context.Context, root string, args []string, stdin io.Reader, stdo
 		fmt.Fprintln(stderr, "oswald: mcp auth requires exactly one server name")
 		return exitUsage
 	}
-	serverName := strings.ToLower(strings.TrimSpace(rest[0]))
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		fmt.Fprintln(stderr, "oswald: invalid configuration root")
-		return exitError
-	}
-	cfg, err := config.LoadProfiles(abs)
-	if err != nil {
-		fmt.Fprintln(stderr, "oswald: "+config.SafeErrorText(err))
-		return exitError
-	}
-	profile := cfg
-	profileRoot := cfg.ProfileRoot
-	if *profileName != "default" {
-		selected, ok := cfg.Profiles[*profileName]
-		if !ok {
-			fmt.Fprintf(stderr, "oswald: unknown profile %q\n", *profileName)
-			return exitError
+	name := serverName(rest[0])
+	profile, profileRoot, err := func() (*config.Config, string, error) {
+		resolved, err := config.ResolveProfile(*profileName)
+		if err != nil {
+			return nil, "", err
 		}
-		profile, profileRoot = selected, selected.ProfileRoot
+		selected, _, root, err := resolveScope(root, resolved, true)
+		if err != nil {
+			return nil, "", err
+		}
+		return selected, root, nil
+	}()
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return exitError
 	}
 	var server *config.MCPServer
 	for i := range profile.MCPServers {
-		if profile.MCPServers[i].Name == serverName {
+		if profile.MCPServers[i].Name == name {
 			server = &profile.MCPServers[i]
 			break
 		}
 	}
 	if server == nil {
-		fmt.Fprintf(stderr, "oswald: unknown MCP server %q\n", serverName)
+		fmt.Fprintf(stderr, "oswald: unknown MCP server %q\n", name)
 		return exitError
 	}
 	if strings.TrimSpace(server.Auth) != "oauth" {
-		fmt.Fprintf(stderr, "oswald: MCP server %q is not configured for OAuth\n", serverName)
+		fmt.Fprintf(stderr, "oswald: MCP server %q is not configured for OAuth\n", name)
 		return exitError
 	}
 	timeout := server.OAuth.Timeout

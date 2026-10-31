@@ -193,6 +193,7 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + workdir,
 		"OSWALD_SCRATCH=" + scratch,
+		"OSWALD_HOME=" + m.root,
 	}, GitHubTokenEnv()...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

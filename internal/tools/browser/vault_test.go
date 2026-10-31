@@ -88,15 +88,95 @@ func TestVaultFillRefusesWrongOrigin(t *testing.T) {
 	}
 }
 
-func TestVaultSaveLoginGuidesOperator(t *testing.T) {
-	backend := &fakeBackend{vaultEval: vaultScriptBackend(`"https://example.com/login"`, `[]`, ``)}
-	handlers := NewHandlers(testDeps(t, backend))
-	result, err := handlers[VaultSaveLoginName](testContext(), map[string]interface{}{})
+func TestVaultSaveLoginStoresAndFills(t *testing.T) {
+	inspect := `[{"index":0,"tag":"input","type":"text","name":"user","visible":true},{"index":1,"tag":"input","type":"password","visible":true}]`
+	backend := &fakeBackend{vaultEval: vaultScriptBackend(`"https://example.com/login"`, inspect, `{"filled":1}`)}
+	deps := testDeps(t, backend)
+	handlers := NewHandlers(deps)
+	result, err := handlers[VaultSaveLoginName](testContext(), map[string]interface{}{
+		"identifier": "alice@example.com", "password": "s3cret-password",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Content, "oswald vault add --origin https://example.com") {
-		t.Fatalf("save_login guidance = %q", result.Content)
+	for _, want := range []string{`"saved": true`, `"origin": "https://example.com"`} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("save result missing %q: %q", want, result.Content)
+		}
+	}
+	for _, leak := range []string{"s3cret-password"} {
+		if strings.Contains(result.Content, leak) {
+			t.Fatalf("save result leaked a secret: %q", result.Content)
+		}
+	}
+	items, err := deps.Vault.List()
+	if err != nil || len(items) != 1 || items[0].Origin != "https://example.com" {
+		t.Fatalf("store = %+v %v", items, err)
+	}
+	fill, err := handlers[VaultFillName](testContext(), map[string]interface{}{"handle": items[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fill.Content, `"filled_fields": 1`) {
+		t.Fatalf("fill after save = %q", fill.Content)
+	}
+	if _, err := handlers[VaultSaveLoginName](testContext(), map[string]interface{}{
+		"identifier": "alice@example.com",
+	}); err == nil {
+		t.Fatal("save without password succeeded")
+	}
+	if _, err := handlers[VaultSaveLoginName](testContext(), map[string]interface{}{
+		"identifier": "alice@example.com", "password": "x", "identifier_type": "carrier-pigeon",
+	}); err == nil {
+		t.Fatal("save with bad identifier_type succeeded")
+	}
+}
+
+func TestVaultSaveAddressAndRemove(t *testing.T) {
+	backend := &fakeBackend{vaultEval: vaultScriptBackend(`"https://shop.example/checkout"`, `[]`, ``)}
+	deps := testDeps(t, backend)
+	handlers := NewHandlers(deps)
+	result, err := handlers[VaultSaveAddressName](testContext(), map[string]interface{}{
+		"address_line1": "1 Main St", "city": "Springfield", "postal_code": "12345", "country": "US",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, `"saved": true`) {
+		t.Fatalf("address save result = %q", result.Content)
+	}
+	for _, leak := range []string{"1 Main St", "Springfield"} {
+		if strings.Contains(result.Content, leak) {
+			t.Fatalf("save result leaked address data: %q", result.Content)
+		}
+	}
+	items, err := deps.Vault.List()
+	if err != nil || len(items) != 1 {
+		t.Fatalf("store = %+v %v", items, err)
+	}
+	if _, err := handlers[VaultSaveAddressName](testContext(), map[string]interface{}{
+		"city": "Springfield", "postal_code": "12345", "country": "US",
+	}); err == nil {
+		t.Fatal("address save without street succeeded")
+	}
+	removed, err := handlers[VaultRemoveName](testContext(), map[string]interface{}{"handle": items[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(removed.Content, `"removed":`) {
+		t.Fatalf("remove result = %q", removed.Content)
+	}
+	items, err = deps.Vault.List()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("store after remove = %+v %v", items, err)
+	}
+	if _, err := handlers[VaultRemoveName](testContext(), map[string]interface{}{"handle": "vault_missing"}); err == nil {
+		t.Fatal("remove with unknown handle succeeded")
+	} else if !strings.Contains(err.Error(), "no vault item") {
+		t.Fatalf("remove error = %v", err)
+	}
+	if _, err := handlers[VaultRemoveName](testContext(), map[string]interface{}{}); err == nil {
+		t.Fatal("remove without handle succeeded")
 	}
 }
 
@@ -155,7 +235,7 @@ func TestVaultEnterCodeMintAndRefuse(t *testing.T) {
 	handlers = NewHandlers(plain)
 	if _, err := handlers[VaultEnterCodeName](testContext(), map[string]interface{}{"handle": plainMeta.ID}); err == nil {
 		t.Fatal("enter_code without seed succeeded")
-	} else if !strings.Contains(err.Error(), "prompt_unavailable") {
+	} else if !strings.Contains(err.Error(), "browser_vault_save_login") {
 		t.Fatalf("enter_code error = %v", err)
 	}
 }

@@ -59,9 +59,9 @@ func TestClassifyGroups(t *testing.T) {
 		// SOUL.md: agent same-profile, system cross-profile.
 		{filepath.Join(root, "SOUL.md"), GroupAgent},
 		{filepath.Join(root, "profiles", "bob", "SOUL.md"), GroupSystem},
-		// config.yaml: system everywhere.
-		{filepath.Join(root, "config.yaml"), GroupSystem},
-		{filepath.Join(root, "profiles", "bob", "config.yaml"), GroupSystem},
+		// config.yaml: protected everywhere, CLI-mediated.
+		{filepath.Join(root, "config.yaml"), GroupProtected},
+		{filepath.Join(root, "profiles", "bob", "config.yaml"), GroupProtected},
 		// cache: scratch is agent same-profile, everything else system.
 		{filepath.Join(root, "cache", "scratch", "a.txt"), GroupAgent},
 		{filepath.Join(root, "cache", "images", "a.png"), GroupSystem},
@@ -95,13 +95,13 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 	}
 	ws := NewWorkspace(tree, "default")
 
-	readOK := []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "USER.md"), "notes.md", filepath.Join("profiles", "bob", "notes.md"), filepath.Join("profiles", "bob", "SOUL.md"), filepath.Join("skills", "review", "SKILL.md")}
+	readOK := []string{"SOUL.md", "state.db", filepath.Join("memories", "USER.md"), "notes.md", filepath.Join("profiles", "bob", "notes.md"), filepath.Join("profiles", "bob", "SOUL.md"), filepath.Join("skills", "review", "SKILL.md")}
 	for _, raw := range readOK {
 		if _, _, err := ws.Resolve(raw); err != nil {
 			t.Errorf("read denied: %q: %v", raw, err)
 		}
 	}
-	readDeny := []string{".env", filepath.Join("profiles", "bob", ".env"), filepath.Join("profiles", "bob", "state.db")}
+	readDeny := []string{".env", "config.yaml", filepath.Join("profiles", "bob", ".env"), filepath.Join("profiles", "bob", "config.yaml"), filepath.Join("profiles", "bob", "state.db")}
 	for _, raw := range readDeny {
 		_, _, err := ws.Resolve(raw)
 		rel, group, ok := AsDeny(err)
@@ -126,11 +126,12 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 		}
 	}
 	writeDeny := map[string]string{
-		"config.yaml":                        "system-managed",
-		"state.db":                           "system-managed",
-		filepath.Join("memories", "USER.md"): "memory tool",
+		"config.yaml": "oswald providers",
+		filepath.Join("profiles", "bob", "config.yaml"): "oswald providers",
+		"state.db":                                    "system-managed",
+		filepath.Join("memories", "USER.md"):          "memory tool",
 		filepath.Join("skills", "review", "SKILL.md"): "skill_manage tool",
-		".env": "protected",
+		".env": "oswald env",
 		filepath.Join("profiles", "bob", "notes.md"): "system-managed",
 		"/tmp/outside.txt":                           "system-managed",
 	}
@@ -148,17 +149,20 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 }
 
 func TestDenyMessagesGrouped(t *testing.T) {
-	if msg := DenyMessage(".env", GroupProtected, false); !strings.Contains(msg, "protected") {
+	if msg := DenyMessage(".env", GroupProtected, false); !strings.Contains(msg, "oswald env show") {
 		t.Fatalf("protected read: %q", msg)
 	}
-	if msg := DenyMessage(".env", GroupProtected, true); !strings.Contains(msg, "protected") {
+	if msg := DenyMessage(".env", GroupProtected, true); !strings.Contains(msg, "oswald env set") {
 		t.Fatalf("protected write: %q", msg)
 	}
 	if msg := DenyMessage("profiles/b/state.db", GroupProtected, false); !strings.Contains(msg, "session_search") {
 		t.Fatalf("cross state read: %q", msg)
 	}
-	if msg := DenyMessage("config.yaml", GroupSystem, true); !strings.Contains(msg, "system-managed") {
-		t.Fatalf("system write: %q", msg)
+	if msg := DenyMessage("config.yaml", GroupProtected, true); !strings.Contains(msg, "oswald providers|model|api|gateway|platforms|tools|runtime|mcp") {
+		t.Fatalf("config write: %q", msg)
+	}
+	if msg := DenyMessage("config.yaml", GroupProtected, false); !strings.Contains(msg, "oswald config show") {
+		t.Fatalf("config read: %q", msg)
 	}
 	if msg := DenyMessage("memories/USER.md", GroupSystem, true); !strings.Contains(msg, "memory tool") {
 		t.Fatalf("memory write: %q", msg)

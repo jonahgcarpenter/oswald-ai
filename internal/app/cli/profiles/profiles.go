@@ -37,10 +37,19 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return exitUsage
 	}
 	switch args[0] {
-	case "create":
-		return create(ctx, root, args[1:], stdout, stderr)
-	case "delete":
-		return deleteProfile(ctx, root, args[1:], stdin, stdout, stderr)
+	case "create", "rename", "delete":
+		if err := config.RequireDefaultScope(); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return exitError
+		}
+		switch args[0] {
+		case "create":
+			return create(ctx, root, args[1:], stdout, stderr)
+		case "rename":
+			return renameProfile(ctx, root, args[1:], stdout, stderr)
+		default:
+			return deleteProfile(ctx, root, args[1:], stdin, stdout, stderr)
+		}
 	case "help", "-h", "--help":
 		profileUsage(stdout)
 		return exitOK
@@ -52,7 +61,10 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 }
 
 func profileUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald profile <create|delete> <name>")
+	fmt.Fprintln(w, "usage: oswald profile <create|rename|delete> <name>")
+	fmt.Fprintln(w, "  create <name>         provision a new private profile")
+	fmt.Fprintln(w, "  rename <old> <new>    move a profile subtree to a new name")
+	fmt.Fprintln(w, "  delete <name>         delete a profile and all of its data")
 }
 
 // resolveRoot returns an absolute configuration root with no symlinked or

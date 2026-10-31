@@ -30,6 +30,9 @@ func Serve(ctx context.Context, root string, stdout io.Writer) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	err = Run(ctx, cfg, rootLog, stdout)
 	stop()
+	if errors.Is(err, errRebuildNeeded) {
+		return execSelf(rootLog)
+	}
 	if err != nil {
 		var startupErr *Error
 		if errors.As(err, &startupErr) {
@@ -37,6 +40,26 @@ func Serve(ctx context.Context, root string, stdout io.Writer) error {
 		} else {
 			logFailure(log, "app.start.failed", "application startup failed", err)
 		}
+		return err
+	}
+	return nil
+}
+
+// execSelf replaces the current process with a fresh instance of this binary
+// carrying the same arguments and environment. It runs only after Run has
+// returned and joined every worker, so listeners and stores are fully closed
+// and the new process binds cleanly. It returns only on failure.
+func execSelf(log *config.Logger) error {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Error("app.restart.failed", "automatic restart failed: cannot locate executable", config.ErrorField(err))
+		return err
+	}
+	// The graceful shutdown already logged app.stopped with
+	// cleanup_reason=rebuild; no INFO event is emitted here because INFO
+	// belongs to the fixed activity/lifecycle catalog.
+	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+		log.Error("app.restart.failed", "automatic restart failed", config.ErrorField(err))
 		return err
 	}
 	return nil

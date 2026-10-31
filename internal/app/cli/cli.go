@@ -10,12 +10,19 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/api"
+	cliconfig "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/env"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/model"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/platforms"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/start"
-	clivault "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/vault"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -32,11 +39,16 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	fs := flag.NewFlagSet("oswald", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { usage(stderr) }
-	root := fs.String("root", config.OswaldHomeDir, "configuration root directory")
+	rootFlag := fs.String("root", "", "configuration root directory")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
+		return exitUsage
+	}
+	root, err := config.ResolveGlobalRoot(*rootFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
 		return exitUsage
 	}
 	rest := fs.Args()
@@ -46,17 +58,31 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	switch rest[0] {
 	case "setup":
-		return setup.Run(ctx, *root, rest[1:], stdout, stderr)
+		return setup.Run(ctx, root, rest[1:], stdout, stderr)
 	case "start":
-		return start.Run(ctx, *root, stdout)
+		return start.Run(ctx, root, stdout)
 	case "profile":
-		return profiles.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return profiles.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "mcp":
-		return mcp.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return mcp.Run(ctx, root, rest[1:], stdin, stdout, stderr)
+	case "providers":
+		return providers.Run(ctx, root, rest[1:], stdout, stderr)
+	case "model":
+		return model.Run(ctx, root, rest[1:], stdout, stderr)
+	case "api":
+		return api.Run(ctx, root, rest[1:], stdout, stderr)
+	case "platforms":
+		return platforms.Run(ctx, root, rest[1:], stdout, stderr)
 	case "gateway":
-		return gateway.Run(ctx, *root, rest[1:], stdout, stderr)
-	case "vault":
-		return clivault.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return gateway.Run(ctx, root, rest[1:], stdout, stderr)
+	case "tools":
+		return tools.Run(ctx, root, rest[1:], stdout, stderr)
+	case "runtime":
+		return runtime.Run(ctx, root, rest[1:], stdout, stderr)
+	case "config":
+		return cliconfig.Run(ctx, root, rest[1:], stdout, stderr)
+	case "env":
+		return env.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "help":
 		usage(stdout)
 		return exitOK
@@ -76,8 +102,20 @@ commands:
   profile create <name>  create a private operator profile
   profile delete <name>  delete an operator profile and its data
   mcp auth <server>      authorize a profile MCP server with OAuth
-  gateway <name> <enable|disable>
-                         enable or disable a gateway platform
-  vault add|list|rm      manage the profile credential vault
+  mcp list|add|edit|remove|test
+                         manage profile MCP servers
+  gateway show|set-multiplex|routes
+                         manage profile routing
+  platforms show|enable|disable|set
+                         manage gateway platforms
+  runtime show|set         read and safely modify runtime configuration
+  providers list|show|add|remove
+                         manage LLM providers
+  model show|set         manage model selection
+  tools show|set|unset      manage tool backends
+  api show|set-key|clear-key
+                         manage the OpenAI gateway credential
+  config show|get|validate   inspect configuration and validate files
+  env show|set|unset     manage the private profile environment
 `)
 }

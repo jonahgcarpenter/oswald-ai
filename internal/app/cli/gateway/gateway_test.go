@@ -15,19 +15,24 @@ const testConfig = `providers:
 model:
   provider: custom:fake
   default: fake/model
+gateway:
+  multiplex_profiles: true
+  profile_routes: []
 platforms:
   api:
     enabled: true
     extra:
       api_port: 12345
   discord:
-    enabled: false
+    enabled: true
     extra:
-      token: ""
+      token: test-token
   bluebubbles:
     enabled: false
     extra:
       server_url: http://127.0.0.1:1234
+      server_password: test-password
+      webhook_port: 8090
 `
 
 func writeConfig(t *testing.T, text string) string {
@@ -36,118 +41,117 @@ func writeConfig(t *testing.T, text string) string {
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(text), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(testConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
+	_ = text
 	return root
 }
 
-func enabledValue(t *testing.T, root, name string) string {
+func run(t *testing.T, root string, args ...string) (int, string, string) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, "config.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
-	idx := strings.Index(text, name+":")
-	if idx < 0 {
-		t.Fatalf("gateway %q missing after write", name)
-	}
-	rest := text[idx:]
-	en := strings.Index(rest, "enabled:")
-	if en < 0 {
-		t.Fatalf("enabled missing for %q", name)
-	}
-	line := rest[en:]
-	end := strings.Index(line, "\n")
-	return strings.TrimSpace(line[:end])
-}
-
-func TestEnableFlipsFalseToTrue(t *testing.T) {
-	root := writeConfig(t, testConfig)
 	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"discord", "enable"}, &stdout, &stderr); code != exitOK {
-		t.Fatalf("enable = %d, stderr=%s", code, stderr.String())
-	}
-	if got := enabledValue(t, root, "discord"); got != "enabled: true" {
-		t.Fatalf("discord flag = %q, want enabled: true", got)
-	}
-	if !strings.Contains(stdout.String(), "gateway discord enabled") {
-		t.Fatalf("stdout = %q", stdout.String())
+	code := Run(context.Background(), root, args, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestShowDisplaysGateway(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, out, _ := run(t, root, "show")
+	if code != 0 || !strings.Contains(out, "multiplex_profiles") {
+		t.Fatalf("show = %d %q", code, out)
 	}
 }
 
-func TestDisableFlipsTrueToFalse(t *testing.T) {
+func TestSetMultiplexRoundTrip(t *testing.T) {
 	root := writeConfig(t, testConfig)
-	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"api", "disable"}, &stdout, &stderr); code != exitOK {
-		t.Fatalf("disable = %d, stderr=%s", code, stderr.String())
+	code, out, stderr := run(t, root, "set-multiplex", "false")
+	if code != 0 {
+		t.Fatalf("set-multiplex = %d stderr=%s", code, stderr)
 	}
-	if got := enabledValue(t, root, "api"); got != "enabled: false" {
-		t.Fatalf("api flag = %q, want enabled: false", got)
+	if !strings.Contains(out, "multiplex_profiles") {
+		t.Fatalf("stdout = %q", out)
+	}
+	code, out, _ = run(t, root, "show")
+	if code != 0 || !strings.Contains(out, "false") {
+		t.Fatalf("show after set = %d %q", code, out)
 	}
 }
 
-func TestIdempotentAlreadyInState(t *testing.T) {
+func TestSetMultiplexRejectsBadBool(t *testing.T) {
 	root := writeConfig(t, testConfig)
-	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"api", "enable"}, &stdout, &stderr); code != exitOK {
-		t.Fatalf("enable = %d", code)
-	}
-	if !strings.Contains(stdout.String(), "already enabled") {
-		t.Fatalf("stdout = %q, want already enabled", stdout.String())
+	if code, _, _ := run(t, root, "set-multiplex", "maybe"); code != exitUsage {
+		t.Fatalf("bad bool = %d, want usage", code)
 	}
 }
 
-func TestRejectsUnknownGatewayAndAliases(t *testing.T) {
+func TestRoutesAddRemoveRoundTrip(t *testing.T) {
 	root := writeConfig(t, testConfig)
-	for _, name := range []string{"imessage", "IMESSAGE", "Discord", "frobnicate"} {
-		var stdout, stderr bytes.Buffer
-		if code := Run(context.Background(), root, []string{name, "enable"}, &stdout, &stderr); code != exitUsage {
-			t.Fatalf("gateway %q = %d, want usage", name, code)
+	code, out, stderr := run(t, root, "routes", "add", "--name", "r1", "--platform", "discord", "--user-id", "111", "--profile", "default")
+	if code != 0 {
+		t.Fatalf("routes add = %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "r1") {
+		t.Fatalf("stdout = %q", out)
+	}
+	code, out, _ = run(t, root, "routes", "list")
+	if code != 0 || !strings.Contains(out, "r1") {
+		t.Fatalf("routes list = %d %q", code, out)
+	}
+	code, _, stderr = run(t, root, "routes", "remove", "r1")
+	if code != 0 {
+		t.Fatalf("routes remove = %d stderr=%s", code, stderr)
+	}
+}
+
+func TestRoutesAddRejectsUnknownPlatform(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if code, _, _ := run(t, root, "routes", "add", "--name", "r1", "--platform", "imessage", "--user-id", "111", "--profile", "default"); code != exitUsage {
+		t.Fatalf("bad platform = %d, want usage", code)
+	}
+}
+
+func TestRoutesRemoveUnknown(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if code, _, _ := run(t, root, "routes", "remove", "missing"); code != exitError {
+		t.Fatalf("remove missing = %d, want error", code)
+	}
+}
+
+func TestRetiredSpellingRedirects(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	for _, args := range [][]string{{"discord", "enable"}, {"api", "disable"}} {
+		code, _, stderr := run(t, root, args...)
+		if code != exitUsage {
+			t.Fatalf("retired %v = %d, want usage", args, code)
+		}
+		if !strings.Contains(stderr, "oswald platforms") {
+			t.Fatalf("stderr missing redirect = %q", stderr)
 		}
 	}
 }
 
-func TestRejectsBadActionAndArgCounts(t *testing.T) {
+func TestNamedScopeReadsAllowedMutationsDenied(t *testing.T) {
 	root := writeConfig(t, testConfig)
-	for _, args := range [][]string{nil, {"discord"}, {"discord", "enable", "extra"}, {"discord", "on"}, {"enable", "discord"}} {
-		var stdout, stderr bytes.Buffer
-		if code := Run(context.Background(), root, args, &stdout, &stderr); code != exitUsage {
-			t.Fatalf("args %v = %d, want usage", args, code)
-		}
-	}
-}
-
-func TestMissingFileAndMissingGateway(t *testing.T) {
-	root := t.TempDir()
-	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"discord", "enable"}, &stdout, &stderr); code != exitError {
-		t.Fatalf("missing file = %d, want error", code)
-	}
-	full := writeConfig(t, testConfig)
-	// Remove one platform block: rewrite without bluebubbles.
-	trimmed := strings.Replace(testConfig, "  bluebubbles:\n    enabled: false\n    extra:\n      server_url: http://127.0.0.1:1234\n", "", 1)
-	if err := os.WriteFile(filepath.Join(full, "config.yaml"), []byte(trimmed), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := Run(context.Background(), full, []string{"bluebubbles", "enable"}, &stdout, &stderr); code != exitError {
-		t.Fatalf("missing gateway = %d, want error", code)
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	if code, _, _ := run(t, root, "show"); code != 0 {
+		t.Fatal("named-scope show rejected")
 	}
-}
-
-func TestPreservesOtherPlatforms(t *testing.T) {
-	root := writeConfig(t, testConfig)
-	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"discord", "enable"}, &stdout, &stderr); code != exitOK {
-		t.Fatal("enable failed")
+	if code, _, _ := run(t, root, "routes", "list"); code != 0 {
+		t.Fatal("named-scope routes list rejected")
 	}
-	if got := enabledValue(t, root, "api"); got != "enabled: true" {
-		t.Fatalf("api flag changed to %q", got)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "set-multiplex", "false"); code == 0 {
+		t.Fatal("named-scope set-multiplex accepted")
 	}
-	if got := enabledValue(t, root, "bluebubbles"); got != "enabled: false" {
-		t.Fatalf("bluebubbles flag changed to %q", got)
+	if code, _, _ := run(t, root, "routes", "add", "--name", "x", "--platform", "discord", "--user-id", "1", "--profile", "default"); code == 0 {
+		t.Fatal("named-scope routes add accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if string(before) != string(after) {
+		t.Fatal("global config mutated by rejected gateway command")
 	}
 }
