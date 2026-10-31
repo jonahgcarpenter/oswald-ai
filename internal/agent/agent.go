@@ -307,16 +307,24 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 	// The session-bound memory snapshot joins the operator soul in the system message.
 	// Code-owned operating directives sit between the soul and the memory blocks.
-	dynamicSystemPrompt := soulContent
-	if directives := operatingDirectivesBlock(); directives != "" {
-		if strings.TrimSpace(dynamicSystemPrompt) == "" {
-			dynamicSystemPrompt = directives
-		} else {
-			dynamicSystemPrompt += "\n\n" + directives
+	// Soul, file memory, and skills re-read before every model call so edits
+	// land mid-turn; the runtime/env/session suffix below is turn-stable.
+	directives := operatingDirectivesBlock()
+	buildDynamicPrompt := func(soulText string) string {
+		if strings.TrimSpace(soulText) == "" {
+			return directives
 		}
+		if directives == "" {
+			return soulText
+		}
+		return soulText + "\n\n" + directives
 	}
+	dynamicSystemPrompt := buildDynamicPrompt(soulContent)
 	speakerLine := ""
+	fileMemoryBlock := ""
+	fileUserContent, fileMemoryContent := "", ""
 	contextBlock := ""
+	suffixBlocks := ""
 	sessionGeneration := 0
 	var sessionStartedAt time.Time
 	if a.userMemory != nil && !request.Stateless {
@@ -364,16 +372,18 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		contextBlock = renderFileMemory(userContent, memoryContent)
+		fileMemoryBlock = contextBlock
+		fileUserContent, fileMemoryContent = userContent, memoryContent
 		reqLog.Debug("agent.memory.files.loaded", "loaded private memory files", config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()))
 	}
 	appendContext := func(block string) {
 		if block == "" {
 			return
 		}
-		if strings.TrimSpace(contextBlock) == "" {
-			contextBlock = block
+		if strings.TrimSpace(suffixBlocks) == "" {
+			suffixBlocks = block
 		} else {
-			contextBlock += "\n\n" + block
+			suffixBlocks += "\n\n" + block
 		}
 	}
 	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway))
@@ -382,6 +392,16 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
 	}
 	appendContext(platformNotes(gateway))
+	joinContext := func(blocks ...string) string {
+		var kept []string
+		for _, block := range blocks {
+			if strings.TrimSpace(block) != "" {
+				kept = append(kept, block)
+			}
+		}
+		return strings.Join(kept, "\n\n")
+	}
+	contextBlock = joinContext(fileMemoryBlock, suffixBlocks)
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
@@ -456,14 +476,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// The skills index joins the trusted context only when its tool is
 	// offered: an index without a load path would be a dangling pointer.
 	// It prepends above memory so procedures are visible before personal notes.
-	skillOffered := catalogHas(initialCatalog, toolskill.Name)
-	if skillBlocks := strings.TrimSpace(strings.TrimSpace(a.skillsGuidanceBlock(skillOffered)) + "\n\n" + strings.TrimSpace(a.skillsIndexBlock(gateway, skillOffered))); skillBlocks != "" {
-		if strings.TrimSpace(contextBlock) == "" {
-			contextBlock = skillBlocks
-		} else {
-			contextBlock = skillBlocks + "\n\n" + contextBlock
-		}
+	buildSkillBlocks := func(offered bool) string {
+		return strings.TrimSpace(strings.TrimSpace(a.skillsGuidanceBlock(offered)) + "\n\n" + strings.TrimSpace(a.skillsIndexBlock(gateway, offered)))
 	}
+	skillOffered := catalogHas(initialCatalog, toolskill.Name)
+	skillBlocks := buildSkillBlocks(skillOffered)
+	contextBlock = joinContext(skillBlocks, fileMemoryBlock, suffixBlocks)
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
@@ -576,6 +594,60 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 
+	// refreshPrompt re-reads operator-managed prompt sources before every
+	// model call so soul, file-memory, and skill edits land mid-turn instead
+	// of waiting for a new session. It patches messages[0] only when
+	// something changed and best-effort writes the file-memory snapshot
+	// through so later turns in the same session keep the update. Re-read
+	// failures keep the prior prompt and never fail the turn.
+	refreshPrompt := func(skillOffered bool, tools []llm.Tool) {
+		changed := false
+		if a.soul != nil {
+			if soulNew, err := a.soul.Read(ctx, senderID); err != nil {
+				reqLog.Warn("agent.soul.refresh_failed", "failed to re-read soul file", config.F("status", "degraded"), config.ErrorField(err))
+			} else if soulNew != soulContent {
+				soulContent = soulNew
+				dynamicSystemPrompt = buildDynamicPrompt(soulContent)
+				changed = true
+			}
+		}
+		if a.fileMemory != nil && !request.SkipMemory {
+			if userNew, memNew, err := a.fileMemory.Read(ctx, senderID); err != nil {
+				reqLog.Warn("agent.memory.files.refresh_failed", "failed to re-read private memory files", config.F("status", "degraded"), config.ErrorField(err))
+			} else if userNew != fileUserContent || memNew != fileMemoryContent {
+				fileUserContent, fileMemoryContent = userNew, memNew
+				fileMemoryBlock = renderFileMemory(userNew, memNew)
+				changed = true
+				if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
+					if _, _, err := a.userMemory.UpdateSessionFileMemory(ctx, senderID, sessionKey, sessionGeneration, userNew, memNew); err != nil {
+						reqLog.Warn("agent.memory.files.snapshot_refresh_failed", "failed to persist refreshed file memory snapshot", config.F("status", "degraded"), config.ErrorField(err))
+					}
+				}
+			}
+		}
+		if skillNew := buildSkillBlocks(skillOffered); skillNew != skillBlocks {
+			skillBlocks = skillNew
+			changed = true
+		}
+		if !changed {
+			return
+		}
+		contextBlock = joinContext(skillBlocks, fileMemoryBlock, suffixBlocks)
+		if len(messages) > 0 && messages[0].Role == "system" {
+			if strings.TrimSpace(contextBlock) == "" {
+				messages[0].Content = dynamicSystemPrompt
+			} else {
+				messages[0].Content = dynamicSystemPrompt + "\n\n" + contextBlock
+			}
+		}
+		reqLog.Debug("agent.context.refreshed", "refreshed system prompt mid-turn",
+			config.F("soul_chars", len([]rune(soulContent))),
+			config.F("user_chars", len([]rune(fileUserContent))),
+			config.F("memory_chars", len([]rune(fileMemoryContent))),
+			config.F("skill_chars", len([]rune(skillBlocks))),
+			config.F("estimated", tokenbudget.EstimateRequest(messages, tools)))
+	}
+
 	var lastResp *llm.ChatResponse
 	var outputAttachments []media.OutputAttachment
 	var generatedImages []requestctx.InputImage
@@ -630,6 +702,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		req.Tools = catalog.Tools
+		// Re-read soul, file memory, and skills before every model call so
+		// edits from prior tool executions land immediately.
+		refreshPrompt(catalogHas(catalog, toolskill.Name), catalog.Tools)
 		// Caller generation parameters apply to every provider call in the
 		// stateless loop; sampling/stop shape each model invocation equally.
 		req.Temperature, req.TopP = nil, nil

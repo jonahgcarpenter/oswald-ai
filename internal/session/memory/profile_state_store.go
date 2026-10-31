@@ -345,6 +345,37 @@ func (s *ProfileStore) SessionFileMemory(ctx context.Context, owner, key string,
 	return snapshot.User, snapshot.Memory, bound, tx.Commit()
 }
 
+// UpdateSessionFileMemory overwrites the frozen pair for an active
+// generation. It is generation-fenced like BindSessionFileMemory but
+// last-writer-wins so mid-turn prompt refreshes persist to later turns.
+func (s *ProfileStore) UpdateSessionFileMemory(ctx context.Context, owner, key string, generation int, user, notes string) (_ string, _ string, resultErr error) {
+	defer s.measure("memory.profile.snapshot.complete", time.Now(), &resultErr)
+	if !validFileSnapshot(user, notes) {
+		return "", "", errors.New("invalid profile file snapshot")
+	}
+	tx, err := s.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+	id, err := s.activeSession(ctx, tx, owner, key, generation)
+	if err != nil {
+		return "", "", err
+	}
+	encoded, err := json.Marshal(profileFileSnapshot{Version: 1, User: user, Memory: notes})
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, snapshotKey(id), string(encoded)); err != nil {
+		return "", "", err
+	}
+	snapshot, _, err := s.fileSnapshot(ctx, tx, id)
+	if err != nil {
+		return "", "", err
+	}
+	return snapshot.User, snapshot.Memory, tx.Commit()
+}
+
 // BindSessionFileMemory is generation-fenced, first-writer-wins, and atomic for
 // both files, including a captured empty pair.
 func (s *ProfileStore) BindSessionFileMemory(ctx context.Context, owner, key string, generation int, user, notes string) (_ string, _ string, resultErr error) {
