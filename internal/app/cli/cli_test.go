@@ -23,6 +23,8 @@ func TestRunUsageAndDispatch(t *testing.T) {
 		{"help command", []string{"help"}, exitOK},
 		{"profile without subcommand", []string{"profile"}, exitUsage},
 		{"gateway without subcommand", []string{"gateway"}, exitUsage},
+		{"platforms without subcommand", []string{"platforms"}, exitUsage},
+		{"retired gateway spelling", []string{"gateway", "discord", "enable"}, exitUsage},
 		{"runtime without subcommand", []string{"runtime"}, exitUsage},
 		{"tools without subcommand", []string{"tools"}, exitUsage},
 		{"unknown profile command", []string{"profile", "frobnicate"}, exitUsage},

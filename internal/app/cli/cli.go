@@ -18,6 +18,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/platforms"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
@@ -70,6 +71,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return model.Run(ctx, root, rest[1:], stdout, stderr)
 	case "api":
 		return api.Run(ctx, root, rest[1:], stdout, stderr)
+	case "platforms":
+		return platforms.Run(ctx, root, rest[1:], stdout, stderr)
 	case "gateway":
 		return gateway.Run(ctx, root, rest[1:], stdout, stderr)
 	case "tools":
@@ -101,8 +104,10 @@ commands:
   mcp auth <server>      authorize a profile MCP server with OAuth
   mcp list|add|edit|remove|test
                          manage profile MCP servers
-  gateway <name> <enable|disable>
-                         enable or disable a gateway platform
+  gateway show|set-multiplex|routes
+                         manage profile routing
+  platforms show|enable|disable|set
+                         manage gateway platforms
   runtime show|set         read and safely modify runtime configuration
   providers list|show|add|remove
                          manage LLM providers
