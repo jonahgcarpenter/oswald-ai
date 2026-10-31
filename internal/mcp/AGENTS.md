@@ -66,6 +66,15 @@ The boundary to internalize: endpoints, catalogs, commands, and credentials are 
 configuration — local HTTP endpoints and stdio commands run on operator trust, with no
 private-range filtering. This is not an SSRF/RCE boundary.
 
+## Management CLI
+
+`oswald mcp list|add|edit|remove|test` owns server lifecycle; all mutations run through staged
+validation with last-known-good tracking (visible to `oswald config diff/undo`). `list` never
+dials and never prints endpoints, headers, or secrets. `test` dials once via the same transport
+constructors as the runtime bridge. `remove` keeps `mcp-tokens/<server>.*` unless `--with-tokens`
+is passed. Flag secrets (`--oauth-client-secret`, header values) follow the `env set` posture:
+never echoed or logged.
+
 ## Tests
 
 Cover bridge shapes and limits against fake servers, projection acceptance vs whole-tool skips,

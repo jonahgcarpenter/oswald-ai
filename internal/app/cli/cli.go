@@ -84,6 +84,8 @@ commands:
   profile create <name>  create a private operator profile
   profile delete <name>  delete an operator profile and its data
   mcp auth <server>      authorize a profile MCP server with OAuth
+  mcp list|add|edit|remove|test
+                         manage profile MCP servers
   gateway <name> <enable|disable>
                          enable or disable a gateway platform
   config show|get|set|unset|diff|undo|reload
