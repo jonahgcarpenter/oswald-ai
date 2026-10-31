@@ -11,6 +11,9 @@ import (
 	"io"
 
 	cliconfig "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/api"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/model"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/env"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
@@ -60,6 +63,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return profiles.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "mcp":
 		return mcp.Run(ctx, root, rest[1:], stdin, stdout, stderr)
+	case "providers":
+		return providers.Run(ctx, root, rest[1:], stdout, stderr)
+	case "model":
+		return model.Run(ctx, root, rest[1:], stdout, stderr)
+	case "api":
+		return api.Run(ctx, root, rest[1:], stdout, stderr)
 	case "gateway":
 		return gateway.Run(ctx, root, rest[1:], stdout, stderr)
 	case "runtime":
@@ -92,6 +101,11 @@ commands:
   gateway <name> <enable|disable>
                          enable or disable a gateway platform
   runtime show|set         read and safely modify runtime configuration
+  providers list|show|add|remove
+                         manage LLM providers
+  model show|set         manage model selection
+  api show|set-key|clear-key
+                         manage the OpenAI gateway credential
   config show|get|set|unset|diff|undo|validate|reload
                          read and safely modify configuration
   env show|set|unset     manage the private profile environment
