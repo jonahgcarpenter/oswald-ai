@@ -25,9 +25,28 @@ interactive OAuth path. `platforms <name> <enable|disable>` flips only the globa
 `platforms.<name>.enabled` flag (`discord|bluebubbles|api`, exact match, no aliases) through the
 mediated write path (staged validation, last-known-good, atomic replace); `gateway` owns only
 `gateway.multiplex_profiles + profile_routes`. `config` is read-only (`show|get|validate`).
-`commands/` holds the `Definition/Request/Result/Handler` contract and
+Scoped groups mirror the top-level `config.yaml` keys one-to-one: `providers` → `providers.*`,
+`model` → `model.*`, `api` → `api.key`, `gateway` → `gateway.*`, `platforms` → `platforms.*`,
+`tools` → `tools.*`, `runtime` → `runtime.*`, `mcp` → `mcp_servers.*`. `--profile` is accepted
+(in any position) only where profiles may override (`providers`, `model`, `api`, `tools`, `mcp`);
+`gateway`, `platforms`, and `runtime` are global-only. `commands/` holds the `Definition/Request/Result/Handler` contract and
 `/name` parsing; `builtin/` registers the six public handlers (`/help`, `/new`, `/stop`,
 `/approve`, `/deny`, `/compact`).
+
+## Validation and reload (how edits take effect)
+
+Every mutating group funnels through `platform/config.CommitConfigCandidate`: the candidate is
+staged through the exact startup `Validate` pipeline in a temp root, and only on success are the
+previous bytes saved as last-known-good and the candidate atomically written. A rejected edit
+leaves the file byte-identical and reports a classified `config_*` diagnostic. After a successful
+write the command diffs pre/post effective configs with `config.ClassifyReload` and prints
+`applied live` vs `restart required to take effect`.
+
+The running server needs no signal: `startup/reload.go::Reloader` fingerprints every profile's
+`config.yaml`/`.env` on a 2s poll (500ms settle), then on change validates the candidate —
+invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps only the
+`runtime` log level and gateway admission policy (`config.reload.applied`); anything else logs
+`config.reload.restart_required` and waits for a restart. It never rewrites operator files.
 
 ## Behaviors worth knowing cold
 

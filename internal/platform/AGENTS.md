@@ -20,6 +20,17 @@ files must be private regular files. Profile names are bounded lowercase ASCII w
 reserved. The supported surface is defined by what `oswald setup` writes; former
 application-setting environment variables are not a deployment interface.
 
+All CLI mutation shares one mediated path (`CommitConfigCandidate`: staged startup `Validate`
+of the candidate in a temp root before anything touches disk, previous bytes kept as the
+last-known-good sibling, owner-only atomic replace). Failures leave disk untouched and report
+classified `config_*` diagnostics naming only the schema path, artifact, and variable — never
+values. `oswald config` itself is read-only (`show|get|validate`); each top-level `config.yaml`
+section has a scoped command group (`providers`, `model`, `api`, `gateway`, `platforms`,
+`tools`, `runtime`, `mcp_servers` via `oswald mcp`) that whitelists its own leaves, so no edit
+can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
+so each command reports `applied live` (runtime log level, admission allow/ban/mention rules)
+vs `restart required to take effect` (everything else).
+
 ## State handles (`database/`)
 
 `OpenState` initializes an empty profile `state.db` transactionally with one version-1

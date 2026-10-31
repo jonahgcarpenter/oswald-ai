@@ -77,9 +77,9 @@ func renameProfile(ctx context.Context, root string, args []string, stdout, stde
 // refuseRoutedProfile fails when gateway routes still target the profile.
 // Dangling routes fail startup, and routes must reference existing profile
 // directories, so neither repoint-first (new dir missing) nor rename-first
-// (dangling route) validates: the operator strips the route entries from
-// config.yaml, renames, then re-adds them for the new name. List items are
-// not addressable via `oswald config set`, so this is a direct config edit.
+// (dangling route) validates: the operator strips the route entries with
+// `oswald gateway routes remove`, renames, then re-adds them with
+// `oswald gateway routes add` for the new name.
 func refuseRoutedProfile(root, name string, stderr io.Writer) error {
 	cfg, err := config.LoadProfiles(root)
 	if err != nil {

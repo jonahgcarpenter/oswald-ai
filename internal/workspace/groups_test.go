@@ -126,7 +126,7 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 		}
 	}
 	writeDeny := map[string]string{
-		"config.yaml":                        "oswald config",
+		"config.yaml":                        "oswald providers",
 		"state.db":                           "system-managed",
 		filepath.Join("memories", "USER.md"): "memory tool",
 		filepath.Join("skills", "review", "SKILL.md"): "skill_manage tool",
@@ -157,7 +157,7 @@ func TestDenyMessagesGrouped(t *testing.T) {
 	if msg := DenyMessage("profiles/b/state.db", GroupProtected, false); !strings.Contains(msg, "session_search") {
 		t.Fatalf("cross state read: %q", msg)
 	}
-	if msg := DenyMessage("config.yaml", GroupProtected, true); !strings.Contains(msg, "oswald config") {
+	if msg := DenyMessage("config.yaml", GroupProtected, true); !strings.Contains(msg, "oswald providers|model|api|gateway|platforms|tools|runtime|mcp") {
 		t.Fatalf("config write: %q", msg)
 	}
 	if msg := DenyMessage("config.yaml", GroupProtected, false); !strings.Contains(msg, "oswald config show") {

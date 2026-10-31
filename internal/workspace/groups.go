@@ -8,8 +8,10 @@ import (
 
 // Same-trust file groups. Profiles within one install share trust — true
 // isolation means a separate container. Secrets and operator configuration
-// (config.yaml, .env) stay sealed everywhere: read and write them only
-// through `oswald config` / `oswald env` via terminal. Sessions stay fenced
+// (config.yaml, .env) stay sealed everywhere: inspect config.yaml through
+// `oswald config show|get` and edit it through the scoped config groups
+// (`oswald providers|model|api|gateway|platforms|tools|runtime|mcp`);
+// .env goes through `oswald env`. Sessions stay fenced
 // by state.db; everything else is readable, with writes gated by group.
 type Group int
 
@@ -51,7 +53,7 @@ func DenyMessage(rel string, group Group, write bool) string {
 		}
 		if filepath.Base(rel) == "config.yaml" {
 			if write {
-				return "Write denied: '" + rel + "' is protected and cannot be written directly; use `oswald config set|unset|undo` via terminal."
+				return "Write denied: '" + rel + "' is protected and cannot be written directly; edit via the scoped terminal groups (`oswald providers|model|api|gateway|platforms|tools|runtime|mcp`), never by hand."
 			}
 			return "Access denied: '" + rel + "' is protected and cannot be read directly; use `oswald config show|get` via terminal."
 		}

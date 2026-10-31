@@ -68,8 +68,10 @@ private-range filtering. This is not an SSRF/RCE boundary.
 
 ## Management CLI
 
-`oswald mcp list|add|edit|remove|test` owns server lifecycle; all mutations run through staged
-validation with last-known-good tracking (visible to `oswald config diff/undo`). `list` never
+`oswald mcp list|add|edit|remove|test` owns server lifecycle; all mutations run through the
+mediated write path (staged validation before write, previous bytes kept as last-known-good
+beside the file, atomic replace) — there is no generic `config set`; `oswald config` is
+read-only (`show|get|validate`). `list` never
 dials and never prints endpoints, headers, or secrets. `test` dials once via the same transport
 constructors as the runtime bridge. `remove` keeps `mcp-tokens/<server>.*` unless `--with-tokens`
 is passed. Flag secrets (`--oauth-client-secret`, header values) follow the `env set` posture:
