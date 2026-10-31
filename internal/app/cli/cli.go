@@ -15,6 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/start"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -61,6 +62,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return mcp.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "gateway":
 		return gateway.Run(ctx, root, rest[1:], stdout, stderr)
+	case "runtime":
+		return runtime.Run(ctx, root, rest[1:], stdout, stderr)
 	case "config":
 		return cliconfig.Run(ctx, root, rest[1:], stdout, stderr)
 	case "env":
@@ -88,7 +91,8 @@ commands:
                          manage profile MCP servers
   gateway <name> <enable|disable>
                          enable or disable a gateway platform
-  config show|get|set|unset|diff|undo|reload
+  runtime show|set         read and safely modify runtime configuration
+  config show|get|set|unset|diff|undo|validate|reload
                          read and safely modify configuration
   env show|set|unset     manage the private profile environment
 `)
