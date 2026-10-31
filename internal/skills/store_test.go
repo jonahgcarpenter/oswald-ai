@@ -96,18 +96,26 @@ func TestViewFilePathConfinement(t *testing.T) {
 
 func TestCreateAndUpdate(t *testing.T) {
 	store := NewStore(t.TempDir())
-	skill, err := store.Create("Fresh-Skill", "Does fresh things", "Step one.\n")
+	skill, err := store.Create("Fresh-Skill", "Does fresh things", "Step one.\n", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if skill.LoadName != "fresh-skill" {
 		t.Fatalf("unexpected created skill: %+v", skill)
 	}
-	if _, err := store.Create("fresh-skill", "Again", "Body\n"); err == nil {
+	if skill.Category != "general" {
+		t.Fatalf("top-level skill category = %q, want general", skill.Category)
+	}
+	if _, err := store.Create("fresh-skill", "Again", "Body\n", ""); err == nil {
 		t.Fatal("expected duplicate create to fail")
 	}
-	if _, err := store.Create("Bad Name!", "desc", "body"); err == nil {
+	if _, err := store.Create("Bad Name!", "desc", "body", ""); err == nil {
 		t.Fatal("expected invalid slug to fail")
+	}
+	for _, evil := range []string{"../escape", "a/b", "/abs", ".", ".."} {
+		if _, err := store.Create("evil-skill", "desc", "body", evil); err == nil {
+			t.Fatalf("expected invalid category %q to fail", evil)
+		}
 	}
 	updated, err := store.Update("fresh-skill", "Step one.", "Step one, then two.")
 	if err != nil {
@@ -122,5 +130,31 @@ func TestCreateAndUpdate(t *testing.T) {
 	}
 	if _, err := store.Update("fresh-skill", "missing needle", "x"); err == nil {
 		t.Fatal("expected non-matching old_text to fail")
+	}
+}
+
+func TestCreateWithCategory(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	skill, err := store.Create("Ship", "Ship fast", "Ship it.\n", "Code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skill.Category != "code" {
+		t.Fatalf("category = %q, want code", skill.Category)
+	}
+	if _, err := os.Stat(filepath.Join(root, "code", "ship", "SKILL.md")); err != nil {
+		t.Fatalf("categorized skill file missing: %v", err)
+	}
+	index := store.Index("")
+	if !strings.Contains(index, "code:") || !strings.Contains(index, "- ship: Ship fast") {
+		t.Fatalf("index missing categorized row:\n%s", index)
+	}
+	viewed, err := store.View("ship", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viewed.Category != "code" || !strings.Contains(viewed.Body, "Ship it.") {
+		t.Fatalf("unexpected categorized view: %+v", viewed)
 	}
 }
