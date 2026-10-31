@@ -60,48 +60,34 @@ func TestShowRedactsSecrets(t *testing.T) {
 	}
 }
 
-func TestSetGetUndoRoundTrip(t *testing.T) {
+func TestGetPath(t *testing.T) {
 	root := testRoot(t)
-	if code, _, stderr := run(t, root, "set", "runtime.log_level", "debug"); code != 0 {
-		t.Fatalf("set failed: %s", stderr)
-	}
 	code, out, _ := run(t, root, "get", "runtime.log_level")
-	if code != 0 || !strings.Contains(out, "debug") {
-		t.Fatalf("get failed: %d %q", code, out)
-	}
-	code, out, _ = run(t, root, "diff")
-	if code != 0 || strings.Contains(out, "no changes") {
-		t.Fatalf("diff missing changes: %d %q", code, out)
-	}
-	if code, _, stderr := run(t, root, "undo"); code != 0 {
-		t.Fatalf("undo failed: %s", stderr)
-	}
-	code, out, _ = run(t, root, "get", "runtime.log_level")
 	if code != 0 || !strings.Contains(out, "info") {
-		t.Fatalf("undo did not restore: %d %q", code, out)
+		t.Fatalf("get failed: %d %q", code, out)
 	}
 }
 
-func TestSetInvalidLeavesFileUntouched(t *testing.T) {
+func TestRetiredMutationsRejected(t *testing.T) {
 	root := testRoot(t)
-	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
-	code, _, stderr := run(t, root, "set", "model.context_length", "not-a-number")
-	if code == 0 {
-		t.Fatal("invalid set accepted")
+	for _, args := range [][]string{
+		{"set", "runtime.log_level", "debug"},
+		{"unset", "runtime.log_level"},
+		{"diff"},
+		{"undo"},
+		{"reload"},
+	} {
+		if code, _, _ := run(t, root, args...); code != exitUsage {
+			t.Fatalf("%v = %d, want usage", args, code)
+		}
 	}
-	if stderr == "" || strings.Contains(stderr, "not-a-number") {
-		t.Fatalf("bad diagnostic: %q", stderr)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "set", "runtime.log_level", "debug"); code == exitOK {
+		t.Fatal("retired set wrote")
 	}
 	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if !bytes.Equal(before, after) {
-		t.Fatal("file mutated on failed validation")
-	}
-}
-
-func TestSetUnknownKeyRejected(t *testing.T) {
-	root := testRoot(t)
-	if code, _, _ := run(t, root, "set", "unknown_section.foo", "bar"); code == 0 {
-		t.Fatal("unknown key accepted")
+		t.Fatal("retired command mutated the file")
 	}
 }
 
@@ -124,15 +110,26 @@ func TestProfileResolvesFromOswaldHome(t *testing.T) {
 	}
 }
 
-func TestReloadValidates(t *testing.T) {
+func TestProfileFlagAnyPosition(t *testing.T) {
 	root := testRoot(t)
-	if code, _, _ := run(t, root, "reload"); code != 0 {
-		t.Fatal("valid reload rejected")
+	if code, _, _ := run(t, root, "--profile", "default", "get", "runtime.log_level"); code != 0 {
+		t.Fatal("profile-first get rejected")
+	}
+	if code, _, _ := run(t, root, "get", "runtime.log_level", "--profile", "default"); code != 0 {
+		t.Fatal("profile-last get rejected")
+	}
+}
+
+func TestValidateAcceptsAndRejects(t *testing.T) {
+	root := testRoot(t)
+	code, out, _ := run(t, root, "validate")
+	if code != 0 || !strings.Contains(out, "configuration valid") {
+		t.Fatalf("valid validate = %d %q", code, out)
 	}
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("platforms: []\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, _ := run(t, root, "reload"); code == 0 {
-		t.Fatal("invalid reload accepted")
+	if code, _, _ := run(t, root, "validate"); code == 0 {
+		t.Fatal("invalid validate accepted")
 	}
 }

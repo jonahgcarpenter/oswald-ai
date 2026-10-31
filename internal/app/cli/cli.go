@@ -10,19 +10,19 @@ import (
 	"fmt"
 	"io"
 
-	cliconfig "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/api"
-	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/model"
-	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
+	cliconfig "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/env"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/model"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/platforms"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/start"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -115,8 +115,7 @@ commands:
   tools show|set|unset      manage tool backends
   api show|set-key|clear-key
                          manage the OpenAI gateway credential
-  config show|get|set|unset|diff|undo|validate|reload
-                         read and safely modify configuration
+  config show|get|validate   inspect configuration and validate files
   env show|set|unset     manage the private profile environment
 `)
 }
