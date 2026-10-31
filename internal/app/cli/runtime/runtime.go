@@ -116,7 +116,7 @@ func setCmd(root string, args []string, stdout, stderr io.Writer) int {
 		reportRuntimeError(stderr, err)
 		return exitError
 	}
-	effect := "restart required to take effect"
+	effect := "restarting service to apply"
 	if oldCfg != nil {
 		if nextCfg, err := config.Validate(abs); err == nil {
 			if config.ReloadEffect(oldCfg, nextCfg) == "live" {

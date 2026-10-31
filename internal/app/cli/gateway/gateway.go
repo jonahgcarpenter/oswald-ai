@@ -398,7 +398,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restart required to take effect"
+	return "restarting service to apply"
 }
 
 // reportGatewayError prints a classified diagnostic without values.

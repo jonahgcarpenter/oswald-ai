@@ -80,8 +80,8 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 func platformsUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald platforms <show|enable|disable|set> [options]")
 	fmt.Fprintln(w, "  show [name]                platforms section, secrets redacted")
-	fmt.Fprintln(w, "  enable <name>              enable a gateway platform (restart required)")
-	fmt.Fprintln(w, "  disable <name>             disable a gateway platform (restart required)")
+	fmt.Fprintln(w, "  enable <name>              enable a gateway platform (applies automatically)")
+	fmt.Fprintln(w, "  disable <name>             disable a gateway platform (applies automatically)")
 	fmt.Fprintln(w, "  set discord --token REF [--require-mention BOOL] [--allow IDS] [--ban IDS]")
 	fmt.Fprintln(w, "  set bluebubbles --server-url URL --server-password REF [listener flags]")
 	fmt.Fprintln(w, "                             [--require-mention BOOL] [--allow IDS] [--ban IDS]")
@@ -227,7 +227,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restart required to take effect"
+	return "restarting service to apply"
 }
 
 // reportPlatformsError prints a classified diagnostic without values.
