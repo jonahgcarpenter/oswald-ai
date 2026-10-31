@@ -34,11 +34,16 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	fs := flag.NewFlagSet("oswald", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { usage(stderr) }
-	root := fs.String("root", config.OswaldHomeDir, "configuration root directory")
+	rootFlag := fs.String("root", "", "configuration root directory")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
+		return exitUsage
+	}
+	root, err := config.ResolveGlobalRoot(*rootFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
 		return exitUsage
 	}
 	rest := fs.Args()
@@ -48,21 +53,21 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	switch rest[0] {
 	case "setup":
-		return setup.Run(ctx, *root, rest[1:], stdout, stderr)
+		return setup.Run(ctx, root, rest[1:], stdout, stderr)
 	case "start":
-		return start.Run(ctx, *root, stdout)
+		return start.Run(ctx, root, stdout)
 	case "profile":
-		return profiles.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return profiles.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "mcp":
-		return mcp.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return mcp.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "gateway":
-		return gateway.Run(ctx, *root, rest[1:], stdout, stderr)
+		return gateway.Run(ctx, root, rest[1:], stdout, stderr)
 	case "config":
-		return cliconfig.Run(ctx, *root, rest[1:], stdout, stderr)
+		return cliconfig.Run(ctx, root, rest[1:], stdout, stderr)
 	case "env":
-		return env.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return env.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "vault":
-		return clivault.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+		return clivault.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "help":
 		usage(stdout)
 		return exitOK

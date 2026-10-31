@@ -26,7 +26,7 @@ const (
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	profile := fs.String("profile", "default", "operator profile owning the configuration")
+	profileFlag := fs.String("profile", "", "operator profile owning the configuration")
 	showPath := fs.String("path", "", "schema path limiting show output (config show only)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -40,7 +40,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		fmt.Fprintln(stderr, "oswald: --path applies to config show only")
 		return exitUsage
 	}
-	target, err := resolveTarget(root, *profile)
+	target, err := resolveTarget(root, *profileFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -123,9 +123,9 @@ type target struct {
 }
 
 func resolveTarget(root, profile string) (*target, error) {
-	name := profile
-	if name == "" {
-		name = "default"
+	name, err := config.ResolveProfile(profile)
+	if err != nil {
+		return nil, err
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {

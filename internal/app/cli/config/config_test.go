@@ -105,6 +105,25 @@ func TestSetUnknownKeyRejected(t *testing.T) {
 	}
 }
 
+func TestProfileResolvesFromOswaldHome(t *testing.T) {
+	root := testRoot(t)
+	bobYAML := strings.Replace(testConfig, "log_level: info", "log_level: debug", 1)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "bob", "config.yaml"), []byte(bobYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	code, out, _ := run(t, root, "get", "runtime.log_level")
+	if code != 0 || !strings.Contains(out, "debug") {
+		t.Fatalf("env-scoped get = %d %q", code, out)
+	}
+	if code, _, _ := run(t, root, "--profile", "alice", "get", "runtime.log_level"); code == 0 {
+		t.Fatal("cross-profile --profile accepted under OSWALD_HOME")
+	}
+}
+
 func TestReloadValidates(t *testing.T) {
 	root := testRoot(t)
 	if code, _, _ := run(t, root, "reload"); code != 0 {

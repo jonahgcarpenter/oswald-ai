@@ -652,7 +652,7 @@ func runScriptFile(ctx context.Context, r *Runner, script, workdir string, bound
 			env = append(env, "TMPDIR="+r.Scratch)
 		}
 		if r.Root != "" {
-			env = append(env, "OSWALD_WORKSPACE="+r.Root)
+			env = append(env, "OSWALD_WORKSPACE="+r.Root, "OSWALD_HOME="+r.Root)
 		}
 	}
 	cmd.Env = env

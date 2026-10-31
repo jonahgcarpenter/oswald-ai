@@ -66,13 +66,13 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "default")
-	// Same-profile: secrets sealed, everything else readable.
-	for _, raw := range []string{".env", ".env.local", "mcp-tokens/tok", "deploy.pem", "vault/credentials.json"} {
+	// Same-profile: secrets and operator config sealed, everything else readable.
+	for _, raw := range []string{".env", ".env.local", "config.yaml", "mcp-tokens/tok", "deploy.pem", "vault/credentials.json"} {
 		if _, _, err := ws.Resolve(raw); err == nil {
 			t.Fatalf("protected path allowed: %q", raw)
 		}
 	}
-	for _, raw := range []string{"config.yaml", "state.db", "SOUL.md", "memories/MEMORY.md", "cache/images/a.png", "cache/scratch/a.txt", "notes.md"} {
+	for _, raw := range []string{"state.db", "SOUL.md", "memories/MEMORY.md", "cache/images/a.png", "cache/scratch/a.txt", "notes.md"} {
 		if _, _, err := ws.Resolve(raw); err != nil {
 			t.Fatalf("read denied: %q: %v", raw, err)
 		}
@@ -85,11 +85,11 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 	}
 	for _, raw := range []string{"config.yaml", "state.db", "memories/MEMORY.md", "cache/images/a.png", ".env"} {
 		if _, _, err := ws.ResolveWrite(raw); err == nil {
-			t.Fatalf("system/protected write allowed: %q", raw)
+			t.Fatalf("protected write allowed: %q", raw)
 		}
 	}
-	// Cross-profile: readable except secrets and state.db.
-	for _, raw := range []string{"profiles/alice/SOUL.md", "profiles/alice/config.yaml", "profiles/alice/notes.md", "profiles/alice/memories/USER.md", "profiles/alice/cache/scratch/a.txt"} {
+	// Cross-profile: readable except secrets, operator config, and state.db.
+	for _, raw := range []string{"profiles/alice/SOUL.md", "profiles/alice/notes.md", "profiles/alice/memories/USER.md", "profiles/alice/cache/scratch/a.txt"} {
 		if _, _, err := ws.Resolve(raw); err != nil {
 			t.Fatalf("cross-profile read denied: %q: %v", raw, err)
 		}
@@ -97,7 +97,7 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 			t.Fatalf("cross-profile write allowed: %q", raw)
 		}
 	}
-	for _, raw := range []string{"profiles/alice/.env", "profiles/alice/state.db"} {
+	for _, raw := range []string{"profiles/alice/.env", "profiles/alice/config.yaml", "profiles/alice/state.db"} {
 		if _, _, err := ws.Resolve(raw); err == nil {
 			t.Fatalf("cross-profile secret allowed: %q", raw)
 		}
@@ -107,7 +107,7 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	named := NewWorkspace(namedRoot, "alice")
-	for _, raw := range []string{"config.yaml", "SOUL.md", "state.db", "notes.md"} {
+	for _, raw := range []string{"SOUL.md", "state.db", "notes.md"} {
 		if _, _, err := named.Resolve(raw); err != nil {
 			t.Fatalf("named read denied: %q: %v", raw, err)
 		}
@@ -721,13 +721,13 @@ func TestDenyMessagesCategorized(t *testing.T) {
 	}{
 		{"read", map[string]interface{}{"path": ".env.local"}, "protected"},
 		{"read", map[string]interface{}{"path": "profiles/alice/state.db"}, "session_search"},
-		{"read", map[string]interface{}{"path": "config.yaml"}, ""},
+		{"read", map[string]interface{}{"path": "config.yaml"}, "oswald config"},
 		{"read", map[string]interface{}{"path": "profiles/alice/x"}, ""},
 		{"read", map[string]interface{}{"path": "memories/MEMORY.md"}, ""},
 		{"read", map[string]interface{}{"path": "skills/review/SKILL.md"}, ""},
 		{"read", map[string]interface{}{"path": "SOUL.md"}, ""},
 		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, ""},
-		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "config_manage tool"},
+		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "oswald config"},
 		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "memory tool"},
 		{"write", map[string]interface{}{"path": "skills/review/SKILL.md", "content": "x"}, "skill_manage tool"},
 		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "protected"},

@@ -7,9 +7,10 @@ import (
 )
 
 // Same-trust file groups. Profiles within one install share trust — true
-// isolation means a separate container. Secrets stay sealed everywhere;
-// sessions stay fenced by state.db; everything else is readable, with
-// writes gated by group.
+// isolation means a separate container. Secrets and operator configuration
+// (config.yaml, .env) stay sealed everywhere: read and write them only
+// through `oswald config` / `oswald env` via terminal. Sessions stay fenced
+// by state.db; everything else is readable, with writes gated by group.
 type Group int
 
 const (
@@ -48,8 +49,17 @@ func DenyMessage(rel string, group Group, write bool) string {
 		if !write && isStateDBBase(filepath.Base(rel)) {
 			return "Access denied: " + rel + " is application-owned state and cannot be read directly; use session_search for conversation history."
 		}
+		if filepath.Base(rel) == "config.yaml" {
+			if write {
+				return "Write denied: '" + rel + "' is protected and cannot be written directly; use `oswald config set|unset|undo` via terminal."
+			}
+			return "Access denied: '" + rel + "' is protected and cannot be read directly; use `oswald config show|get` via terminal."
+		}
 		if base := filepath.Base(rel); base == ".env" || strings.HasPrefix(base, ".env.") {
-			return "Access denied: '" + rel + "' is protected and cannot be accessed directly; use the config_manage tool (env_show lists names, env_set/env_unset need operator approval)."
+			if write {
+				return "Write denied: '" + rel + "' is protected and cannot be written directly; use `oswald env set|unset` via terminal."
+			}
+			return "Access denied: '" + rel + "' is protected and cannot be accessed directly; use `oswald env show` via terminal (values are never printed)."
 		}
 		if write {
 			return "Write denied: '" + rel + "' is protected and cannot be written."
@@ -62,9 +72,6 @@ func DenyMessage(rel string, group Group, write bool) string {
 			}
 			if isTopLevelDir(rel, "skills") {
 				return "Skill write denied by policy — use the skill_manage tool; direct file edits bypass validation."
-			}
-			if filepath.Base(rel) == "config.yaml" {
-				return "Config write denied by policy — use the config_manage tool; direct file edits bypass validation."
 			}
 			if hasPathComponent(rel, "cache") {
 				return "Write denied: '" + rel + "' is managed cache; write temporary files under 'cache/scratch/'."
@@ -119,9 +126,6 @@ func Classify(abs, root string) Group {
 		}
 		return GroupAgent
 	}
-	if filepath.Base(abs) == "config.yaml" {
-		return GroupSystem
-	}
 	if !cross {
 		if underPath(abs, filepath.Join(root, "cache", "scratch")) {
 			return GroupAgent
@@ -156,11 +160,14 @@ func isStateDBBase(base string) bool {
 	return false
 }
 
-// isProtectedName reports secret-bearing names at any depth: dotenv files,
-// credential stores, and private keys. Callers classify basenames and the
-// mcp-tokens directory alike.
+// isProtectedName reports secret- or operator-bearing names at any depth:
+// dotenv files, profile configuration, credential stores, and private keys.
+// Callers classify basenames and the mcp-tokens directory alike.
 func isProtectedName(abs string) bool {
 	base := filepath.Base(abs)
+	if base == "config.yaml" {
+		return true
+	}
 	if base == ".env" || strings.HasPrefix(base, ".env") {
 		return true
 	}

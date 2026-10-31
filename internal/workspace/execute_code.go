@@ -91,6 +91,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 			"TMPDIR=" + scratch,
 			"OSWALD_WORKSPACE=" + ws.Root(),
 			"OSWALD_SCRATCH=" + scratch,
+			"OSWALD_HOME=" + ws.Root(),
 			"PYTHONDONTWRITEBYTECODE=1",
 		}, process.GitHubTokenEnv()...)
 		var buf bytes.Buffer

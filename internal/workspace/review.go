@@ -194,7 +194,7 @@ func reviewDangerous(ctx context.Context, ws *Workspace, pm *process.Manager, pr
 	}
 	switch reviewer.Review(ctx, command) {
 	case VerdictApprove:
-		return executeTerminalCommand(ctx, pm, requestID(ctx), command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote)
+		return executeTerminalCommand(ctx, pm, requestID(ctx), command, workdir, scratch, ws.Root(), timeout, background, persist, heartbeat, notifyNote)
 	case VerdictDeny:
 		return governance.Result{}, errors.New("blocked: dangerous command (" + reason + ") denied by security review")
 	default:

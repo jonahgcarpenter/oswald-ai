@@ -42,10 +42,10 @@ func TestScanConfinedWriteShell(t *testing.T) {
 		"echo x > " + bobSoul:                    "system-managed",
 		"echo x > " + filepath.Join(bob, ".env"): "protected",
 		"echo x > /tmp/outside.txt":              "system-managed",
-		"echo x > config.yaml":                   "config_manage tool",
+		"echo x > config.yaml":                   "oswald config",
 		"echo x > skills/review/SKILL.md":        "skill_manage tool",
-		"sed -i s/a/b/ config.yaml":              "config_manage tool",
-		"cp new.yaml config.yaml":                "config_manage tool",
+		"sed -i s/a/b/ config.yaml":              "oswald config",
+		"cp new.yaml config.yaml":                "oswald config",
 		"echo x | tee cache/foo":                 "cache/scratch",
 		"rm -rf cache/images":                    "cache/scratch",
 		"mkdir cache/scratch_go":                 "cache/scratch",
@@ -206,6 +206,7 @@ func TestScanProtectedReadShell(t *testing.T) {
 		"cat " + bobState:                   "session_search",
 		"cat .env":                          "protected",
 		"cat " + filepath.Join(bob, ".env"): "protected",
+		"cat config.yaml":                   "oswald config",
 		"cat /proc/self/environ":            "protected",
 	}
 	for cmd, want := range deny {
@@ -217,7 +218,6 @@ func TestScanProtectedReadShell(t *testing.T) {
 	}
 
 	allow := []string{
-		"cat config.yaml",
 		"cat " + filepath.Join(bob, "SOUL.md"),
 		"cat /etc/hostname",
 		"sqlite3 state.db \"SELECT id FROM sessions;\"",
@@ -239,7 +239,8 @@ func TestScanProtectedReadCode(t *testing.T) {
 	_, alice, bob := profileTree(t)
 
 	deny := map[string]string{
-		"open('.env').read()": "protected",
+		"open('.env').read()":                                   "protected",
+		"open('config.yaml').read()":                            "oswald config",
 		"open('" + filepath.Join(bob, "state.db") + "').read()": "session_search",
 		"open('" + filepath.Join(alice, ".env") + "').read()":   "protected",
 		"open('credentials.json').read()":                       "protected",

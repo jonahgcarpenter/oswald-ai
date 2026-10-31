@@ -51,5 +51,5 @@ func ExecuteApproved(ctx context.Context, ws *Workspace, pm *process.Manager, pe
 	if reason, blocked := ScanProtectedRead(pending.Command, pending.Workdir, ws.Root(), true); blocked {
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
-	return executeTerminalCommand(ctx, pm, pending.RequestID, pending.Command, pending.Workdir, pending.Scratch, pending.Timeout, pending.Background, pending.Persist, 0, "")
+	return executeTerminalCommand(ctx, pm, pending.RequestID, pending.Command, pending.Workdir, pending.Scratch, ws.Root(), pending.Timeout, pending.Background, pending.Persist, 0, "")
 }

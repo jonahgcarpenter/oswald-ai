@@ -20,7 +20,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
-	toolconfig "github.com/jonahgcarpenter/oswald-ai/internal/tools/config_manage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -124,10 +123,6 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(cfg.ProfileRoot))); err != nil {
 		return fmt.Errorf("register skill_manage tool: %w", err)
-	}
-
-	if err := reg.RegisterHandler(toolconfig.Name, governance.ToolPolicy{NormalizeArgs: normalizeConfigManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolconfig.NewHandler(cfg.ProfileRoot, cfg.ProfileName))); err != nil {
-		return fmt.Errorf("register config_manage tool: %w", err)
 	}
 
 	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}, registry.Handler(toolclarify.NewHandler())); err != nil {
@@ -396,23 +391,6 @@ func normalizeSessionSearchArgs(args map[string]interface{}) interface{} {
 	}
 	if raw, ok := args["exclude_session_ids"].([]interface{}); ok {
 		normalized["exclude_session_ids_count"] = len(raw)
-	}
-	return normalized
-}
-
-// normalizeConfigManageArgs canonicalizes config selectors so repeated
-// identical reads collapse while distinct paths stay distinct. Proposed values
-// never survive normalization, only a hash.
-func normalizeConfigManageArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"action", "path", "name"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	if value, ok := args["value"].(string); ok {
-		sum := sha256.Sum256([]byte(value))
-		normalized["value_hash"] = hex.EncodeToString(sum[:])
 	}
 	return normalized
 }

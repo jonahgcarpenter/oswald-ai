@@ -148,13 +148,13 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 		if dangerous, reason := DetectDangerous(command); dangerous {
 			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, reason)
 		}
-		return executeTerminalCommand(ctx, pm, requestID(ctx), command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote)
+		return executeTerminalCommand(ctx, pm, requestID(ctx), command, workdir, scratch, ws.Root(), timeout, background, persist, heartbeat, notifyNote)
 	}
 }
 
 // executeTerminalCommand runs the background, promotion, and foreground
 // execution paths shared by direct calls and reviewer-approved replays.
-func executeTerminalCommand(ctx context.Context, pm *process.Manager, ownerRequest, command, workdir, scratch string, timeout int, background, persist bool, heartbeat int, notifyNote string) (governance.Result, error) {
+func executeTerminalCommand(ctx context.Context, pm *process.Manager, ownerRequest, command, workdir, scratch, home string, timeout int, background, persist bool, heartbeat int, notifyNote string) (governance.Result, error) {
 	if background {
 		if pm == nil {
 			return governance.Result{}, errors.New("process manager is unavailable")
@@ -194,7 +194,7 @@ func executeTerminalCommand(ctx context.Context, pm *process.Manager, ownerReque
 	var code int
 	var runErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		output, code, runErr = runShell(ctx, command, workdir, scratch, timeout)
+		output, code, runErr = runShell(ctx, command, workdir, scratch, home, timeout)
 		if runErr == nil || code >= 0 {
 			break
 		}
@@ -209,7 +209,7 @@ func executeTerminalCommand(ctx context.Context, pm *process.Manager, ownerReque
 	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 }
 
-func runShell(ctx context.Context, command, dir, scratch string, timeoutSecs int) (string, int, error) {
+func runShell(ctx context.Context, command, dir, scratch, home string, timeoutSecs int) (string, int, error) {
 	shell, err := shellPath()
 	if err != nil {
 		return "", -1, errors.New("shell is unavailable")
@@ -230,6 +230,7 @@ func runShell(ctx context.Context, command, dir, scratch string, timeoutSecs int
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + dir,
 		"OSWALD_SCRATCH=" + scratch,
+		"OSWALD_HOME=" + home,
 	}, process.GitHubTokenEnv()...)
 	var buf bytes.Buffer
 	cmd.Stdout = &limitedWriter{buf: &buf, limit: maxTerminalOutput}

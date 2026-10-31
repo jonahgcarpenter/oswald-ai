@@ -88,3 +88,24 @@ func TestSetInvalidNameRejected(t *testing.T) {
 		t.Fatal("invalid name accepted")
 	}
 }
+
+func TestProfileResolvesFromOswaldHome(t *testing.T) {
+	root := testRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "bob", ".env"), []byte("BOB_KEY=bobval\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	code, out, _ := run(t, root, "show")
+	if code != 0 || !strings.Contains(out, "BOB_KEY") {
+		t.Fatalf("env-scoped show = %d %q", code, out)
+	}
+	if strings.Contains(out, "bobval") {
+		t.Fatal("value leaked in env-scoped show")
+	}
+	if code, _, _ := run(t, root, "--profile", "alice", "show"); code == 0 {
+		t.Fatal("cross-profile --profile accepted under OSWALD_HOME")
+	}
+}

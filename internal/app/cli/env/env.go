@@ -26,7 +26,7 @@ func Run(_ context.Context, root string, args []string, stdin io.Reader, stdout,
 	_ = stdin
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	profile := fs.String("profile", "default", "operator profile owning the environment file")
+	profileFlag := fs.String("profile", "", "operator profile owning the environment file")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -35,7 +35,7 @@ func Run(_ context.Context, root string, args []string, stdin io.Reader, stdout,
 		envUsage(stderr)
 		return exitUsage
 	}
-	target, err := resolveTarget(root, *profile)
+	target, err := resolveTarget(root, *profileFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -83,9 +83,9 @@ type target struct {
 }
 
 func resolveTarget(root, profile string) (*target, error) {
-	name := profile
-	if name == "" {
-		name = "default"
+	name, err := config.ResolveProfile(profile)
+	if err != nil {
+		return nil, err
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
