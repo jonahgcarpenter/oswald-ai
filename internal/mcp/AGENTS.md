@@ -45,7 +45,8 @@ headers, 32 env entries; map values ≤8,192 bytes, no newlines or NULs. stdio t
 bounded args/cwd/`env` and forbids transport/headers/auth keys; HTTP defaults to
 `streamable_http` (SSE is the opt-in) and may carry static headers plus tool include/exclude
 filters (empty include allows all, exclude wins). OAuth exists only on streamable HTTP and owns
-the `Authorization` header — a static one alongside is rejected. Restart reloads configuration;
+the `Authorization` header — a static one alongside is rejected. An automatic restart
+reloads configuration;
 inherited servers become independent profile-owned connections, with no runtime global
 administration and no encryption key.
 

@@ -29,7 +29,8 @@ section has a scoped command group (`providers`, `model`, `api`, `gateway`, `pla
 `tools`, `runtime`, `mcp_servers` via `oswald mcp`) that whitelists its own leaves, so no edit
 can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
 so each command reports `applied live` (runtime log level, admission allow/ban/mention rules)
-vs `restart required to take effect` (everything else).
+vs `restarting service to apply` (everything else, picked up by the server's supervised
+rebuild within seconds).
 
 ## State handles (`database/`)
 

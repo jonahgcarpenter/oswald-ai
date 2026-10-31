@@ -94,7 +94,7 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald mcp auth <server>`               | Interactively authorize an MCP server (browser or device flow).                                                 |
 | `oswald gateway show\|set-multiplex`      | Inspect routing and toggle multi-profile routing.                                                               |
 | `oswald gateway routes list\|add\|remove` | Manage `gateway.profile_routes` (add is staged-validated).                                                      |
-| `oswald platforms show\|enable\|disable`  | Inspect gateway platforms and flip `platforms.<name>.enabled` (restart to apply).                               |
+| `oswald platforms show\|enable\|disable`  | Inspect gateway platforms and flip `platforms.<name>.enabled` (service restarts automatically to apply).       |
 | `oswald platforms set <platform> [flags]` | Set listener/admission leaves for `discord`, `bluebubbles`, or `api` (admission applies live).                 |
 | `oswald providers list\|show\|add\|remove` | Manage LLM providers (`--profile` allowed).                                                                     |
 | `oswald model show\|set`                  | Manage model selection: `--provider`, `--default`, `--context-length` (`--profile` allowed).                    |
@@ -105,9 +105,9 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |
 
 Every mutating group validates through the staged startup pipeline before writing, so a rejected
-edit leaves files untouched; each command reports `applied live` vs `restart required to take
-effect`. The running server picks up log-level and admission changes automatically and logs
-`restart_required` for anything else.
+edit leaves files untouched; each command reports `applied live` vs `restarting service to
+apply`. Log-level and admission changes apply live; anything else triggers a supervised
+automatic restart of the service within seconds — no manual restart, no operator signal.
 
 ## Documentation
 
