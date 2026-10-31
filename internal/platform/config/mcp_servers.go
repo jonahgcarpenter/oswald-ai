@@ -94,15 +94,10 @@ func RemoveMCPServer(root, profile, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := StageValidateConfig(root, configPath, candidate); err != nil {
+	if err := CommitConfigCandidate(root, configPath, candidate, orig); err != nil {
 		return false, err
 	}
-	if len(orig) > 0 {
-		if err := SaveLastKnownGood(configPath, orig); err != nil {
-			return false, errors.New("configuration file unavailable")
-		}
-	}
-	return true, AtomicWritePrivateFile(configPath, candidate)
+	return true, nil
 }
 
 // mutateMCPServer loads the managed document, applies mutate to the named
@@ -157,15 +152,7 @@ func mutateMCPServer(root, profile, name string, mustExist bool, mutate func(mcp
 	if err != nil {
 		return err
 	}
-	if err := StageValidateConfig(root, configPath, candidate); err != nil {
-		return err
-	}
-	if len(orig) > 0 {
-		if err := SaveLastKnownGood(configPath, orig); err != nil {
-			return errors.New("configuration file unavailable")
-		}
-	}
-	return AtomicWritePrivateFile(configPath, candidate)
+	return CommitConfigCandidate(root, configPath, candidate, orig)
 }
 
 // mcpServersNode returns the mcp_servers mapping node, or nil when absent.

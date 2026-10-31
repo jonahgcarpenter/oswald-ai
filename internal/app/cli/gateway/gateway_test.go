@@ -21,13 +21,15 @@ platforms:
     extra:
       api_port: 12345
   discord:
-    enabled: false
+    enabled: true
     extra:
-      token: ""
+      token: test-token
   bluebubbles:
     enabled: false
     extra:
       server_url: http://127.0.0.1:1234
+      server_password: test-password
+      webhook_port: 8090
 `
 
 func writeConfig(t *testing.T, text string) string {
@@ -66,14 +68,17 @@ func enabledValue(t *testing.T, root, name string) string {
 func TestEnableFlipsFalseToTrue(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"discord", "enable"}, &stdout, &stderr); code != exitOK {
+	if code := Run(context.Background(), root, []string{"bluebubbles", "enable"}, &stdout, &stderr); code != exitOK {
 		t.Fatalf("enable = %d, stderr=%s", code, stderr.String())
 	}
-	if got := enabledValue(t, root, "discord"); got != "enabled: true" {
-		t.Fatalf("discord flag = %q, want enabled: true", got)
+	if got := enabledValue(t, root, "bluebubbles"); got != "enabled: true" {
+		t.Fatalf("flag = %q, want enabled: true", got)
 	}
-	if !strings.Contains(stdout.String(), "gateway discord enabled") {
+	if !strings.Contains(stdout.String(), "gateway bluebubbles enabled") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "restart required") {
+		t.Fatalf("stdout missing restart hint = %q", stdout.String())
 	}
 }
 
@@ -86,6 +91,57 @@ func TestDisableFlipsTrueToFalse(t *testing.T) {
 	if got := enabledValue(t, root, "api"); got != "enabled: false" {
 		t.Fatalf("api flag = %q, want enabled: false", got)
 	}
+}
+
+func TestEnableRejectsMissingCredential(t *testing.T) {
+	broken := strings.Replace(testConfig, "      token: test-token", `      token: ""`, 1)
+	broken = strings.Replace(broken, "  discord:\n    enabled: true", "  discord:\n    enabled: false", 1)
+	root := writeConfig(t, broken)
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), root, []string{"discord", "enable"}, &stdout, &stderr); code != exitError {
+		t.Fatalf("enable without credential = %d, want error", code)
+	}
+	if !strings.Contains(stderr.String(), "config_credential_missing") {
+		t.Fatalf("stderr missing classified code = %q", stderr.String())
+	}
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if got := enabledValue(t, root, "discord"); got != "enabled: false" {
+		t.Fatalf("file mutated on failed validation: %q", got)
+	}
+	_ = before
+	_ = stdout
+}
+
+func TestDisableLastGatewayRejected(t *testing.T) {
+	onlyAPI := `providers:
+  fake:
+    api: "http://127.0.0.1:9999/v1"
+model:
+  provider: custom:fake
+  default: fake/model
+platforms:
+  api:
+    enabled: true
+    extra:
+      api_port: 12345
+  discord:
+    enabled: false
+    extra:
+      token: test-token
+  bluebubbles:
+    enabled: false
+    extra:
+      server_url: http://127.0.0.1:1234
+`
+	root := writeConfig(t, onlyAPI)
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), root, []string{"api", "disable"}, &stdout, &stderr); code != exitError {
+		t.Fatalf("disable last gateway = %d, want error", code)
+	}
+	if !strings.Contains(stderr.String(), "config_gateway_unavailable") {
+		t.Fatalf("stderr missing gateway code = %q", stderr.String())
+	}
+	_ = stdout
 }
 
 func TestIdempotentAlreadyInState(t *testing.T) {
@@ -127,7 +183,7 @@ func TestMissingFileAndMissingGateway(t *testing.T) {
 	}
 	full := writeConfig(t, testConfig)
 	// Remove one platform block: rewrite without bluebubbles.
-	trimmed := strings.Replace(testConfig, "  bluebubbles:\n    enabled: false\n    extra:\n      server_url: http://127.0.0.1:1234\n", "", 1)
+	trimmed := strings.Replace(testConfig, "  bluebubbles:\n    enabled: false\n    extra:\n      server_url: http://127.0.0.1:1234\n      server_password: test-password\n      webhook_port: 8090\n", "", 1)
 	if err := os.WriteFile(filepath.Join(full, "config.yaml"), []byte(trimmed), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -141,13 +197,13 @@ func TestMissingFileAndMissingGateway(t *testing.T) {
 func TestPreservesOtherPlatforms(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	var stdout, stderr bytes.Buffer
-	if code := Run(context.Background(), root, []string{"discord", "enable"}, &stdout, &stderr); code != exitOK {
-		t.Fatal("enable failed")
+	if code := Run(context.Background(), root, []string{"bluebubbles", "enable"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("enable failed: %s", stderr.String())
 	}
 	if got := enabledValue(t, root, "api"); got != "enabled: true" {
 		t.Fatalf("api flag changed to %q", got)
 	}
-	if got := enabledValue(t, root, "bluebubbles"); got != "enabled: false" {
-		t.Fatalf("bluebubbles flag changed to %q", got)
+	if got := enabledValue(t, root, "discord"); got != "enabled: true" {
+		t.Fatalf("discord flag changed to %q", got)
 	}
 }

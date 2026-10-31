@@ -71,6 +71,23 @@ func SaveLastKnownGood(path string, data []byte) error {
 	return AtomicWritePrivateFile(LastKnownGoodPath(path), data)
 }
 
+// CommitConfigCandidate stages a candidate document through the exact startup
+// validation pipeline before touching disk. On success the previous bytes are
+// kept as the last-known-good target and the candidate is atomically written.
+// On failure nothing touches disk. This is the single mediated write path all
+// CLI mutation groups must use so no edit can break the configuration.
+func CommitConfigCandidate(root, targetPath string, candidate, orig []byte) error {
+	if err := StageValidateConfig(root, targetPath, candidate); err != nil {
+		return err
+	}
+	if len(orig) > 0 {
+		if err := SaveLastKnownGood(targetPath, orig); err != nil {
+			return errors.New("configuration file unavailable")
+		}
+	}
+	return AtomicWritePrivateFile(targetPath, candidate)
+}
+
 // ReadLastKnownGood returns the undo target, or os.ErrNotExist when no
 // successful write has been recorded yet.
 func ReadLastKnownGood(path string) ([]byte, error) {

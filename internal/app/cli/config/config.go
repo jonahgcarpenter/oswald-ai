@@ -88,9 +88,9 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 			return exitUsage
 		}
 		return undo(target, stdout, stderr)
-	case "reload":
+	case "reload", "validate":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald config reload [--profile NAME]")
+			fmt.Fprintln(stderr, "usage: oswald config validate [--profile NAME]")
 			return exitUsage
 		}
 		return reload(target, stdout, stderr)
@@ -105,14 +105,14 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 }
 
 func configUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald config [--profile NAME] <show|get|set|unset|diff|undo|reload> [options]")
+	fmt.Fprintln(w, "usage: oswald config [--profile NAME] <show|get|set|unset|diff|undo|validate|reload> [options]")
 	fmt.Fprintln(w, "  show [--path P]      effective configuration, secrets redacted")
 	fmt.Fprintln(w, "  get <path>           print one schema path, secrets redacted")
 	fmt.Fprintln(w, "  set <path> <value>   validate and atomically write one leaf path")
 	fmt.Fprintln(w, "  unset <path>         clear one optional leaf path")
 	fmt.Fprintln(w, "  diff                 current vs last-known-good, redacted")
 	fmt.Fprintln(w, "  undo                 restore last-known-good")
-	fmt.Fprintln(w, "  reload               validate current files")
+	fmt.Fprintln(w, "  validate             validate current files (reload is an alias)")
 }
 
 // target locates the configuration root and the config.yaml owned by one profile.

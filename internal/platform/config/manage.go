@@ -155,15 +155,7 @@ func SetConfigValue(root, profile string, segments []string, raw string) error {
 	if err != nil {
 		return err
 	}
-	if err := StageValidateConfig(root, configPath, candidate); err != nil {
-		return err
-	}
-	if len(orig) > 0 {
-		if err := SaveLastKnownGood(configPath, orig); err != nil {
-			return errors.New("configuration file unavailable")
-		}
-	}
-	return AtomicWritePrivateFile(configPath, candidate)
+	return CommitConfigCandidate(root, configPath, candidate, orig)
 }
 
 // UnsetConfigValue clears one leaf path with the same safe write semantics.
@@ -186,15 +178,7 @@ func UnsetConfigValue(root, profile string, segments []string) error {
 	if err != nil {
 		return err
 	}
-	if err := StageValidateConfig(root, configPath, candidate); err != nil {
-		return err
-	}
-	if len(orig) > 0 {
-		if err := SaveLastKnownGood(configPath, orig); err != nil {
-			return errors.New("configuration file unavailable")
-		}
-	}
-	return AtomicWritePrivateFile(configPath, candidate)
+	return CommitConfigCandidate(root, configPath, candidate, orig)
 }
 
 // DiffConfigText returns redacted current vs last-known-good text, or

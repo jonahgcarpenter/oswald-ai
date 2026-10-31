@@ -1,6 +1,8 @@
 // Package gateway implements the `oswald gateway` command group: explicit,
 // operator-driven toggling of gateway platforms. It flips only the
-// platforms.<name>.enabled flag in the global config.yaml.
+// platforms.<name>.enabled flag in the global config.yaml through the
+// mediated write path (staged validation before write, last-known-good,
+// atomic replace) so no edit can break startup validation.
 package gateway
 
 import (
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,7 +65,8 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		gatewayUsage(stderr)
 		return exitUsage
 	}
-	if err := setEnabled(root, name, want); err != nil {
+	effect, err := setEnabled(root, name, want)
+	if err != nil {
 		if errors.Is(err, errAlready) {
 			if want {
 				fmt.Fprintf(stdout, "gateway %s already enabled\n", name)
@@ -71,13 +75,13 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 			}
 			return exitOK
 		}
-		fmt.Fprintf(stderr, "oswald: %v\n", err)
+		reportGatewayError(stderr, err)
 		return exitError
 	}
 	if want {
-		fmt.Fprintf(stdout, "gateway %s enabled\n", name)
+		fmt.Fprintf(stdout, "gateway %s enabled (%s)\n", name, effect)
 	} else {
-		fmt.Fprintf(stdout, "gateway %s disabled\n", name)
+		fmt.Fprintf(stdout, "gateway %s disabled (%s)\n", name, effect)
 	}
 	return exitOK
 }
@@ -89,40 +93,81 @@ func gatewayUsage(w io.Writer) {
 // errAlready reports the flag is already in the requested state.
 var errAlready = errors.New("already in requested state")
 
-// setEnabled flips platforms.<name>.enabled to the requested boolean value.
-func setEnabled(root, name string, want bool) error {
+// reportGatewayError prints a classified diagnostic without values.
+func reportGatewayError(stderr io.Writer, err error) {
+	if cerr, ok := config.AsConfigError(err); ok {
+		location := cerr.Path
+		if location == "" {
+			location = cerr.Source
+		}
+		if location != "" {
+			fmt.Fprintf(stderr, "oswald: invalid configuration: %s at %s\n", cerr.Code, location)
+			return
+		}
+		fmt.Fprintf(stderr, "oswald: invalid configuration: %s\n", cerr.Code)
+		return
+	}
+	fmt.Fprintf(stderr, "oswald: %v\n", err)
+}
+
+// effectForChange validates old and new roots and reports whether the change
+// applies live or needs a restart. Validation failure falls back to restart
+// since platform toggles are never hot.
+func effectForChange(root string) string {
+	oldCfg, err := config.Validate(root)
+	if err != nil {
+		return "restart required to take effect"
+	}
+	// Re-validate post-write state; both are valid here by construction.
+	nextCfg, err := config.Validate(root)
+	if err != nil {
+		return "restart required to take effect"
+	}
+	if config.ReloadEffect(oldCfg, nextCfg) == "live" {
+		return "applied live"
+	}
+	return "restart required to take effect"
+}
+
+// setEnabled flips platforms.<name>.enabled to the requested boolean value
+// through staged validation. It returns the reload effect for reporting.
+func setEnabled(root, name string, want bool) (string, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return errors.New("invalid configuration root")
+		return "", errors.New("invalid configuration root")
 	}
 	path := filepath.Join(abs, "config.yaml")
+	// Capture pre-change effective config for reload-effect reporting. A
+	// missing or invalid baseline still allows the write attempt to produce
+	// the authoritative diagnostic; the effect then defaults to restart.
+	oldCfg, _ := config.Validate(abs)
 	data, err := readConfigFile(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var doc yaml.Node
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&doc); err != nil {
-		return errors.New("configuration file is not valid YAML")
+		return "", errors.New("configuration file is not valid YAML")
 	}
 	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
-		return errors.New("configuration file is not valid YAML")
+		return "", errors.New("configuration file is not valid YAML")
 	}
 	rootMap := doc.Content[0]
 	platforms := mappingValue(rootMap, "platforms")
 	if platforms == nil || platforms.Kind != yaml.MappingNode {
-		return fmt.Errorf("unknown gateway %q", name)
+		return "", fmt.Errorf("unknown gateway %q", name)
 	}
 	entry := mappingValue(platforms, name)
 	if entry == nil || entry.Kind != yaml.MappingNode {
-		return fmt.Errorf("unknown gateway %q", name)
+		return "", fmt.Errorf("unknown gateway %q", name)
 	}
 	enabled := mappingValue(entry, "enabled")
 	if enabled == nil || enabled.Kind != yaml.ScalarNode {
-		return fmt.Errorf("gateway %q has no enabled setting", name)
+		return "", fmt.Errorf("gateway %q has no enabled setting", name)
 	}
 	if enabled.Tag == "!!bool" && ((want && enabled.Value == "true") || (!want && enabled.Value == "false")) {
-		return errAlready
+		return "", errAlready
 	}
 	enabled.Tag = "!!bool"
 	enabled.Style = 0
@@ -135,18 +180,25 @@ func setEnabled(root, name string, want bool) error {
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
 	if err := encoder.Encode(&doc); err != nil {
-		return errors.New("configuration file is not valid YAML")
+		return "", errors.New("configuration file is not valid YAML")
 	}
 	if err := encoder.Close(); err != nil {
-		return errors.New("configuration file is not valid YAML")
+		return "", errors.New("configuration file is not valid YAML")
 	}
 	if out.Len() > maxConfigBytes {
-		return errors.New("configuration file exceeds size limit")
+		return "", errors.New("configuration file exceeds size limit")
 	}
-	if err := atomicWriteFile(path, out.Bytes()); err != nil {
-		return err
+	if err := config.CommitConfigCandidate(abs, path, out.Bytes(), data); err != nil {
+		return "", err
 	}
-	return nil
+	if oldCfg != nil {
+		if nextCfg, err := config.Validate(abs); err == nil {
+			if config.ReloadEffect(oldCfg, nextCfg) == "live" {
+				return "applied live", nil
+			}
+		}
+	}
+	return "restart required to take effect", nil
 }
 
 // mappingValue returns the value node for key in a mapping node, or nil.
@@ -184,45 +236,4 @@ func readConfigFile(path string) ([]byte, error) {
 		return nil, errors.New("configuration file unavailable")
 	}
 	return data, nil
-}
-
-// atomicWriteFile replaces the configuration file via a temp file and rename.
-// The existing file must be a regular file and not a symlink.
-func atomicWriteFile(path string, data []byte) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return errors.New("configuration file unavailable")
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("configuration file unavailable")
-	}
-	dir := filepath.Dir(path)
-	tmp, err := os.OpenFile(filepath.Join(dir, ".config.yaml.tmp"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return errors.New("configuration file is locked")
-		}
-		return errors.New("configuration file unavailable")
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return errors.New("configuration file unavailable")
-	}
-	if err := tmp.Close(); err != nil {
-		return errors.New("configuration file unavailable")
-	}
-	if err := os.Chmod(tmpName, 0600); err != nil {
-		return errors.New("configuration file unavailable")
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return errors.New("configuration file unavailable")
-	}
-	tmpName = ""
-	return nil
 }
