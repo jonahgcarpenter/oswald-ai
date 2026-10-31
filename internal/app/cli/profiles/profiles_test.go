@@ -225,3 +225,119 @@ func TestDeleteWarnsAboutDanglingRoute(t *testing.T) {
 		t.Fatalf("dangling route warning missing: %q", stdout.String())
 	}
 }
+
+func TestRenameMovesProfileIntact(t *testing.T) {
+	root := profileRoot(t)
+	var stdout, stderr bytes.Buffer
+	if code := create(context.Background(), root, []string{"alice"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("create = %d", code)
+	}
+	oldDir := filepath.Join(root, "profiles", "alice")
+	newDir := filepath.Join(root, "profiles", "bob")
+	sentinel := []byte("operator soul")
+	if err := os.WriteFile(filepath.Join(oldDir, "SOUL.md"), sentinel, 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := renameProfile(context.Background(), root, []string{"alice", "bob"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("rename = %d, stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(oldDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("old profile directory still exists")
+	}
+	for _, want := range []string{".env", "config.yaml", "SOUL.md", "state.db"} {
+		info, err := os.Stat(filepath.Join(newDir, want))
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("renamed file %s missing or wrong perms: %v", want, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(newDir, "SOUL.md")); err != nil || !bytes.Equal(got, sentinel) {
+		t.Fatal("renamed SOUL.md contents changed")
+	}
+	if !strings.Contains(stdout.String(), `"alice" to "bob"`) {
+		t.Fatalf("rename output = %q", stdout.String())
+	}
+}
+
+func TestRenameRejectsBadNamesAndCollisions(t *testing.T) {
+	root := profileRoot(t)
+	var stdout, stderr bytes.Buffer
+	if code := create(context.Background(), root, []string{"alice"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("create = %d", code)
+	}
+	if code := create(context.Background(), root, []string{"bob"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("create = %d", code)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"no args", nil, exitUsage},
+		{"one arg", []string{"alice"}, exitUsage},
+		{"three args", []string{"a", "b", "c"}, exitUsage},
+		{"invalid old", []string{"Bad Name!", "bob"}, exitUsage},
+		{"invalid new", []string{"alice", "Bad Name!"}, exitUsage},
+		{"default old", []string{"default", "bob"}, exitUsage},
+		{"default new", []string{"alice", "default"}, exitUsage},
+		{"missing old", []string{"ghost", "bob"}, exitError},
+		{"existing new", []string{"alice", "bob"}, exitError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := renameProfile(context.Background(), root, tc.args, &stdout, &stderr); code != tc.want {
+				t.Fatalf("rename %v = %d, want %d (stderr=%s)", tc.args, code, tc.want, stderr.String())
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(root, "profiles", "alice")); err != nil {
+		t.Fatal("refused rename moved the source")
+	}
+}
+
+func TestRenameRefusesRoutedProfile(t *testing.T) {
+	root := profileRoot(t)
+	var stdout, stderr bytes.Buffer
+	if code := create(context.Background(), root, []string{"alice"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("create = %d", code)
+	}
+	routed := globalConfig + "gateway:\n  multiplex_profiles: true\n  profile_routes:\n    - name: alice-discord\n      platform: discord\n      user_id: \"123\"\n      profile: alice\n"
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(routed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := renameProfile(context.Background(), root, []string{"alice", "bob"}, &stdout, &stderr); code != exitError {
+		t.Fatalf("rename routed = %d, want error", code)
+	}
+	if !strings.Contains(stderr.String(), "alice-discord") || !strings.Contains(stderr.String(), "gateway.profile_routes") {
+		t.Fatalf("route refusal missing: %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "profiles", "alice")); err != nil {
+		t.Fatal("refused rename moved the source")
+	}
+	if _, err := os.Stat(filepath.Join(root, "profiles", "bob")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refused rename created the target")
+	}
+}
+
+func TestRenameSucceedsAfterUnrouting(t *testing.T) {
+	root := profileRoot(t)
+	var stdout, stderr bytes.Buffer
+	if code := create(context.Background(), root, []string{"alice"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("create = %d", code)
+	}
+	// Operator strips the route entries first (direct config edit — routes
+	// must reference existing directories, so repoint-first cannot validate),
+	// renames, then re-adds them for the new name.
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(globalConfig), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := renameProfile(context.Background(), root, []string{"alice", "bob"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("rename after unrouting = %d, stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "profiles", "bob", "config.yaml")); err != nil {
+		t.Fatalf("renamed profile incomplete: %v", err)
+	}
+}
