@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,8 +86,18 @@ func TestConnectStdioRoundTrip(t *testing.T) {
 func TestConnectStdioRejectsMissingCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "oswald-definitely-missing-binary"}); err == nil {
+	_, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "oswald-definitely-missing-binary"})
+	if err == nil {
 		t.Fatal("missing stdio command accepted")
+	}
+	if !strings.Contains(err.Error(), `"local"`) || !strings.Contains(err.Error(), `"oswald-definitely-missing-binary"`) {
+		t.Fatalf("missing stdio error must name server and binary: %v", err)
+	}
+	if !strings.Contains(err.Error(), "PATH") {
+		t.Fatalf("missing stdio error must mention PATH: %v", err)
+	}
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("missing stdio error must wrap exec.ErrNotFound: %v", err)
 	}
 	if _, _, err := connectStdio(ctx, ServerConfig{Name: "local"}); err == nil {
 		t.Fatal("empty stdio command accepted")

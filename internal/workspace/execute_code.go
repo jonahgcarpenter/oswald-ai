@@ -85,7 +85,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		cmd := exec.CommandContext(runCtx, python, name)
 		cmd.Dir = ws.Root()
 		cmd.Env = append([]string{
-			"PATH=/usr/bin:/bin:/usr/local/bin",
+			"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
 			"HOME=" + userHome(),
 			"LANG=C.UTF-8",
 			"TMPDIR=" + scratch,

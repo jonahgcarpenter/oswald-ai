@@ -33,6 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   poppler-utils \
   python3 \
+  nodejs \
+  npm \
   chromium \
   fonts-liberation \
   fonts-noto-color-emoji \
