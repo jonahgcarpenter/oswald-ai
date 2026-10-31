@@ -68,7 +68,7 @@ func TestGetPath(t *testing.T) {
 	}
 }
 
-func TestRetiredMutationsRejected(t *testing.T) {
+func TestRemovedMutationsRejected(t *testing.T) {
 	root := testRoot(t)
 	for _, args := range [][]string{
 		{"set", "runtime.log_level", "debug"},
@@ -83,11 +83,11 @@ func TestRetiredMutationsRejected(t *testing.T) {
 	}
 	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if code, _, _ := run(t, root, "set", "runtime.log_level", "debug"); code == exitOK {
-		t.Fatal("retired set wrote")
+		t.Fatal("removed set wrote")
 	}
 	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if !bytes.Equal(before, after) {
-		t.Fatal("retired command mutated the file")
+		t.Fatal("removed command mutated the file")
 	}
 }
 

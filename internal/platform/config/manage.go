@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -179,83 +178,6 @@ func UnsetConfigValue(root, profile string, segments []string) error {
 		return err
 	}
 	return CommitConfigCandidate(root, configPath, candidate, orig)
-}
-
-// DiffConfigText returns redacted current vs last-known-good text, or
-// "no changes\n" when they match.
-func DiffConfigText(configPath string) (string, error) {
-	current, err := readManagedBounded(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			current = []byte("{}\n")
-		} else {
-			return "", err
-		}
-	}
-	previous, err := ReadLastKnownGood(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "no changes\n", nil
-		}
-		return "", errors.New("configuration file unavailable")
-	}
-	currentRedacted, previousRedacted := redactManagedBytes(current), redactManagedBytes(previous)
-	if bytes.Equal(currentRedacted, previousRedacted) {
-		return "no changes\n", nil
-	}
-	return lineManagedDiff(previousRedacted, currentRedacted), nil
-}
-
-// UndoConfigValue restores the last-known-good bytes after validating them.
-// The undone state becomes the new undo target so undo is reversible.
-func UndoConfigValue(root, profile string) error {
-	configPath, err := ConfigPathForProfile(root, profile)
-	if err != nil {
-		return err
-	}
-	previous, err := ReadLastKnownGood(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return errors.New("nothing to undo")
-		}
-		return errors.New("configuration file unavailable")
-	}
-	if err := StageValidateConfig(root, configPath, previous); err != nil {
-		return err
-	}
-	current, err := readManagedBounded(configPath)
-	if err != nil {
-		return err
-	}
-	if err := AtomicWritePrivateFile(configPath, previous); err != nil {
-		return err
-	}
-	if err := SaveLastKnownGood(configPath, current); err != nil {
-		return errors.New("configuration file unavailable")
-	}
-	return nil
-}
-
-// ConfigChangeSensitive reports whether the flattened leaf diff between two
-// documents touches any approval-track path. It gates undo for the agent.
-func ConfigChangeSensitive(current, previous []byte) bool {
-	oldLeaves := flattenManaged(previous)
-	newLeaves := flattenManaged(current)
-	for path, oldValue := range oldLeaves {
-		if newValue, ok := newLeaves[path]; !ok || !reflect.DeepEqual(oldValue, newValue) {
-			if SensitiveConfigPath(strings.Split(path, ".")) {
-				return true
-			}
-		}
-	}
-	for path := range newLeaves {
-		if _, ok := oldLeaves[path]; !ok {
-			if SensitiveConfigPath(strings.Split(path, ".")) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // ListEnvNames returns sorted dotenv variable names, never values.
@@ -647,37 +569,6 @@ func marshalManaged(node *yaml.Node) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// flattenManaged projects a document to dotted leaf paths for diffing.
-func flattenManaged(data []byte) map[string]interface{} {
-	var value interface{}
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&value); err != nil {
-		return map[string]interface{}{}
-	}
-	out := map[string]interface{}{}
-	var walk func(prefix string, node interface{})
-	walk = func(prefix string, node interface{}) {
-		switch typed := node.(type) {
-		case map[string]interface{}:
-			for key, child := range typed {
-				path := key
-				if prefix != "" {
-					path = prefix + "." + key
-				}
-				walk(path, child)
-			}
-		case []interface{}:
-			for i, child := range typed {
-				walk(fmt.Sprintf("%s.%d", prefix, i), child)
-			}
-		default:
-			out[prefix] = node
-		}
-	}
-	walk("", value)
-	return out
-}
-
 // managedSecretKeys names leaf keys whose values are never printed. Matching
 // is case-insensitive on the final path segment; maps known to carry
 // credentials redact every leaf beneath them.
@@ -705,17 +596,6 @@ func encodeManagedRedacted(node *yaml.Node, path []string) string {
 	}
 	_ = encoder.Close()
 	return out.String()
-}
-
-// redactManagedBytes redacts secret leaves in raw file bytes. Unparseable
-// input redacts to a fixed message so values never leak through a failure.
-func redactManagedBytes(data []byte) []byte {
-	var doc yaml.Node
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&doc); err != nil || len(doc.Content) != 1 {
-		return []byte("configuration unavailable\n")
-	}
-	return []byte(encodeManagedRedacted(doc.Content[0], nil))
 }
 
 func redactManagedCopy(node *yaml.Node, path []string) *yaml.Node {
@@ -755,26 +635,4 @@ func isManagedSecret(path []string) bool {
 		}
 	}
 	return managedSecretKeys[strings.ToLower(path[len(path)-1])]
-}
-
-// lineManagedDiff renders previous vs current with common prefix/suffix elided.
-func lineManagedDiff(previous, current []byte) string {
-	prevLines := strings.Split(string(previous), "\n")
-	curLines := strings.Split(string(current), "\n")
-	head := 0
-	for head < len(prevLines) && head < len(curLines) && prevLines[head] == curLines[head] {
-		head++
-	}
-	tail := 0
-	for tail < len(prevLines)-head && tail < len(curLines)-head && prevLines[len(prevLines)-1-tail] == curLines[len(curLines)-1-tail] {
-		tail++
-	}
-	var out strings.Builder
-	for _, line := range prevLines[head : len(prevLines)-tail] {
-		out.WriteString("- " + line + "\n")
-	}
-	for _, line := range curLines[head : len(curLines)-tail] {
-		out.WriteString("+ " + line + "\n")
-	}
-	return out.String()
 }
