@@ -51,3 +51,13 @@ func TestExecuteCodeSetsOswaldHome(t *testing.T) {
 		t.Fatalf("OSWALD_HOME missing profile root: %q", res.Content)
 	}
 }
+
+func TestRunShellIncludesOswaldBinInPath(t *testing.T) {
+	output, code, err := runShell(context.Background(), `printf %s "$PATH"`, t.TempDir(), t.TempDir(), t.TempDir(), 30)
+	if err != nil || code != 0 {
+		t.Fatalf("runShell = code %d err %v output %q", code, err, output)
+	}
+	if !strings.Contains(output, "/opt/oswald") {
+		t.Fatalf("terminal PATH missing /opt/oswald: %q", output)
+	}
+}

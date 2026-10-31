@@ -224,7 +224,7 @@ func runShell(ctx context.Context, command, dir, scratch, home string, timeoutSe
 	cmd := exec.CommandContext(runCtx, shell, "-c", command)
 	cmd.Dir = dir
 	cmd.Env = append([]string{
-		"PATH=/usr/bin:/bin:/usr/local/bin",
+		"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
 		"HOME=" + userHome(),
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,

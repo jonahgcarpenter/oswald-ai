@@ -383,10 +383,10 @@ func connectSSE(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, fu
 func connectStdio(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
 	command := strings.TrimSpace(cfg.Command)
 	if command == "" {
-		return nil, nil, fmt.Errorf("MCP stdio server has no command")
+		return nil, nil, fmt.Errorf("MCP stdio server %q has no command", cfg.Name)
 	}
 	if _, err := exec.LookPath(command); err != nil {
-		return nil, nil, fmt.Errorf("resolve MCP stdio command: %w", err)
+		return nil, nil, fmt.Errorf("MCP stdio server %q needs missing command %q in PATH: %w", cfg.Name, command, err)
 	}
 	cmd := exec.Command(command, cfg.Args...)
 	if dir := strings.TrimSpace(cfg.Cwd); dir != "" {
