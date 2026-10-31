@@ -29,7 +29,11 @@ Scoped groups mirror the top-level `config.yaml` keys one-to-one: `providers` �
 `model` → `model.*`, `api` → `api.key`, `gateway` → `gateway.*`, `platforms` → `platforms.*`,
 `tools` → `tools.*`, `runtime` → `runtime.*`, `mcp` → `mcp_servers.*`. `--profile` is accepted
 (in any position) only where profiles may override (`providers`, `model`, `api`, `tools`, `mcp`);
-`gateway`, `platforms`, and `runtime` are global-only. `commands/` holds the `Definition/Request/Result/Handler` contract and
+`gateway`, `platforms`, and `runtime` are global-only. Scoping is read-vs-mutate: reads
+(`show`, `get`, `list`, `validate`, `test`) may name another existing profile, while every
+mutation stays fenced to the calling scope (`OSWALD_HOME` profile) and fails closed on
+contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`) and profile
+lifecycle (`profile create|rename|delete`) additionally require the default scope. `commands/` holds the `Definition/Request/Result/Handler` contract and
 `/name` parsing; `builtin/` registers the six public handlers (`/help`, `/new`, `/stop`,
 `/approve`, `/deny`, `/compact`).
 

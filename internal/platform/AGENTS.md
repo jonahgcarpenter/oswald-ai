@@ -30,7 +30,10 @@ section has a scoped command group (`providers`, `model`, `api`, `gateway`, `pla
 can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
 so each command reports `applied live` (runtime log level, admission allow/ban/mention rules)
 vs `restarting service to apply` (everything else, picked up by the server's supervised
-rebuild within seconds).
+rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile` opens reads
+to any existing profile, `ResolveProfile` keeps mutations on the calling scope with
+contradictions failing closed, and `RequireDefaultScope` gates global mutations and profile
+lifecycle to the default scope.
 
 ## State handles (`database/`)
 

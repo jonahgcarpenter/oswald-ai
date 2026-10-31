@@ -106,8 +106,11 @@ Operator commands run from a terminal against your `.oswald/` root:
 
 Every mutating group validates through the staged startup pipeline before writing, so a rejected
 edit leaves files untouched; each command reports `applied live` vs `restarting service to
-apply`. Log-level and admission changes apply live; anything else triggers a supervised
-automatic restart of the service within seconds — no manual restart, no operator signal.
+apply`. Reads (`show`, `get`, `list`, `validate`) may name another profile; mutations stay
+fenced to the calling profile, and global sections plus profile lifecycle require the default
+scope — contradictions fail closed instead of landing elsewhere. Log-level and admission
+changes apply live; anything else triggers a supervised automatic restart of the service
+within seconds — no manual restart, no operator signal.
 
 ## Documentation
 
