@@ -25,21 +25,23 @@ import (
 
 // Model-facing vault tool names.
 const (
-	VaultListName      = "browser_vault_list"
-	VaultFillName      = "browser_vault_fill"
-	VaultSaveLoginName = "browser_vault_save_login"
-	VaultEnterCodeName = "browser_vault_enter_code"
+	VaultListName        = "browser_vault_list"
+	VaultFillName        = "browser_vault_fill"
+	VaultSaveLoginName   = "browser_vault_save_login"
+	VaultSaveAddressName = "browser_vault_save_address"
+	VaultEnterCodeName   = "browser_vault_enter_code"
+	VaultRemoveName      = "browser_vault_rm"
 )
 
 // VaultNames returns the vault tool names in registration order.
 func VaultNames() []string {
-	return []string{VaultListName, VaultFillName, VaultSaveLoginName, VaultEnterCodeName}
+	return []string{VaultListName, VaultFillName, VaultSaveLoginName, VaultSaveAddressName, VaultEnterCodeName, VaultRemoveName}
 }
 
 // VaultDefinitions returns the model-facing vault contracts.
 func VaultDefinitions() []llm.ToolDefinition {
 	return []llm.ToolDefinition{
-		VaultListDefinition(), VaultFillDefinition(), VaultSaveLoginDefinition(), VaultEnterCodeDefinition(),
+		VaultListDefinition(), VaultFillDefinition(), VaultSaveLoginDefinition(), VaultSaveAddressDefinition(), VaultEnterCodeDefinition(), VaultRemoveDefinition(),
 	}
 }
 
@@ -73,17 +75,59 @@ func VaultFillDefinition() llm.ToolDefinition {
 	}
 }
 
-// VaultSaveLoginDefinition guides saving a login for the current page.
+// VaultSaveLoginDefinition saves a login for the current page.
 func VaultSaveLoginDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        VaultSaveLoginName,
-		Description: "The current page is a login form and browser_vault_list has no item for its origin. This session cannot ask for secrets, so the result tells the operator the exact command to save one; relay it and stop. Requires browser_navigate first.",
+		Description: "Save a login for the CURRENT page. Ask the user for the identifier and password in chat (and the authenticator seed if they want automatic 2FA codes), then save: secrets are sealed on write and never returned. The item binds to the page origin automatically; fill it later with browser_vault_fill. Requires browser_navigate first.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{
-				"label": {Type: "string", Description: "Short site name for the saved login (default: the page host)."},
+				"label":           {Type: "string", Description: "Short site name for the saved login (default: the page host)."},
+				"identifier":      {Type: "string", Description: "Login identifier the user typed (email, phone, or username)."},
+				"identifier_type": {Type: "string", Description: "Identifier kind (default: email).", Enum: []string{"email", "phone", "username"}},
+				"password":        {Type: "string", Description: "Login password; sealed on write, never returned."},
+				"otp":             {Type: "string", Description: "Optional authenticator seed or otpauth://totp URI for automatic 2FA codes."},
 			},
-			Required:             []string{},
+			Required:             []string{"identifier", "password"},
+			AdditionalProperties: boolPointer(false),
+		},
+	}
+}
+
+// VaultSaveAddressDefinition saves an address for the current page.
+func VaultSaveAddressDefinition() llm.ToolDefinition {
+	return llm.ToolDefinition{
+		Name:        VaultSaveAddressName,
+		Description: "Save an address for the CURRENT page. Ask the user for the address fields in chat, then save: values are sealed on write and never returned. The item binds to the page origin automatically; fill it later with browser_vault_fill. Requires browser_navigate first.",
+		Parameters: llm.ToolParameters{
+			Type: "object",
+			Properties: map[string]llm.ToolParameterProperty{
+				"label":         {Type: "string", Description: "Short name for the saved address (default: the page host)."},
+				"address_line1": {Type: "string", Description: "Street address (required)."},
+				"address_line2": {Type: "string", Description: "Apartment, suite, or unit."},
+				"city":          {Type: "string", Description: "City (required)."},
+				"state":         {Type: "string", Description: "State or province."},
+				"postal_code":   {Type: "string", Description: "Postal or ZIP code (required)."},
+				"country":       {Type: "string", Description: "Country (required)."},
+			},
+			Required:             []string{"address_line1", "city", "postal_code", "country"},
+			AdditionalProperties: boolPointer(false),
+		},
+	}
+}
+
+// VaultRemoveDefinition deletes one vault item by handle.
+func VaultRemoveDefinition() llm.ToolDefinition {
+	return llm.ToolDefinition{
+		Name:        VaultRemoveName,
+		Description: "Delete one saved vault item by its exact handle from browser_vault_list. This cannot be undone; double-check the handle belongs to the item the user wants gone.",
+		Parameters: llm.ToolParameters{
+			Type: "object",
+			Properties: map[string]llm.ToolParameterProperty{
+				"handle": {Type: "string", Description: "The exact vault handle to delete."},
+			},
+			Required:             []string{"handle"},
 			AdditionalProperties: boolPointer(false),
 		},
 	}
@@ -185,7 +229,7 @@ func vaultListHandler(deps Deps) registry.Handler {
 		}
 		payload := map[string]interface{}{"items": out}
 		if len(out) == 0 {
-			payload["hint"] = "No saved logins. On a login page, call browser_vault_save_login to get the save command for the operator. Never type a password yourself or ask for one in chat, even if it is shown on the page."
+			payload["hint"] = "No saved logins. On a login page, ask the user for the identifier and password in chat and save them with browser_vault_save_login. Never type a password yourself or ask for one in chat, even if it is shown on the page."
 		}
 		content, err := wrapEnvelope(VaultListName, payload)
 		if err != nil {
@@ -353,11 +397,14 @@ func vaultSaveLoginHandler(deps Deps) registry.Handler {
 				config.F("tool_name", VaultSaveLoginName), config.F("status", status), config.F("outcome", outcome),
 				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
 		}
-		if err := ctx.Err(); err != nil {
+		fail := func(err error) (governance.Result, error) {
 			completed("error", "error", 0)
 			return governance.Result{}, err
 		}
-		if err := rejectUnknownArgs(args, "label"); err != nil {
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if err := rejectUnknownArgs(args, "label", "identifier", "identifier_type", "password", "otp"); err != nil {
 			completed("rejected", "rejected", 0)
 			return governance.Result{}, err
 		}
@@ -368,16 +415,161 @@ func vaultSaveLoginHandler(deps Deps) registry.Handler {
 		}
 		pageOrigin, err := vaultPageOrigin(deps, ctx, profile)
 		if err != nil {
+			return fail(err)
+		}
+		identifier, ok := stringArg(args, "identifier")
+		if !ok || strings.TrimSpace(identifier) == "" {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, errors.New("identifier is required; ask the user for the login identifier in chat")
+		}
+		idType := "email"
+		if raw, ok := stringArg(args, "identifier_type"); ok && strings.TrimSpace(raw) != "" {
+			idType = strings.TrimSpace(raw)
+		}
+		password, ok := stringArg(args, "password")
+		if !ok || password == "" {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, errors.New("password is required; ask the user for the password in chat")
+		}
+		otp, _ := stringArg(args, "otp")
+		label := pageOrigin
+		if raw, ok := stringArg(args, "label"); ok && strings.TrimSpace(raw) != "" && utf8.ValidString(raw) {
+			label = strings.TrimSpace(raw)
+		}
+		meta, err := deps.Vault.AddLogin(label, idType, strings.TrimSpace(identifier), password, strings.TrimSpace(otp), pageOrigin)
+		password = ""
+		otp = ""
+		if err != nil {
+			return fail(err)
+		}
+		payload := map[string]interface{}{
+			"saved": true, "handle": meta.ID, "label": meta.Label, "kind": meta.Kind, "origin": pageOrigin,
+			"next": "Saved. Fill it on this page with browser_vault_fill using the handle.",
+		}
+		if meta.HasOTP {
+			payload["two_factor"] = "automatic"
+		}
+		content, err := wrapEnvelope(VaultSaveLoginName, payload)
+		if err != nil {
+			return fail(err)
+		}
+		completed("ok", "ok", 1)
+		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+	}
+}
+
+func vaultSaveAddressHandler(deps Deps) registry.Handler {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+		started := time.Now()
+		reqMeta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.vault_save_address", reqMeta.RequestID, principal.CanonicalUserID, principal.Gateway, reqMeta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, itemCount int) {
+			agentLog.Debug("agent.tool.browser.vault_save_address.complete", "browser vault save address completed",
+				config.F("tool_name", VaultSaveAddressName), config.F("status", status), config.F("outcome", outcome),
+				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
+		fail := func(err error) (governance.Result, error) {
 			completed("error", "error", 0)
 			return governance.Result{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		fields := []string{"address_line1", "address_line2", "city", "state", "postal_code", "country"}
+		if err := rejectUnknownArgs(args, append([]string{"label"}, fields...)...); err != nil {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, err
+		}
+		profile, err := profileFromContext(ctx)
+		if err != nil {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, err
+		}
+		pageOrigin, err := vaultPageOrigin(deps, ctx, profile)
+		if err != nil {
+			return fail(err)
+		}
+		values := map[string]string{}
+		for _, key := range fields {
+			if raw, ok := stringArg(args, key); ok && strings.TrimSpace(raw) != "" {
+				values[key] = strings.TrimSpace(raw)
+			}
+		}
+		for _, key := range []string{"address_line1", "city", "postal_code", "country"} {
+			if values[key] == "" {
+				completed("rejected", "rejected", 0)
+				return governance.Result{}, fmt.Errorf("%s is required; ask the user for the address fields in chat", key)
+			}
 		}
 		label := pageOrigin
 		if raw, ok := stringArg(args, "label"); ok && strings.TrimSpace(raw) != "" && utf8.ValidString(raw) {
 			label = strings.TrimSpace(raw)
 		}
-		completed("ok", "ok", 0)
-		return governance.Result{Content: "Login not saved: this session cannot ask for secrets. Ask the operator to run `oswald vault add --origin " + pageOrigin + " --label \"" + label + "\"` on the operator machine, then call browser_vault_fill.", Outcome: governance.OutcomeProductive,
-			ReasonCode: "prompt_unavailable"}, nil
+		meta, err := deps.Vault.AddAddress(label, values, pageOrigin)
+		for k := range values {
+			values[k] = ""
+		}
+		if err != nil {
+			return fail(err)
+		}
+		content, err := wrapEnvelope(VaultSaveAddressName, map[string]interface{}{
+			"saved": true, "handle": meta.ID, "label": meta.Label, "kind": meta.Kind, "origin": pageOrigin,
+			"next": "Saved. Fill it on this page with browser_vault_fill using the handle.",
+		})
+		if err != nil {
+			return fail(err)
+		}
+		completed("ok", "ok", 1)
+		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+	}
+}
+
+func vaultRemoveHandler(deps Deps) registry.Handler {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+		started := time.Now()
+		reqMeta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.vault_remove", reqMeta.RequestID, principal.CanonicalUserID, principal.Gateway, reqMeta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, itemCount int) {
+			agentLog.Debug("agent.tool.browser.vault_remove.complete", "browser vault remove completed",
+				config.F("tool_name", VaultRemoveName), config.F("status", status), config.F("outcome", outcome),
+				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
+		fail := func(err error) (governance.Result, error) {
+			completed("error", "error", 0)
+			return governance.Result{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if err := rejectUnknownArgs(args, "handle"); err != nil {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, err
+		}
+		handle, ok := stringArg(args, "handle")
+		if !ok || strings.TrimSpace(handle) == "" {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, errors.New("handle must be an exact vault handle from browser_vault_list")
+		}
+		if _, err := profileFromContext(ctx); err != nil {
+			completed("rejected", "rejected", 0)
+			return governance.Result{}, err
+		}
+		removed, err := deps.Vault.Remove(strings.TrimSpace(handle))
+		if err != nil {
+			return fail(err)
+		}
+		if !removed {
+			completed("error", "error", 0)
+			return governance.Result{}, fmt.Errorf("no vault item with handle %q; use browser_vault_list", strings.TrimSpace(handle))
+		}
+		content, err := wrapEnvelope(VaultRemoveName, map[string]interface{}{"removed": strings.TrimSpace(handle)})
+		if err != nil {
+			return fail(err)
+		}
+		completed("ok", "ok", 1)
+		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 	}
 }
 
@@ -436,7 +628,7 @@ func vaultEnterCodeHandler(deps Deps) registry.Handler {
 		}
 		if strings.TrimSpace(otpSeed) == "" {
 			completed("error", "error", 0)
-			return governance.Result{}, fmt.Errorf("no authenticator key saved for this login and this session cannot ask for a code (prompt_unavailable); add one with `oswald vault add --origin %s --otp <seed>`, or complete the step on-device", meta.Origin)
+			return governance.Result{}, fmt.Errorf("no authenticator key saved for this login; ask the user for the login password and authenticator seed in chat and save them with browser_vault_save_login, or complete the step on-device")
 		}
 		code, err := vault.TOTPNow(otpSeed, time.Now())
 		if err != nil {
@@ -493,12 +685,14 @@ func vaultEnterCodeHandler(deps Deps) registry.Handler {
 	}
 }
 
-// NewVaultHandlers returns the four vault handlers keyed by tool name.
+// NewVaultHandlers returns the six vault handlers keyed by tool name.
 func NewVaultHandlers(deps Deps) map[string]registry.Handler {
 	return map[string]registry.Handler{
-		VaultListName:      vaultListHandler(deps),
-		VaultFillName:      vaultFillHandler(deps),
-		VaultSaveLoginName: vaultSaveLoginHandler(deps),
-		VaultEnterCodeName: vaultEnterCodeHandler(deps),
+		VaultListName:        vaultListHandler(deps),
+		VaultFillName:        vaultFillHandler(deps),
+		VaultSaveLoginName:   vaultSaveLoginHandler(deps),
+		VaultSaveAddressName: vaultSaveAddressHandler(deps),
+		VaultEnterCodeName:   vaultEnterCodeHandler(deps),
+		VaultRemoveName:      vaultRemoveHandler(deps),
 	}
 }

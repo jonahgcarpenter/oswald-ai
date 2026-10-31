@@ -16,7 +16,7 @@ with workers joined before stores close, and errors returned only after cleanup.
 `main` or `cli` assembles stores, workers, or gateways; gateway start failures are asynchronous
 logs, and listeners can outlive `Run` until process exit.
 
-`cli/cli.go` dispatches `setup | start | profile | mcp | gateway | vault | help` with exit codes 0/1/2 and injectable
+`cli/cli.go` dispatches `setup | start | profile | mcp | gateway | config | env | help` with exit codes 0/1/2 and injectable
 stdio. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
 one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
 copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only

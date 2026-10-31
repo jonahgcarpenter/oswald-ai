@@ -17,7 +17,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/start"
-	clivault "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/vault"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -66,8 +65,6 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return cliconfig.Run(ctx, root, rest[1:], stdout, stderr)
 	case "env":
 		return env.Run(ctx, root, rest[1:], stdin, stdout, stderr)
-	case "vault":
-		return clivault.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "help":
 		usage(stdout)
 		return exitOK
@@ -92,6 +89,5 @@ commands:
   config show|get|set|unset|diff|undo|reload
                          read and safely modify configuration
   env show|set|unset     manage the private profile environment
-  vault add|list|rm      manage the profile credential vault
 `)
 }

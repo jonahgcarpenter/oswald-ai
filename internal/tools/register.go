@@ -234,6 +234,14 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 			NormalizeArgs: normalizeVaultSaveArgs,
 			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
 		},
+		toolbrowser.VaultSaveAddressName: {
+			NormalizeArgs: normalizeVaultSaveAddressArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		},
+		toolbrowser.VaultRemoveName: {
+			NormalizeArgs: normalizeVaultHandleArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		},
 		toolbrowser.VaultEnterCodeName: {
 			NormalizeArgs: normalizeVaultHandleArgs,
 			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
@@ -325,8 +333,30 @@ func normalizeVaultHandleArgs(args map[string]interface{}) interface{} {
 
 func normalizeVaultSaveArgs(args map[string]interface{}) interface{} {
 	normalized := map[string]interface{}{}
+	for _, key := range []string{"label", "identifier", "identifier_type"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	for _, key := range []string{"password", "otp"} {
+		if value, ok := args[key].(string); ok {
+			sum := sha256.Sum256([]byte(value))
+			normalized[key+"_hash"] = hex.EncodeToString(sum[:])
+		}
+	}
+	return normalized
+}
+
+func normalizeVaultSaveAddressArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
 	if value, ok := args["label"].(string); ok {
 		normalized["label"] = strings.Join(strings.Fields(value), " ")
+	}
+	for _, key := range []string{"address_line1", "address_line2", "city", "state", "postal_code", "country"} {
+		if value, ok := args[key].(string); ok {
+			sum := sha256.Sum256([]byte(value))
+			normalized[key+"_hash"] = hex.EncodeToString(sum[:])
+		}
 	}
 	return normalized
 }
