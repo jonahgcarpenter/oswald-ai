@@ -39,18 +39,19 @@ func TestScanConfinedWriteShell(t *testing.T) {
 	root := alice
 
 	deny := map[string]string{
-		"echo x > " + bobSoul:                    "system-managed",
-		"echo x > " + filepath.Join(bob, ".env"): "protected",
-		"echo x > /tmp/outside.txt":              "system-managed",
-		"echo x > config.yaml":                   "oswald providers",
-		"echo x > skills/review/SKILL.md":        "skill_manage tool",
-		"sed -i s/a/b/ config.yaml":              "oswald providers",
-		"cp new.yaml config.yaml":                "oswald providers",
-		"echo x | tee cache/foo":                 "cache/scratch",
-		"rm -rf cache/images":                    "cache/scratch",
-		"mkdir cache/scratch_go":                 "cache/scratch",
-		"cat config.yaml > /tmp/out.txt":         "system-managed",
-		"echo x > .env":                          "protected",
+		"echo x > " + bobSoul:                           "system-managed",
+		"echo x > " + filepath.Join(bob, ".env"):        "protected",
+		"echo x > /tmp/outside.txt":                     "system-managed",
+		"echo x > config.yaml":                          "oswald providers",
+		"echo x > " + filepath.Join(bob, "config.yaml"): "oswald providers",
+		"echo x > skills/review/SKILL.md":               "skill_manage tool",
+		"sed -i s/a/b/ config.yaml":                     "oswald providers",
+		"cp new.yaml config.yaml":                       "oswald providers",
+		"echo x | tee cache/foo":                        "cache/scratch",
+		"rm -rf cache/images":                           "cache/scratch",
+		"mkdir cache/scratch_go":                        "cache/scratch",
+		"cat config.yaml > /tmp/out.txt":                "system-managed",
+		"echo x > .env":                                 "protected",
 	}
 	for cmd, want := range deny {
 		if reason, blocked := ScanConfinedWrite(cmd, alice, root, true); !blocked {
@@ -203,11 +204,12 @@ func TestScanProtectedReadShell(t *testing.T) {
 	deny := map[string]string{
 		"cd " + bob + " && sqlite3 state.db \"SELECT id FROM sessions;\"": "session_search",
 		"sqlite3 " + bobState + " \"SELECT id FROM sessions;\"":           "session_search",
-		"cat " + bobState:                   "session_search",
-		"cat .env":                          "protected",
-		"cat " + filepath.Join(bob, ".env"): "protected",
-		"cat config.yaml":                   "oswald config",
-		"cat /proc/self/environ":            "protected",
+		"cat " + bobState:                          "session_search",
+		"cat .env":                                 "protected",
+		"cat " + filepath.Join(bob, ".env"):        "protected",
+		"cat config.yaml":                          "oswald config",
+		"cat " + filepath.Join(bob, "config.yaml"): "oswald config",
+		"cat /proc/self/environ":                   "protected",
 	}
 	for cmd, want := range deny {
 		if reason, blocked := ScanProtectedRead(cmd, alice, alice, true); !blocked {
@@ -239,11 +241,12 @@ func TestScanProtectedReadCode(t *testing.T) {
 	_, alice, bob := profileTree(t)
 
 	deny := map[string]string{
-		"open('.env').read()":                                   "protected",
-		"open('config.yaml').read()":                            "oswald config",
-		"open('" + filepath.Join(bob, "state.db") + "').read()": "session_search",
-		"open('" + filepath.Join(alice, ".env") + "').read()":   "protected",
-		"open('credentials.json').read()":                       "protected",
+		"open('.env').read()":                                      "protected",
+		"open('config.yaml').read()":                               "oswald config",
+		"open('" + filepath.Join(bob, "config.yaml") + "').read()": "oswald config",
+		"open('" + filepath.Join(bob, "state.db") + "').read()":    "session_search",
+		"open('" + filepath.Join(alice, ".env") + "').read()":      "protected",
+		"open('credentials.json').read()":                          "protected",
 	}
 	for code, want := range deny {
 		if reason, blocked := ScanProtectedRead(code, alice, alice, false); !blocked {

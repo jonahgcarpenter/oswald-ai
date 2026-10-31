@@ -101,7 +101,7 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 			t.Errorf("read denied: %q: %v", raw, err)
 		}
 	}
-	readDeny := []string{".env", "config.yaml", filepath.Join("profiles", "bob", ".env"), filepath.Join("profiles", "bob", "state.db")}
+	readDeny := []string{".env", "config.yaml", filepath.Join("profiles", "bob", ".env"), filepath.Join("profiles", "bob", "config.yaml"), filepath.Join("profiles", "bob", "state.db")}
 	for _, raw := range readDeny {
 		_, _, err := ws.Resolve(raw)
 		rel, group, ok := AsDeny(err)
@@ -126,9 +126,10 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 		}
 	}
 	writeDeny := map[string]string{
-		"config.yaml":                        "oswald providers",
-		"state.db":                           "system-managed",
-		filepath.Join("memories", "USER.md"): "memory tool",
+		"config.yaml": "oswald providers",
+		filepath.Join("profiles", "bob", "config.yaml"): "oswald providers",
+		"state.db":                                    "system-managed",
+		filepath.Join("memories", "USER.md"):          "memory tool",
 		filepath.Join("skills", "review", "SKILL.md"): "skill_manage tool",
 		".env": "oswald env",
 		filepath.Join("profiles", "bob", "notes.md"): "system-managed",
