@@ -146,6 +146,30 @@ func TestProfileExchangeDeliveryAndReopen(t *testing.T) {
 	}
 }
 
+func TestUpdateSessionFileMemoryOverwritesSnapshot(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.BindSessionFileMemory(ctx, "alice", key, session.Generation, "old user", "old memory"); err != nil {
+		t.Fatal(err)
+	}
+	u, m, err := s.UpdateSessionFileMemory(ctx, "alice", key, session.Generation, "new user", "new memory")
+	if err != nil || u != "new user" || m != "new memory" {
+		t.Fatalf("update = %q %q err %v", u, m, err)
+	}
+	if u, m, bound, err := s.SessionFileMemory(ctx, "alice", key, session.Generation); err != nil || !bound || u != "new user" || m != "new memory" {
+		t.Fatalf("read after update = %q %q bound=%v err=%v", u, m, bound, err)
+	}
+	// Stale generations stay fenced.
+	if _, _, err := s.UpdateSessionFileMemory(ctx, "alice", key, session.Generation+99, "stale", ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale update err = %v", err)
+	}
+}
+
 func TestProfileSnapshotNewSessionAndExpiryFences(t *testing.T) {
 	s, _ := newProfileStateFixture(t)
 	ctx := context.Background()

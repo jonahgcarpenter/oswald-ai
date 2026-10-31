@@ -8,13 +8,13 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 )
 
 type integrationResponder struct {
@@ -57,7 +57,7 @@ func (integrationMemoryModel) Chat(_ context.Context, req llm.ChatRequest, _ fun
 	return &llm.ChatResponse{Model: req.Model, Message: llm.ChatMessage{Role: "assistant", Content: answer}}, nil
 }
 
-func TestProfileRuntimeSharesOnlyConfiguredMemoryAndRetainsSnapshotsAcrossRestart(t *testing.T) {
+func TestProfileRuntimeSharesLiveMemoryAndRetainsSnapshotsAcrossRestart(t *testing.T) {
 	cfg := profileStartupFixture(t)
 	cfg.DiscordToken = "synthetic-token"
 	cfg.DiscordPolicy = config.AdmissionPolicy{}
@@ -104,12 +104,12 @@ func TestProfileRuntimeSharesOnlyConfiguredMemoryAndRetainsSnapshotsAcrossRestar
 							return err
 						}
 					}
-					frozen, err := request(discord, "discord:dm:123", "check frozen note", false)
+					live, err := request(discord, "discord:dm:123", "check frozen note", false)
 					if err != nil {
 						return err
 					}
-					if frozen.response == nil || frozen.response.Response != "no saved note" {
-						return errors.New("frozen pair changed before reset")
+					if live.response == nil || live.response.Response != "saved note visible" {
+						return errors.New("live file memory not shared before reset")
 					}
 					fresh, err := request(messages, "imessage:fresh", "check shared note", false)
 					if err != nil {

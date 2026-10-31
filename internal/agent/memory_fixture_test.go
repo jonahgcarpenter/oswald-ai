@@ -43,6 +43,9 @@ func (s *agentMemoryFixture) SessionFileMemory(ctx context.Context, owner, key s
 func (s *agentMemoryFixture) BindSessionFileMemory(ctx context.Context, owner, key string, g int, user, notes string) (string, string, error) {
 	return s.stores[owner].BindSessionFileMemory(ctx, owner, fixtureSession(key), g, user, notes)
 }
+func (s *agentMemoryFixture) UpdateSessionFileMemory(ctx context.Context, owner, key string, g int, user, notes string) (string, string, error) {
+	return s.stores[owner].UpdateSessionFileMemory(ctx, owner, fixtureSession(key), g, user, notes)
+}
 func (s *agentMemoryFixture) SessionImages(ctx context.Context, owner, key string, g int) ([]requestctx.InputImage, error) {
 	return s.stores[owner].SessionImages(ctx, owner, fixtureSession(key), g)
 }

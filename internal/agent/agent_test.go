@@ -171,7 +171,7 @@ func TestStatelessClientHistorySurvivesToolRoundWithoutPersistence(t *testing.T)
 	}
 }
 
-func TestStatelessFileMemorySnapshotChangesOnlyBetweenRequests(t *testing.T) {
+func TestStatelessFileMemoryReloadsMidRequest(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("edit", "test.edit_memory", map[string]interface{}{}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "saved"}},
@@ -197,8 +197,8 @@ func TestStatelessFileMemorySnapshotChangesOnlyBetweenRequests(t *testing.T) {
 	if _, err := agent.Process(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(chat.requests) != 3 || !strings.Contains(chat.requests[0].Messages[0].Content, "old note") || !strings.Contains(chat.requests[1].Messages[0].Content, "old note") || strings.Contains(chat.requests[1].Messages[0].Content, "new note") || !strings.Contains(chat.requests[2].Messages[0].Content, "new note") {
-		t.Fatalf("stateless snapshots did not stay fixed within each request")
+	if len(chat.requests) != 3 || !strings.Contains(chat.requests[0].Messages[0].Content, "old note") || !strings.Contains(chat.requests[1].Messages[0].Content, "new note") || !strings.Contains(chat.requests[2].Messages[0].Content, "new note") {
+		t.Fatalf("stateless prompt did not reload edited memory mid-request")
 	}
 }
 
@@ -1686,7 +1686,7 @@ func TestProcessLegacyDotQualifiedHistoryDoesNotAdvertise(t *testing.T) {
 	}
 }
 
-func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
+func TestProcessReloadsFileMemoryWithinSession(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "one"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "two"}},
@@ -1720,8 +1720,8 @@ func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 	requests := primaryRequests(chat.requests)
 	updatedFiles := requests[1].Messages[0].Content
 	latestFiles := requests[2].Messages[0].Content
-	if updatedFiles != firstFiles || strings.Contains(updatedFiles, "Replies should be concise.") {
-		t.Fatalf("session memory snapshot changed: first=%q updated=%q", firstFiles, updatedFiles)
+	if !strings.Contains(updatedFiles, "Replies should be concise.") {
+		t.Fatalf("session memory snapshot did not reload: first=%q updated=%q", firstFiles, updatedFiles)
 	}
 	if latestFiles == firstFiles || !strings.Contains(latestFiles, "Replies should be concise.") || strings.Contains(latestFiles, "The user is Ada.") {
 		t.Fatalf("new session received stale files or legacy profile: %q", latestFiles)
@@ -1760,8 +1760,8 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests = primaryRequests(chat.requests)
-	if len(requests) != 3 || strings.Contains(requests[2].Messages[0].Content, "Project is Atlas.") {
-		t.Fatalf("current session snapshot changed after write: %+v", requests[2].Messages)
+	if len(requests) != 3 || !strings.Contains(requests[2].Messages[0].Content, "Project is Atlas.") {
+		t.Fatalf("next turn in the same session missed the write: %+v", requests[2].Messages)
 	}
 	for _, message := range requests[2].Messages {
 		if message.Role == "tool" || len(message.ToolCalls) != 0 {

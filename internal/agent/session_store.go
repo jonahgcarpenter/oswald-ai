@@ -13,6 +13,7 @@ type SessionStore interface {
 	ResolveSessionContext(context.Context, string, string, time.Duration) (memory.SessionContext, error)
 	SessionFileMemory(context.Context, string, string, int) (string, string, bool, error)
 	BindSessionFileMemory(context.Context, string, string, int, string, string) (string, string, error)
+	UpdateSessionFileMemory(context.Context, string, string, int, string, string) (string, string, error)
 	SessionImages(context.Context, string, string, int) ([]requestctx.InputImage, error)
 	ReserveImageVersion(context.Context, string, string, int, string, int) (int, error)
 	RecentCompletedExchangesAfter(context.Context, string, string, int, int64, int) ([]memory.SessionTurn, error)
