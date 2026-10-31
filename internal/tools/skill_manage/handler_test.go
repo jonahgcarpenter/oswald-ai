@@ -103,6 +103,31 @@ func TestCreateAndUpdateThroughTool(t *testing.T) {
 	}
 }
 
+func TestCreateWithCategoryThroughTool(t *testing.T) {
+	root := t.TempDir()
+	handler := NewHandler(root)
+	result, err := handler(skillContext(), map[string]interface{}{"action": "create", "name": "ship", "description": "Ship fast", "content": "Ship it.", "category": "code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, `"ship"`) || !strings.Contains(result.Content, `"code"`) {
+		t.Fatalf("unexpected create content %q", result.Content)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "code", "ship", "SKILL.md")); err != nil {
+		t.Fatalf("categorized skill file missing: %v", err)
+	}
+	listed, err := handler(skillContext(), map[string]interface{}{"action": "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed.Content, "ship [code]") {
+		t.Fatalf("list missing categorized skill %q", listed.Content)
+	}
+	if _, err := handler(skillContext(), map[string]interface{}{"action": "create", "name": "evil", "description": "Evil", "content": "Body.", "category": "../escape"}); err == nil {
+		t.Fatal("expected traversal category to fail")
+	}
+}
+
 func TestDefinitionContract(t *testing.T) {
 	def := Definition()
 	if def.Name != Name || def.Parameters.Type != "object" {
@@ -111,7 +136,7 @@ func TestDefinitionContract(t *testing.T) {
 	if len(def.Parameters.Required) != 1 || def.Parameters.Required[0] != "action" {
 		t.Fatalf("unexpected required: %v", def.Parameters.Required)
 	}
-	for _, key := range []string{"action", "name", "file_path", "description", "content", "old_text"} {
+	for _, key := range []string{"action", "name", "file_path", "description", "content", "old_text", "category"} {
 		if _, ok := def.Parameters.Properties[key]; !ok {
 			t.Fatalf("missing property %q", key)
 		}

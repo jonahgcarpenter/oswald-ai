@@ -47,7 +47,8 @@ func NewHandler(profileRoot string) func(context.Context, map[string]interface{}
 			name, _ := args["name"].(string)
 			description, _ := args["description"].(string)
 			content, _ := args["content"].(string)
-			return create(store, name, description, content)
+			category, _ := args["category"].(string)
+			return create(store, name, description, content, category)
 		case "update":
 			name, _ := args["name"].(string)
 			oldText, _ := args["old_text"].(string)
@@ -68,7 +69,7 @@ func platformOf(gateway string) string {
 func rejectUnknown(args map[string]interface{}) error {
 	for key := range args {
 		switch key {
-		case "action", "name", "file_path", "description", "content", "old_text":
+		case "action", "name", "file_path", "description", "content", "old_text", "category":
 		default:
 			return fmt.Errorf("skill_manage: unknown argument %q", key)
 		}
@@ -121,12 +122,12 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
 }
 
-func create(store *skills.Store, name, description, content string) (governance.Result, error) {
-	skill, err := store.Create(name, description, content)
+func create(store *skills.Store, name, description, content, category string) (governance.Result, error) {
+	skill, err := store.Create(name, description, content, category)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
 	}
-	return governance.Result{Content: fmt.Sprintf("Skill %q created. It now appears in the skills index for future turns.", skill.LoadName), Outcome: governance.OutcomeProductive}, nil
+	return governance.Result{Content: fmt.Sprintf("Skill %q created under category %q. It now appears in the skills index for future turns.", skill.LoadName, skill.Category), Outcome: governance.OutcomeProductive}, nil
 }
 
 func update(store *skills.Store, name, oldText, content string) (governance.Result, error) {

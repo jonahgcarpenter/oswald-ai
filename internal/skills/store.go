@@ -54,13 +54,32 @@ func validateNewName(name string) (string, error) {
 	return name, nil
 }
 
-// Create writes a new SKILL.md under the managed tree. An existing skill
-// errors instead of overwriting; update it instead.
-func (s *Store) Create(name, description, body string) (Skill, error) {
+// validateCategory normalizes an optional single-level skill category.
+// Empty means the top-level "general" category; otherwise exactly one
+// slug segment is accepted so categories cannot traverse or nest.
+func validateCategory(category string) (string, error) {
+	category = strings.ToLower(strings.TrimSpace(category))
+	if category == "" {
+		return "", nil
+	}
+	if !skillNameRE.MatchString(category) {
+		return "", fmt.Errorf("skill category must be 1-64 lowercase letters, digits, - or _, starting with a letter or digit")
+	}
+	return category, nil
+}
+
+// Create writes a new SKILL.md under the managed tree, optionally grouped
+// under one category subdirectory. An existing skill errors instead of
+// overwriting; update it instead.
+func (s *Store) Create(name, description, body, category string) (Skill, error) {
 	if s == nil || strings.TrimSpace(s.managed) == "" {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
 	}
 	name, err := validateNewName(name)
+	if err != nil {
+		return Skill{}, err
+	}
+	category, err = validateCategory(category)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -72,6 +91,9 @@ func (s *Store) Create(name, description, body string) (Skill, error) {
 		return Skill{}, fmt.Errorf("skill body is required")
 	}
 	dir := filepath.Join(s.managed, name)
+	if category != "" {
+		dir = filepath.Join(s.managed, category, name)
+	}
 	if info, err := os.Lstat(dir); err == nil {
 		_ = info
 		return Skill{}, fmt.Errorf("skill %q already exists", name)
@@ -80,15 +102,26 @@ func (s *Store) Create(name, description, body string) (Skill, error) {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
 	}
 	content := fmt.Sprintf("---\nname: %s\ndescription: %s\nversion: 1.0.0\n---\n\n%s\n", name, description, strings.TrimSpace(body))
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0600); err != nil {
+	file := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
 	}
 	for _, skill := range resolveCatalog(scanRoots(s.managed), "") {
-		if skill.LoadName == name {
+		if skill.File == file {
 			return skill, nil
 		}
 	}
-	return Skill{Name: name, Description: description, Category: "general", LoadName: name, Dir: dir}, nil
+	return Skill{Name: name, Description: description, Category: firstNonEmpty(category, "general"), LoadName: name, Dir: dir}, nil
+}
+
+// firstNonEmpty returns the first non-blank value, or "" when all are blank.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // Update replaces one substring of a skill's SKILL.md, identified by an
