@@ -15,6 +15,8 @@ const testConfig = `providers:
 model:
   provider: custom:fake
   default: fake/model
+api:
+  key: 0123456789abcdef
 platforms:
   api:
     enabled: true
@@ -70,5 +72,22 @@ func TestSetKeyRejectsShortKey(t *testing.T) {
 	}
 	if code, _, _ := run(t, root, "set-key"); code != exitUsage {
 		t.Fatalf("missing flag = %d, want usage", code)
+	}
+}
+
+func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "bob", "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	if code, _, _ := run(t, root, "show", "--profile", "default"); code != 0 {
+		t.Fatal("cross-profile read rejected")
+	}
+	if code, _, _ := run(t, root, "set-key", "--profile", "default", "--key", "0123456789abcdef"); code == 0 {
+		t.Fatal("cross-profile set-key accepted")
 	}
 }

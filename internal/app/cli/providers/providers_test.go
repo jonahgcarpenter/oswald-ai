@@ -105,3 +105,34 @@ func TestRejectsUnknownCommand(t *testing.T) {
 		t.Fatalf("unknown = %d, want usage", code)
 	}
 }
+
+func bobScope(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "bob", "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+}
+
+func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	bobScope(t, root)
+	code, out, _ := run(t, root, "list", "--profile", "default")
+	if code != 0 || !strings.Contains(out, "fake") {
+		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	}
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "add", "--profile", "default", "evil", "--api", "http://127.0.0.1:9998/v1"); code == 0 {
+		t.Fatal("cross-profile add accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("default config mutated by rejected add")
+	}
+	if code, _, stderr := run(t, root, "add", "mine", "--api", "http://127.0.0.1:9998/v1"); code != 0 {
+		t.Fatalf("own-scope add rejected: %s", stderr)
+	}
+}

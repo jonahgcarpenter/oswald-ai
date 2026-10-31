@@ -133,3 +133,18 @@ func TestValidateAcceptsAndRejects(t *testing.T) {
 		t.Fatal("invalid validate accepted")
 	}
 }
+
+func TestCrossProfileReadAllowed(t *testing.T) {
+	root := testRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "bob", "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	code, out, _ := run(t, root, "get", "runtime.log_level", "--profile", "default")
+	if code != 0 || !strings.Contains(out, "info") {
+		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	}
+}

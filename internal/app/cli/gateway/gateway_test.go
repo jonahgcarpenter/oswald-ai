@@ -130,3 +130,28 @@ func TestRetiredSpellingRedirects(t *testing.T) {
 		}
 	}
 }
+
+func TestNamedScopeReadsAllowedMutationsDenied(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	if code, _, _ := run(t, root, "show"); code != 0 {
+		t.Fatal("named-scope show rejected")
+	}
+	if code, _, _ := run(t, root, "routes", "list"); code != 0 {
+		t.Fatal("named-scope routes list rejected")
+	}
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "set-multiplex", "false"); code == 0 {
+		t.Fatal("named-scope set-multiplex accepted")
+	}
+	if code, _, _ := run(t, root, "routes", "add", "--name", "x", "--platform", "discord", "--user-id", "1", "--profile", "default"); code == 0 {
+		t.Fatal("named-scope routes add accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if string(before) != string(after) {
+		t.Fatal("global config mutated by rejected gateway command")
+	}
+}

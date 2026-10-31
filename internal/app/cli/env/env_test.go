@@ -105,7 +105,24 @@ func TestProfileResolvesFromOswaldHome(t *testing.T) {
 	if strings.Contains(out, "bobval") {
 		t.Fatal("value leaked in env-scoped show")
 	}
-	if code, _, _ := run(t, root, "--profile", "alice", "show"); code == 0 {
-		t.Fatal("cross-profile --profile accepted under OSWALD_HOME")
+	// Reads may name another profile…
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "alice"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "alice", ".env"), []byte("ALICE_KEY=aliceval\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ = run(t, root, "show", "--profile", "alice")
+	if code != 0 || !strings.Contains(out, "ALICE_KEY") {
+		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	}
+	// …but mutations stay fenced to the calling scope.
+	aliceBefore, _ := os.ReadFile(filepath.Join(root, "profiles", "alice", ".env"))
+	if code, _, _ := run(t, root, "set", "--profile", "alice", "HACK", "x"); code == 0 {
+		t.Fatal("cross-profile env set accepted")
+	}
+	aliceAfter, _ := os.ReadFile(filepath.Join(root, "profiles", "alice", ".env"))
+	if !bytes.Equal(aliceBefore, aliceAfter) {
+		t.Fatal("alice env mutated by rejected set")
 	}
 }

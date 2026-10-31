@@ -34,7 +34,7 @@ func remove(ctx context.Context, root string, args []string, stdout, stderr io.W
 		return exitUsage
 	}
 	// Resolve the profile root for optional token cleanup before mutating.
-	_, _, profileRoot, err := resolveScope(root, *profile)
+	_, _, profileRoot, err := resolveScope(root, *profile, true)
 	if err != nil {
 		reportMCPError(stderr, err)
 		return exitError

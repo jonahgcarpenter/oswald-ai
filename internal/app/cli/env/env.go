@@ -6,10 +6,10 @@ package env
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
@@ -21,21 +21,17 @@ const (
 	exitUsage = 2
 )
 
-// Run dispatches the env command group.
+// Run dispatches the env command group. --profile is accepted in any
+// position; reads may name another profile, mutations stay fenced to the
+// calling scope.
 func Run(_ context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	_ = stdin
-	fs := flag.NewFlagSet("env", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	profileFlag := fs.String("profile", "", "operator profile owning the environment file")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
-	}
-	rest := fs.Args()
+	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		envUsage(stderr)
 		return exitUsage
 	}
-	target, err := resolveTarget(root, *profileFlag)
+	target, err := resolveTarget(root, profile, rest[0] != "show")
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -82,8 +78,14 @@ type target struct {
 	path    string
 }
 
-func resolveTarget(root, profile string) (*target, error) {
-	name, err := config.ResolveProfile(profile)
+func resolveTarget(root, profile string, mutating bool) (*target, error) {
+	var name string
+	var err error
+	if mutating {
+		name, err = config.ResolveProfile(profile)
+	} else {
+		name, err = config.ResolveReadProfile(profile)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -126,4 +128,27 @@ func unset(t *target, name string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "unset %s\n", name)
 	return exitOK
+}
+
+// splitProfile extracts --profile NAME / --profile=NAME in any position,
+// returning the profile value and remaining args.
+func splitProfile(args []string) (string, []string) {
+	var rest []string
+	profile := ""
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		if token == "--profile" {
+			if i+1 < len(args) {
+				i++
+				profile = args[i]
+			}
+			continue
+		}
+		if strings.HasPrefix(token, "--profile=") {
+			profile = strings.TrimPrefix(token, "--profile=")
+			continue
+		}
+		rest = append(rest, token)
+	}
+	return profile, rest
 }

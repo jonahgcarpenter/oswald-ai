@@ -124,3 +124,26 @@ func TestProfileFlagAnyPosition(t *testing.T) {
 		t.Fatalf("profile-last show = %d", code)
 	}
 }
+
+func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "bob", "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	code, out, _ := run(t, root, "show", "--profile", "default")
+	if code != 0 || !strings.Contains(out, "web_search") {
+		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	}
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "set", "--profile", "default", "web-search", "--searxng-url", "http://127.0.0.1:9999"); code == 0 {
+		t.Fatal("cross-profile set accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("default config mutated by rejected set")
+	}
+}

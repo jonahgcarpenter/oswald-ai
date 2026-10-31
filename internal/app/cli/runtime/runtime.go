@@ -46,6 +46,10 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		}
 		return show(root, stdout, stderr)
 	case "set":
+		if err := config.RequireDefaultScope(); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return exitError
+		}
 		return setCmd(root, rest[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		runtimeUsage(stdout)

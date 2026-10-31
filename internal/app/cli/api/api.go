@@ -30,7 +30,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		apiUsage(stderr)
 		return exitUsage
 	}
-	target, err := resolveTarget(root, profile)
+	target, err := resolveTarget(root, profile, !(rest[0] == "show"))
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -73,8 +73,14 @@ type target struct {
 	path    string
 }
 
-func resolveTarget(root, profile string) (*target, error) {
-	name, err := config.ResolveProfile(profile)
+func resolveTarget(root, profile string, mutating bool) (*target, error) {
+	var name string
+	var err error
+	if mutating {
+		name, err = config.ResolveProfile(profile)
+	} else {
+		name, err = config.ResolveReadProfile(profile)
+	}
 	if err != nil {
 		return nil, err
 	}

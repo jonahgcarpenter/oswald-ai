@@ -138,3 +138,22 @@ func TestSetRejectsUnknownPlatform(t *testing.T) {
 		t.Fatalf("enable unknown = %d, want usage", code)
 	}
 }
+
+func TestNamedScopeReadsAllowedMutationsDenied(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	if code, _, _ := run(t, root, "show"); code != 0 {
+		t.Fatal("named-scope show rejected")
+	}
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "enable", "bluebubbles"); code == 0 {
+		t.Fatal("named-scope enable accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if string(before) != string(after) {
+		t.Fatal("global config mutated by rejected platforms command")
+	}
+}

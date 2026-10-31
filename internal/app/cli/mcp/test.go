@@ -37,7 +37,7 @@ func testCmd(ctx context.Context, root string, args []string, stdout, stderr io.
 		return exitUsage
 	}
 	name := serverName(rest[0])
-	profileCfg, profileName, profileRoot, err := resolveScope(root, *profile)
+	profileCfg, profileName, profileRoot, err := resolveScope(root, *profile, false)
 	if err != nil {
 		reportMCPError(stderr, err)
 		return exitError

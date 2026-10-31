@@ -61,12 +61,22 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		}
 		return show(root, stdout, stderr)
 	case "set-multiplex":
+		if err := config.RequireDefaultScope(); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return exitError
+		}
 		if len(args) != 2 {
 			fmt.Fprintln(stderr, "usage: oswald gateway set-multiplex <true|false>")
 			return exitUsage
 		}
 		return setMultiplex(root, args[1], stdout, stderr)
 	case "routes":
+		if len(args) >= 2 && (args[1] == "add" || args[1] == "remove") {
+			if err := config.RequireDefaultScope(); err != nil {
+				fmt.Fprintf(stderr, "%v\n", err)
+				return exitError
+			}
+		}
 		return routesCmd(root, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		gatewayUsage(stdout)

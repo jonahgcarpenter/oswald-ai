@@ -67,7 +67,7 @@ func auth(ctx context.Context, root string, args []string, stdin io.Reader, stdo
 		if err != nil {
 			return nil, "", err
 		}
-		selected, _, root, err := resolveScope(root, resolved)
+		selected, _, root, err := resolveScope(root, resolved, true)
 		if err != nil {
 			return nil, "", err
 		}

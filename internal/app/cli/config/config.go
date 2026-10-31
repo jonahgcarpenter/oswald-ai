@@ -116,7 +116,7 @@ type target struct {
 }
 
 func resolveTarget(root, profile string) (*target, error) {
-	name, err := config.ResolveProfile(profile)
+	name, err := config.ResolveReadProfile(profile)
 	if err != nil {
 		return nil, err
 	}

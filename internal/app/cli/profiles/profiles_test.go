@@ -341,3 +341,19 @@ func TestRenameSucceedsAfterUnrouting(t *testing.T) {
 		t.Fatalf("renamed profile incomplete: %v", err)
 	}
 }
+
+func TestLifecycleDeniedFromNamedScope(t *testing.T) {
+	root := profileRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("")
+	if code := Run(context.Background(), root, []string{"create", "charlie"}, stdin, &stdout, &stderr); code == 0 {
+		t.Fatal("named-scope profile create accepted")
+	}
+	if _, err := os.Stat(filepath.Join(root, "profiles", "charlie")); !os.IsNotExist(err) {
+		t.Fatal("charlie profile created by rejected command")
+	}
+}

@@ -53,20 +53,27 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 			name = args[1]
 		}
 		return show(root, name, stdout, stderr)
-	case "enable":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald platforms enable <discord|bluebubbles|api>")
-			return exitUsage
+	case "enable", "disable", "set":
+		if err := config.RequireDefaultScope(); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return exitError
 		}
-		return setEnabledCmd(root, args[1], true, stdout, stderr)
-	case "disable":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald platforms disable <discord|bluebubbles|api>")
-			return exitUsage
+		switch args[0] {
+		case "enable":
+			if len(args) != 2 {
+				fmt.Fprintln(stderr, "usage: oswald platforms enable <discord|bluebubbles|api>")
+				return exitUsage
+			}
+			return setEnabledCmd(root, args[1], true, stdout, stderr)
+		case "disable":
+			if len(args) != 2 {
+				fmt.Fprintln(stderr, "usage: oswald platforms disable <discord|bluebubbles|api>")
+				return exitUsage
+			}
+			return setEnabledCmd(root, args[1], false, stdout, stderr)
+		default:
+			return setCmd(root, args[1:], stdout, stderr)
 		}
-		return setEnabledCmd(root, args[1], false, stdout, stderr)
-	case "set":
-		return setCmd(root, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		platformsUsage(stdout)
 		return exitOK

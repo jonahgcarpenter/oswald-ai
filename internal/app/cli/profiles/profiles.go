@@ -37,12 +37,19 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 		return exitUsage
 	}
 	switch args[0] {
-	case "create":
-		return create(ctx, root, args[1:], stdout, stderr)
-	case "rename":
-		return renameProfile(ctx, root, args[1:], stdout, stderr)
-	case "delete":
-		return deleteProfile(ctx, root, args[1:], stdin, stdout, stderr)
+	case "create", "rename", "delete":
+		if err := config.RequireDefaultScope(); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return exitError
+		}
+		switch args[0] {
+		case "create":
+			return create(ctx, root, args[1:], stdout, stderr)
+		case "rename":
+			return renameProfile(ctx, root, args[1:], stdout, stderr)
+		default:
+			return deleteProfile(ctx, root, args[1:], stdin, stdout, stderr)
+		}
 	case "help", "-h", "--help":
 		profileUsage(stdout)
 		return exitOK

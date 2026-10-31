@@ -26,7 +26,7 @@ func listCmd(ctx context.Context, root string, args []string, stdout, stderr io.
 		fmt.Fprintln(stderr, "usage: oswald mcp list [--profile NAME]")
 		return exitUsage
 	}
-	profileCfg, _, profileRoot, err := resolveScope(root, *profile)
+	profileCfg, _, profileRoot, err := resolveScope(root, *profile, false)
 	if err != nil {
 		reportMCPError(stderr, err)
 		return exitError

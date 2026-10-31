@@ -11,10 +11,16 @@ import (
 )
 
 // resolveScope loads the configuration and selects the operator profile
-// named by the --profile flag (or OSWALD_HOME when empty). Explicit flags
-// contradicting OSWALD_HOME fail closed via ResolveProfile.
-func resolveScope(root, flagProfile string) (profile *config.Config, profileName, profileRoot string, err error) {
-	name, err := config.ResolveProfile(flagProfile)
+// named by the --profile flag (or OSWALD_HOME when empty). Reads may name
+// another profile; mutations fail closed on contradiction via
+// ResolveProfile.
+func resolveScope(root, flagProfile string, mutating bool) (profile *config.Config, profileName, profileRoot string, err error) {
+	var name string
+	if mutating {
+		name, err = config.ResolveProfile(flagProfile)
+	} else {
+		name, err = config.ResolveReadProfile(flagProfile)
+	}
 	if err != nil {
 		return nil, "", "", err
 	}

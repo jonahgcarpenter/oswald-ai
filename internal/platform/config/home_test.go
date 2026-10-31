@@ -97,3 +97,54 @@ func TestResolveProfile(t *testing.T) {
 		t.Fatalf("default profile = %q %v", got, err)
 	}
 }
+
+func TestResolveReadProfile(t *testing.T) {
+	root := t.TempDir()
+	bob := filepath.Join(root, "profiles", "bob")
+	if err := os.MkdirAll(bob, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(OswaldHomeEnv, bob)
+	// Reads default to the calling scope.
+	if got, err := ResolveReadProfile(""); err != nil || got != "bob" {
+		t.Fatalf("env profile = %q %v", got, err)
+	}
+	// Reads may name another profile: visibility is cross-profile.
+	if got, err := ResolveReadProfile("alice"); err != nil || got != "alice" {
+		t.Fatalf("cross-profile read rejected: %q %v", got, err)
+	}
+	if got, err := ResolveReadProfile("default"); err != nil || got != "default" {
+		t.Fatalf("default read rejected: %q %v", got, err)
+	}
+	// Malformed names still fail.
+	if _, err := ResolveReadProfile("Bad Name!"); err == nil {
+		t.Fatal("invalid --profile accepted for read")
+	}
+
+	t.Setenv(OswaldHomeEnv, "")
+	if got, err := ResolveReadProfile(""); err != nil || got != "default" {
+		t.Fatalf("default profile = %q %v", got, err)
+	}
+}
+
+func TestRequireDefaultScope(t *testing.T) {
+	root := t.TempDir()
+	bob := filepath.Join(root, "profiles", "bob")
+	if err := os.MkdirAll(bob, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(OswaldHomeEnv, bob)
+	if err := RequireDefaultScope(); err == nil {
+		t.Fatal("named scope allowed global mutation")
+	}
+	t.Setenv(OswaldHomeEnv, root)
+	if err := RequireDefaultScope(); err != nil {
+		t.Fatalf("default scope rejected: %v", err)
+	}
+	t.Setenv(OswaldHomeEnv, "")
+	if err := RequireDefaultScope(); err != nil {
+		t.Fatalf("local operator rejected: %v", err)
+	}
+}
