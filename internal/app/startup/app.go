@@ -2,11 +2,17 @@ package startup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
+
+// errRebuildNeeded signals a validated non-hot configuration change: the
+// caller has shut down gracefully and should re-exec so the change takes
+// effect without operator action.
+var errRebuildNeeded = errors.New("configuration rebuild requested")
 
 // Error preserves a fixed operational event and the initialization cause.
 type Error struct {

@@ -121,7 +121,7 @@ func TestReloaderAppliesHotAdmissionChange(t *testing.T) {
 	// Debug level keeps the applied telemetry visible; the reload from info
 	// would correctly filter its own DEBUG event under the new level.
 	root, directory, log, output := reloadSetup(t, strings.Replace(reloadFixture, "log_level: info", "log_level: debug", 1))
-	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
 	loader.settle = 10 * time.Millisecond
 	if _, err := directory.Resolve("discord", "111", true); err != nil {
 		t.Fatalf("fixture identity rejected: %v", err)
@@ -141,7 +141,7 @@ func TestReloaderAppliesHotAdmissionChange(t *testing.T) {
 
 func TestReloaderAppliesLogLevel(t *testing.T) {
 	root, directory, log, _ := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
 	loader.settle = 10 * time.Millisecond
 	rewrite(t, root, "log_level: info", "log_level: debug")
 	loader.Check()
@@ -152,7 +152,7 @@ func TestReloaderAppliesLogLevel(t *testing.T) {
 
 func TestReloaderRejectsInvalidCandidate(t *testing.T) {
 	root, directory, log, output := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
 	loader.settle = 10 * time.Millisecond
 	if err := config.AtomicWritePrivateFile(filepath.Join(root, "config.yaml"), []byte("platforms: []\n")); err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestReloaderRejectsInvalidCandidate(t *testing.T) {
 
 func TestReloaderFlagsRestartRequired(t *testing.T) {
 	root, directory, log, output := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
 	loader.settle = 10 * time.Millisecond
 	rewrite(t, root, "default: fake/model", "default: fake/other")
 	loader.Check()
@@ -186,7 +186,7 @@ func TestReloaderFlagsRestartRequired(t *testing.T) {
 
 func TestReloaderStartStopJoins(t *testing.T) {
 	root, directory, log, _ := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
 	loader.interval = 5 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	loader.Start(ctx)
@@ -195,6 +195,50 @@ func TestReloaderStartStopJoins(t *testing.T) {
 	// Second stop must not block or panic.
 	loader.Stop()
 	_ = io.Discard
+}
+
+func TestReloaderRequestsRebuildOncePerStableChange(t *testing.T) {
+	root, directory, log, _ := reloadSetup(t, reloadFixture)
+	rebuild := make(chan struct{}, 1)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, rebuild)
+	loader.settle = 10 * time.Millisecond
+	rewrite(t, root, "default: fake/model", "default: fake/other")
+	loader.Check()
+	select {
+	case <-rebuild:
+	default:
+		t.Fatal("validated non-hot change did not request a rebuild")
+	}
+	// Unchanged fingerprint: no second signal.
+	loader.Check()
+	select {
+	case <-rebuild:
+		t.Fatal("stable fingerprint requested a second rebuild")
+	default:
+	}
+}
+
+func TestReloaderRebuildSkipsHotAndInvalid(t *testing.T) {
+	root, directory, log, _ := reloadSetup(t, reloadFixture)
+	rebuild := make(chan struct{}, 1)
+	loader := NewReloader(root, mustValidate(t, root), directory, log, rebuild)
+	loader.settle = 10 * time.Millisecond
+	rewrite(t, root, "log_level: info", "log_level: debug")
+	loader.Check()
+	select {
+	case <-rebuild:
+		t.Fatal("hot change requested a rebuild")
+	default:
+	}
+	if err := config.AtomicWritePrivateFile(filepath.Join(root, "config.yaml"), []byte("platforms: []\n")); err != nil {
+		t.Fatal(err)
+	}
+	loader.Check()
+	select {
+	case <-rebuild:
+		t.Fatal("invalid candidate requested a rebuild")
+	default:
+	}
 }
 
 func mustValidate(t *testing.T, root string) *config.Config {

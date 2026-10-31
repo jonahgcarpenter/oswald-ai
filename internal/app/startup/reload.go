@@ -16,7 +16,9 @@ import (
 // Hot-apply covers only state read live per message: the shared log level and
 // gateway admission policy (allow/ban lists, group mention rules). Listeners,
 // model clients, credentials, routes, mention patterns, tool backends, and MCP
-// sessions are captured at assembly and need a restart.
+// sessions are captured at assembly and applied through an automatic restart:
+// the watcher requests a rebuild and the service gracefully shuts down and
+// re-execs itself.
 const (
 	reloadPollInterval = 2 * time.Second
 	reloadSettleDelay  = 500 * time.Millisecond
@@ -24,8 +26,9 @@ const (
 
 // Reloader watches profile configuration files and validation-gates every
 // change: invalid candidates keep the current config live, hot-only diffs swap
-// in place, and anything else logs restart_required without touching live
-// state. It never rewrites operator files.
+// in place, and validated non-hot diffs request a supervised rebuild (the
+// service shuts down gracefully and re-execs so the change takes effect
+// without operator action). It never rewrites operator files.
 type Reloader struct {
 	root      string
 	interval  time.Duration
@@ -35,6 +38,7 @@ type Reloader struct {
 	directory *profiles.Directory
 	last      *config.Config
 	seen      map[string]fileID
+	rebuild   chan<- struct{}
 	stop      chan struct{}
 	done      chan struct{}
 }
@@ -46,15 +50,18 @@ type fileID struct {
 }
 
 // NewReloader captures the current fingerprint and effective config. The
-// directory and root log are updated in place on hot-only diffs.
-func NewReloader(root string, last *config.Config, directory *profiles.Directory, rootLog *config.Logger) *Reloader {
+// directory and root log are updated in place on hot-only diffs. A validated
+// non-hot diff sends one rebuild request on rebuild (buffered, non-blocking);
+// a nil rebuild channel keeps the legacy log-only behavior.
+func NewReloader(root string, last *config.Config, directory *profiles.Directory, rootLog *config.Logger, rebuild chan<- struct{}) *Reloader {
 	return &Reloader{
 		root: root, interval: reloadPollInterval, settle: reloadSettleDelay,
 		log:       rootLog.Server("app"),
 		rootLog:   rootLog,
 		directory: directory, last: last,
-		seen: fingerprint(root),
-		stop: make(chan struct{}), done: make(chan struct{}),
+		rebuild: rebuild,
+		seen:    fingerprint(root),
+		stop:    make(chan struct{}), done: make(chan struct{}),
 	}
 }
 
@@ -119,6 +126,12 @@ func (r *Reloader) Check() {
 	hot, classes := config.ClassifyReload(r.last, candidate)
 	if !hot {
 		r.log.Debug("config.reload.restart_required", "configuration change needs a restart", config.F("trigger", "watcher"), config.F("reason_code", strings.Join(classes, ",")))
+		if r.rebuild != nil {
+			select {
+			case r.rebuild <- struct{}{}:
+			default:
+			}
+		}
 		return
 	}
 	if err := r.directory.Swap(candidate); err != nil {
