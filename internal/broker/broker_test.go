@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -831,6 +832,152 @@ func TestCancelAllAgentWorkImmediatelyCompletesQueuedRequests(t *testing.T) {
 		t.Fatalf("canceled queued request reached processor: %+v", req)
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+func TestBrokerFiveLanesOverlap(t *testing.T) {
+	var current, peak atomic.Int32
+	release := make(chan struct{})
+	processor := &blockingProcessor{release: release, current: &current, peak: &peak}
+	b := NewBroker(processor, 5, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	results := make([]chan Result, 5)
+	for i := range results {
+		results[i] = make(chan Result, 1)
+		req := &Request{
+			RequestID:    "req-" + string(rune('a'+i)),
+			Principal:    principal,
+			SessionKey:   "session-" + string(rune('a'+i)),
+			Prompt:       "hello",
+			ResponseChan: results[i],
+		}
+		if err := b.Submit(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for peak.Load() < 5 {
+		if time.Now().After(deadline) {
+			t.Fatalf("peak overlap = %d, want 5", peak.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	for i, ch := range results {
+		select {
+		case result := <-ch:
+			if result.Err != nil || result.Response == nil {
+				t.Fatalf("result %d = %+v", i, result)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("result %d timed out", i)
+		}
+	}
+}
+
+func TestBrokerSameLaneSerialUnderParallelWorkers(t *testing.T) {
+	var mu sync.Mutex
+	var events []string
+	release := make(chan struct{})
+	processor := &eventProcessor{release: release, mu: &mu, events: &events}
+	b := NewBroker(processor, 5, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	submit := func(id, session string) chan Result {
+		ch := make(chan Result, 1)
+		if err := b.Submit(&Request{RequestID: id, Principal: principal, SessionKey: session, Prompt: "hi", ResponseChan: ch}); err != nil {
+			t.Fatal(err)
+		}
+		return ch
+	}
+	first := submit("first", "lane-a")
+	second := submit("second", "lane-a")
+	other := submit("other", "lane-b")
+	// The lane follower must not start while the head is blocked, even with
+	// idle workers available for other lanes.
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	for _, event := range events {
+		if event == "start second" {
+			mu.Unlock()
+			t.Fatal("same-lane follower started before head completed")
+		}
+	}
+	mu.Unlock()
+	close(release)
+	for _, ch := range []chan Result{first, second, other} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("result timed out")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	firstEnd, secondStart := -1, -1
+	for i, event := range events {
+		switch event {
+		case "end first":
+			if firstEnd < 0 {
+				firstEnd = i
+			}
+		case "start second":
+			if secondStart < 0 {
+				secondStart = i
+			}
+		}
+	}
+	if firstEnd < 0 || secondStart < 0 || firstEnd > secondStart {
+		t.Fatalf("follower ran before head finished: %v", events)
+	}
+}
+
+type blockingProcessor struct {
+	release chan struct{}
+	current *atomic.Int32
+	peak    *atomic.Int32
+}
+
+func (p *blockingProcessor) Process(ctx context.Context, _ agent.Request) (*agent.Response, error) {
+	n := p.current.Add(1)
+	for {
+		if got := p.peak.Load(); n <= got || p.peak.CompareAndSwap(got, n) {
+			break
+		}
+	}
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		p.current.Add(-1)
+		return nil, ctx.Err()
+	}
+	p.current.Add(-1)
+	return &agent.Response{Response: "ok"}, nil
+}
+
+type eventProcessor struct {
+	release chan struct{}
+	mu      *sync.Mutex
+	events  *[]string
+}
+
+func (p *eventProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
+	p.mu.Lock()
+	*p.events = append(*p.events, "start "+req.RequestID)
+	p.mu.Unlock()
+	if req.RequestID != "other" {
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	p.mu.Lock()
+	*p.events = append(*p.events, "end "+req.RequestID)
+	p.mu.Unlock()
+	return &agent.Response{Response: "ok"}, nil
 }
 
 type captureProcessor struct {
