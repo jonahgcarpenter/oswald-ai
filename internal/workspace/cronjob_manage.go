@@ -22,12 +22,12 @@ import (
 func CronjobManageDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        CronjobManageName,
-		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m); all wall-clock times are UTC, convert before scheduling. Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script (a bare name under the profile scripts/ directory) for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing). Jobs run agent turns on a schedule and deliver results to the concrete deliver target. Operate by job_id or unique name; ambiguous names error instead of guessing.",
+		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m); stored times are UTC. If the request names a wall-clock time without an explicit zone, confirm the user's location/timezone first — ask, don't guess. Durations need no confirmation. Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script (a bare name under the profile scripts/ directory) for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing). Jobs run agent turns on a schedule and deliver results to the concrete deliver target. Operate by job_id or unique name; ambiguous names error instead of guessing.",
 		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
 			"action":           {Type: "string", Description: "create|list|update|pause|resume|remove|run"},
 			"job_id":           {Type: "string", Description: "Job ID or unique name for update/pause/resume/remove/run"},
 			"name":             {Type: "string", Description: "Human job name for create/update"},
-			"schedule":         {Type: "string", Description: "30m, every 2h, every monday 9am, 0 9 * * *, RFC3339 one-shot, or in 30m (UTC wall-clock)"},
+			"schedule":         {Type: "string", Description: "30m, every 2h, every monday 9am, 0 9 * * *, RFC3339 one-shot, or in 30m. Wall-clock forms are stored as UTC — confirm the zone with the user when unstated; in-phrases and durations need no zone"},
 			"prompt":           {Type: "string", Description: "Self-contained prompt; the final response is delivered and cannot ask questions. Omit when no_agent is true"},
 			"skills":           {Type: "array", Description: "Skill names available to the run", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"script":           {Type: "string", Description: "Script name under the profile scripts/ directory; stdout is injected (no_agent=true runs it as the job)"},
