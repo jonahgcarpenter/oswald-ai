@@ -21,7 +21,7 @@ Same-trust file groups (`groups.go::Classify`), not a jail. True isolation means
 container; within one install every profile's files are readable, with writes gated:
 
 - **protected** (no access at all): `.env*`, `credentials.*`, `*credentials.json`, `*.pem`,
-  `*.key`, `mcp-tokens/` at any depth, plus `/proc`, `/sys`, `/dev` outside the tree. Reads and
+  `*.key`, `mcp/` at any depth, plus `/proc`, `/sys`, `/dev` outside the tree. Reads and
   writes both fail closed. Cross-profile `state.db*` is protected too (reads redirect to
   `session_search`); same-profile `state.db*` reads are allowed.
 - **system-managed** (read-only, writes denied): `config.yaml`, non-scratch `cache/` (including

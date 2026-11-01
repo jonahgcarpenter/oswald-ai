@@ -12,19 +12,19 @@ import (
 )
 
 // remove deletes the mcp_servers.<name> entry through staged validation.
-// Token material is kept unless --with-tokens is passed; re-auth recreates it.
+// The server directory is kept unless --full is passed.
 func remove(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	_ = ctx
 	fs := flag.NewFlagSet("oswald mcp remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	profile := profileFlag(fs)
-	withTokens := fs.Bool("with-tokens", false, "also delete the server token directory")
-	flagArgs, rest := partitionArgs(args, map[string]bool{"profile": true}, map[string]bool{"with-tokens": true})
+	full := fs.Bool("full", false, "also delete the server directory")
+	flagArgs, rest := partitionArgs(args, map[string]bool{"profile": true}, map[string]bool{"full": true})
 	if err := fs.Parse(flagArgs); err != nil {
 		return exitUsage
 	}
 	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
-		fmt.Fprintln(stderr, "usage: oswald mcp remove <server> [--profile NAME] [--with-tokens]")
+		fmt.Fprintln(stderr, "usage: oswald mcp remove <server> [--profile NAME] [--full]")
 		return exitUsage
 	}
 	name := serverName(rest[0])
@@ -33,7 +33,7 @@ func remove(ctx context.Context, root string, args []string, stdout, stderr io.W
 		fmt.Fprintf(stderr, "%v\n", err)
 		return exitUsage
 	}
-	// Resolve the profile root for optional token cleanup before mutating.
+	// Resolve the profile root for optional directory cleanup before mutating.
 	_, _, profileRoot, err := resolveScope(root, *profile, true)
 	if err != nil {
 		reportMCPError(stderr, err)
@@ -48,19 +48,19 @@ func remove(ctx context.Context, root string, args []string, stdout, stderr io.W
 		fmt.Fprintf(stderr, "oswald: unknown MCP server %q\n", name)
 		return exitError
 	}
-	if *withTokens {
+	if *full {
 		dropped, err := mcp.RemoveServerTokens(profileRoot, name)
 		if err != nil {
 			fmt.Fprintf(stderr, "oswald: %v\n", err)
 			return exitError
 		}
 		if dropped {
-			fmt.Fprintf(stdout, "removed MCP server %q and its tokens\n", name)
+			fmt.Fprintf(stdout, "removed MCP server %q and its directory\n", name)
 		} else {
-			fmt.Fprintf(stdout, "removed MCP server %q (no tokens stored)\n", name)
+			fmt.Fprintf(stdout, "removed MCP server %q (no directory stored)\n", name)
 		}
 		return exitOK
 	}
-	fmt.Fprintf(stdout, "removed MCP server %q (tokens kept)\n", name)
+	fmt.Fprintf(stdout, "removed MCP server %q (directory kept)\n", name)
 	return exitOK
 }

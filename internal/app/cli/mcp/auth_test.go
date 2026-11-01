@@ -96,7 +96,7 @@ func TestAuthDeviceFlowStoresTokens(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit = %d (stderr=%q)", code, stderr.String())
 	}
-	data, err := os.ReadFile(filepath.Join(root, "mcp-tokens", "login.json"))
+	data, err := os.ReadFile(filepath.Join(root, "mcp", "login", "login.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

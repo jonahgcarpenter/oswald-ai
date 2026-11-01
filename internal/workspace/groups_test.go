@@ -34,8 +34,10 @@ func TestClassifyGroups(t *testing.T) {
 		{filepath.Join(root, "deploy.pem"), GroupProtected},
 		{filepath.Join(root, "id.key"), GroupProtected},
 		{filepath.Join(root, "vault", "credentials.json"), GroupProtected},
-		{filepath.Join(root, "mcp-tokens", "tok"), GroupProtected},
-		{filepath.Join(root, "profiles", "bob", "mcp-tokens", "tok"), GroupProtected},
+		{filepath.Join(root, "mcp", "robinhood", "robinhood.json"), GroupProtected},
+		{filepath.Join(root, "mcp", "spotify", "auth.json"), GroupProtected},
+		{filepath.Join(root, "profiles", "bob", "mcp", "robinhood", "robinhood.json"), GroupProtected},
+		{filepath.Join(root, "profiles", "bob", "mcp", "spotify", "auth.json"), GroupProtected},
 		// Outside the tree: virtual filesystems stay sealed.
 		// Sealed: process secret vectors, even though /proc telemetry roams.
 		{filepath.Join(string(filepath.Separator), "proc", "self", "environ"), GroupProtected},

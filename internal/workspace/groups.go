@@ -164,7 +164,7 @@ func isStateDBBase(base string) bool {
 
 // isProtectedName reports secret- or operator-bearing names at any depth:
 // dotenv files, profile configuration, credential stores, and private keys.
-// Callers classify basenames and the mcp-tokens directory alike.
+// Callers classify basenames and the mcp directory alike.
 func isProtectedName(abs string) bool {
 	base := filepath.Base(abs)
 	if base == "config.yaml" {
@@ -178,7 +178,7 @@ func isProtectedName(abs string) bool {
 		strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
 		return true
 	}
-	return hasPathComponent(abs, "mcp-tokens")
+	return hasPathComponent(abs, "mcp")
 }
 
 func hasPathComponent(path, name string) bool {

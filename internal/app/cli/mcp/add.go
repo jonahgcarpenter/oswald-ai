@@ -61,7 +61,7 @@ func serverValueFlags() map[string]bool {
 }
 
 func serverBoolFlags() map[string]bool {
-	return map[string]bool{"enable": true, "disable": true, "with-tokens": true, "no-header": true, "no-env": true, "no-oauth": true}
+	return map[string]bool{"enable": true, "disable": true, "full": true, "no-header": true, "no-env": true, "no-oauth": true}
 }
 
 // add inserts a new mcp_servers.<name> entry through staged validation.

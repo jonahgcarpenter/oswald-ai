@@ -47,7 +47,9 @@ headers, 32 env entries; map values ≤8,192 bytes, no newlines or NULs. stdio t
 bounded args/cwd/`env` and forbids transport/headers/auth keys; HTTP defaults to
 `streamable_http` (SSE is the opt-in) and may carry static headers plus tool include/exclude
 filters (empty include allows all, exclude wins). OAuth exists only on streamable HTTP and owns
-the `Authorization` header — a static one alongside is rejected. An automatic restart
+the `Authorization` header — a static one alongside is rejected. Each server owns
+its private `mcp/<name>/` home (0700): a stdio home for auth files and working
+material, or OAuth tokens; the whole `mcp/` tree is workspace-protected. An automatic restart
 reloads configuration;
 inherited servers become independent profile-owned connections, with no runtime global
 administration and no encryption key.
@@ -63,7 +65,10 @@ cached registration redirect URI across runs. Scope selection has a fixed priori
 `scopes_supported`, then omitted — with `offline_access` appended when the grant list warrants it.
 Refresh posts under a 30s cross-process fence, adopts a peer-rotated pair instead of spending a
 burned grant, and discards dead dynamic registrations (operator clients never auto-heal). Tokens,
-clients, and metadata persist as 0600 files under `<profile>/mcp-tokens/` (0700).
+clients, and metadata persist as 0600 files under `<profile>/mcp/<server>/` (0700,
+e.g. `mcp/robinhood/robinhood.json`). Startup self-heals only permissions on the
+existing `mcp/` parent and each `mcp/<server>/` dir (`RepairTokens`, no creation;
+symlinks fail closed).
 
 The boundary to internalize: endpoints, catalogs, commands, and credentials are trusted operator
 configuration — local HTTP endpoints and stdio commands run on operator trust, with no
@@ -77,8 +82,8 @@ beside the file, atomic replace) — there is no generic `config set`; `oswald c
 read-only (`show|get|validate`). `list` never
 dials and never prints endpoints, headers, or secrets. `test` dials once via the same transport
 constructors as the runtime bridge, reporting a failed server with its connection reason
-instead of an empty ok. `remove` keeps `mcp-tokens/<server>.*` unless `--with-tokens`
-is passed. Flag secrets (`--oauth-client-secret`, header values) follow the `env set` posture:
+instead of an empty ok. `remove` keeps `mcp/<server>/` unless `--full`
+is passed (which deletes the whole server directory). Flag secrets (`--oauth-client-secret`, header values) follow the `env set` posture:
 never echoed or logged.
 
 ## Tests

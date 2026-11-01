@@ -54,7 +54,7 @@ func TestRemoveServerTokens(t *testing.T) {
 	if err != nil || !dropped {
 		t.Fatalf("remove = %v %v", dropped, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, tokenDirName, "docs")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "mcp", "docs")); !os.IsNotExist(err) {
 		t.Fatal("token dir survived")
 	}
 	dropped, err = RemoveServerTokens(root, "docs")
