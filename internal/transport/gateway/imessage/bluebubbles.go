@@ -102,83 +102,9 @@ func (g *Gateway) startTyping(chatGUID string, scoped ...*config.Logger) error {
 	return g.sendTypingRequest(http.MethodPost, chatGUID, scoped...)
 }
 
-// startupTypingClearLimit bounds the startup typing sweep.
-const startupTypingClearLimit = 100
-
-// clearStaleTypingIndicators best-effort clears stuck typing indicators left
-// behind by a previous process lifetime. It never fails startup.
-func (g *Gateway) clearStaleTypingIndicators(scoped ...*config.Logger) {
-	log := g.log(scoped...)
-	if !g.blueBubblesPrivateAPIAvailable(log) {
-		return
-	}
-	guids, err := g.queryChatGUIDs(startupTypingClearLimit, log)
-	if err != nil {
-		log.Debug("gateway.typing.startup_clear_failed", "failed to list BlueBubbles chats for typing clear", config.F("status", "degraded"), config.ErrorField(err))
-		return
-	}
-	cleared := 0
-	for _, guid := range guids {
-		if err := g.stopTyping(guid, log); err == nil {
-			cleared++
-		}
-	}
-	log.Debug("gateway.typing.startup_clear", "cleared stale imessage typing indicators", config.F("chat_count", len(guids)), config.F("cleared_count", cleared))
-}
-
-// queryChatGUIDs returns a deduped list of chat GUIDs for the startup sweep.
-func (g *Gateway) queryChatGUIDs(limit int, scoped ...*config.Logger) ([]string, error) {
-	if limit <= 0 {
-		limit = startupTypingClearLimit
-	}
-	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/chat/query", g.BlueBubblesPassword)
-	if err != nil {
-		return nil, err
-	}
-	body, err := json.Marshal(map[string]int{"limit": limit})
-	if err != nil {
-		return nil, fmt.Errorf("marshal BlueBubbles chat query payload: %w", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build BlueBubbles chat query request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := g.httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send BlueBubbles chat query request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("BlueBubbles chat query failed with status %d", resp.StatusCode)
-	}
-	var result struct {
-		Data []struct {
-			GUID string `json:"guid"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode BlueBubbles chat query response: %w", err)
-	}
-	seen := make(map[string]struct{}, len(result.Data))
-	guids := make([]string, 0, len(result.Data))
-	for _, entry := range result.Data {
-		guid := strings.TrimSpace(entry.GUID)
-		if guid == "" {
-			continue
-		}
-		if _, dup := seen[guid]; dup {
-			continue
-		}
-		seen[guid] = struct{}{}
-		guids = append(guids, guid)
-	}
-	return guids, nil
-}
-
-// stopTyping disables the typing indicator for the given chat. Sending a
-// message usually clears it server-side; this is a backup for when that
-// automatic clear fails and the indicator would otherwise stick.
+// stopTyping disables the typing indicator for the given chat. Terminal
+// sends assume the server auto-clears and rely on the scheduled backup stop;
+// cancels and shutdown call this deliberately since no reply was sent.
 func (g *Gateway) stopTyping(chatGUID string, scoped ...*config.Logger) error {
 	return g.sendTypingRequest(http.MethodDelete, chatGUID, scoped...)
 }

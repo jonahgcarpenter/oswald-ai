@@ -267,13 +267,18 @@ func (t *typingGate) wait() {
 
 func (g *Gateway) startProcessingIndicators(chatGUID, requestID string, gate *typingGate) {
 	log := g.log().With(config.F("request_id", requestID))
+	g.trackTypingActive(chatGUID)
 	go func() {
 		defer gate.finish()
 		g.markRead(chatGUID, log)
-		time.Sleep(typingAfterReadDelay)
+		// Fire immediately on admission: the indicator must cover the whole
+		// pipeline, not just the agent turn. A new POST also supersedes the
+		// previous turn's pending backup stop for this chat.
 		if err := g.startTyping(chatGUID, log); err != nil {
 			log.Debug("gateway.typing.failed", "failed to start BlueBubbles typing indicator", config.F("status", "degraded"), config.ErrorField(err))
+			return
 		}
+		g.cancelPendingBackup(chatGUID)
 	}()
 }
 

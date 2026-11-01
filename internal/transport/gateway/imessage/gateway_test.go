@@ -621,6 +621,7 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 func TestIMessageStopsTypingAfterAgentResponse(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	g.typingBackupAfter = 100 * time.Millisecond
 	defer b.Shutdown()
 	defer bb.server.Close()
 
@@ -661,6 +662,7 @@ func TestIMessageStopsTypingAfterAgentResponse(t *testing.T) {
 func TestIMessageStopsTypingAfterCommandResponse(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	g.typingBackupAfter = 100 * time.Millisecond
 	defer b.Shutdown()
 	defer bb.server.Close()
 
@@ -699,12 +701,16 @@ func TestIMessageStopsTypingAfterCommandResponse(t *testing.T) {
 }
 
 func TestIMessageResponderStopsTypingOnAllTerminalSends(t *testing.T) {
+	// Sends assume the server auto-clears and share one precautionary backup
+	// stop; the cancel sends one deliberate stop immediately. Total: 2.
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()
 	gate := newTypingGate()
 	gate.finish()
-	g := &Gateway{BlueBubblesURL: bb.server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
-	r := &runtimeResponder{gateway: g, requestID: "stop-test", chatGUID: "chat-direct", sessionKey: "session", senderID: "sender", typingGate: gate}
+	allowed := make(chan struct{})
+	close(allowed)
+	g := &Gateway{BlueBubblesURL: bb.server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext), typingBackupAfter: 100 * time.Millisecond}
+	r := &runtimeResponder{gateway: g, requestID: "stop-test", chatGUID: "chat-direct", sessionKey: "session", senderID: "sender", typingGate: gate, typingAllowed: allowed}
 
 	attachment := []commands.Attachment{{Filename: "note.txt", MIMEType: "text/plain", Data: []byte("data")}}
 	sends := []func() error{
@@ -728,7 +734,7 @@ func TestIMessageResponderStopsTypingOnAllTerminalSends(t *testing.T) {
 		t.Fatal("expected invalid attachments to fail")
 	}
 
-	want := len(sends) + 1
+	want := 2 // one deliberate cancel stop plus one shared backup stop
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		count := 0
@@ -744,6 +750,17 @@ func TestIMessageResponderStopsTypingOnAllTerminalSends(t *testing.T) {
 			t.Fatalf("expected %d typing stops, got %d in %+v", want, count, bb.orderedMethodPaths())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	// The shared backup must fire exactly once: no per-send duplicates.
+	time.Sleep(300 * time.Millisecond)
+	count := 0
+	for _, req := range bb.orderedMethodPaths() {
+		if req.method == http.MethodDelete && req.path == "/api/v1/chat/chat-direct/typing" {
+			count++
+		}
+	}
+	if count != want {
+		t.Fatalf("expected exactly %d typing stops, got %d in %+v", want, count, bb.orderedMethodPaths())
 	}
 }
 

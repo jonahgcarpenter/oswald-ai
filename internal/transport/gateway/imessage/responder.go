@@ -31,12 +31,12 @@ func (r *runtimeResponder) StartProcessing() (func(), error) {
 }
 
 func (r *runtimeResponder) SendFallback(text string) error {
-	defer r.stopProcessingIndicators()
+	defer r.scheduleBackupStop()
 	return r.sendAndRemember(text)
 }
 
 func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
-	defer r.stopProcessingIndicators()
+	defer r.scheduleBackupStop()
 	if err := result.ValidateAttachments(); err != nil {
 		return err
 	}
@@ -61,17 +61,19 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 }
 
 func (r *runtimeResponder) SendAgentError(text string) error {
-	defer r.stopProcessingIndicators()
+	defer r.scheduleBackupStop()
 	return r.sendAndRemember(text)
 }
 
 func (r *runtimeResponder) CancelAgentResponse() error {
-	r.stopProcessingIndicators()
+	// A cancel sends no reply, so the server cannot auto-clear: delete
+	// deliberately now, with the usual backup unless a new turn supersedes it.
+	r.cancelTyping()
 	return nil
 }
 
 func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
-	defer r.stopProcessingIndicators()
+	defer r.scheduleBackupStop()
 	if response == nil {
 		return nil
 	}
@@ -96,22 +98,44 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 	return nil
 }
 
-// stopProcessingIndicators clears the typing indicator after a send so a
-// missed server-side clear cannot leave it stuck. It waits for the delayed
-// start attempt first, runs off the send path, and never fails delivery.
-func (r *runtimeResponder) stopProcessingIndicators() {
+// scheduleBackupStop arms the single precautionary typing DELETE after a
+// terminal send. The server is assumed to clear the indicator when the reply
+// lands; the backup only catches the stuck case. It waits for the delayed
+// start attempt first so a fast command or fallback cannot DELETE before the
+// pending POST fires, then runs off the send path and never fails delivery.
+// Steer and queue follow-ups never call this — only the active turn's send.
+func (r *runtimeResponder) scheduleBackupStop() {
 	gate, allowed := r.typingGate, r.typingAllowed
+	if allowed == nil {
+		// Never admitted, so nothing started.
+		return
+	}
 	go func() {
 		select {
 		case <-allowed:
 			gate.wait()
-		default:
 		}
-		log := r.gateway.log().With(config.F("request_id", r.requestID))
-		if err := r.gateway.stopTyping(r.chatGUID, log); err != nil {
-			log.Debug("gateway.typing.stop_failed", "failed to stop BlueBubbles typing indicator", config.F("status", "degraded"), config.ErrorField(err))
-		}
+		r.gateway.scheduleBackupTypingStop(r.chatGUID, r.requestID)
 	}()
+}
+
+// cancelTyping sends one deliberate typing DELETE for a cancel. No reply is
+// sent on this path, so the server cannot auto-clear.
+func (r *runtimeResponder) cancelTyping() {
+	gate, allowed := r.typingGate, r.typingAllowed
+	if allowed != nil {
+		select {
+		case <-allowed:
+			gate.wait()
+		}
+	}
+	log := r.gateway.log().With(config.F("request_id", r.requestID))
+	if err := r.gateway.stopTypingNow(r.chatGUID, log); err != nil {
+		log.Debug("gateway.typing.stop_failed", "failed to stop BlueBubbles typing indicator on cancel", config.F("status", "degraded"), config.ErrorField(err))
+		return
+	}
+	log.Debug("gateway.typing.stop", "deliberately stopped typing indicator on cancel", config.F("status", "ok"))
+	r.gateway.scheduleBackupTypingStop(r.chatGUID, r.requestID)
 }
 
 func (r *runtimeResponder) sendAndRemember(text string) error {
