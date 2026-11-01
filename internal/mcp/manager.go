@@ -385,10 +385,18 @@ func connectStdio(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, 
 	if command == "" {
 		return nil, nil, fmt.Errorf("MCP stdio server %q has no command", cfg.Name)
 	}
+	stdioArgs := cfg.Args
+	// A cached npx package spawns its binary directly instead of keeping an
+	// npx parent resident per server; a miss keeps plain npx.
+	if launcherBase(command) == "npx" {
+		if bin, rest := npxCachedBin(cfg.Args); bin != "" {
+			command, stdioArgs = bin, rest
+		}
+	}
 	if _, err := exec.LookPath(command); err != nil {
 		return nil, nil, fmt.Errorf("MCP stdio server %q needs missing command %q in PATH: %w", cfg.Name, command, err)
 	}
-	cmd := exec.Command(command, cfg.Args...)
+	cmd := exec.Command(command, stdioArgs...)
 	if dir := strings.TrimSpace(cfg.Cwd); dir != "" {
 		cmd.Dir = dir
 	}
