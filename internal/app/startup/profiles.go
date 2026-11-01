@@ -79,7 +79,7 @@ func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cron
 			RequestID:   config.NewRequestID(),
 			Principal:   identity.Principal{CanonicalUserID: call.Profile, Gateway: "cron", ExternalID: "cron:" + call.Profile, Assurance: identity.AssuranceCronScheduler},
 			DisplayName: call.DisplayName, SessionKey: call.SessionKey, Prompt: call.Prompt,
-			SkipMemory: call.SkipMemory, EnabledToolsets: call.EnabledToolsets,
+			SkipMemory: call.SkipMemory, EnabledToolsets: call.EnabledToolsets, MCPServers: call.MCPServers,
 			ResponseChan: resp,
 		})
 		if err != nil {

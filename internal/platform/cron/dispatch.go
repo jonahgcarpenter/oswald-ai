@@ -22,6 +22,10 @@ type AgentCall struct {
 	Prompt          string
 	SkipMemory      bool
 	EnabledToolsets []string
+	// MCPServers scopes the MCP bridge for the turn. Nil exposes every
+	// profile server; an empty list exposes none. Passed through verbatim
+	// so the nil-vs-empty distinction survives.
+	MCPServers []string
 }
 
 // AgentResult is the completed agent turn.
@@ -200,7 +204,7 @@ func (d *Dispatcher) runAgentDispatch(ctx context.Context, job *Job, started tim
 	defer cancel()
 	result, err := d.Agent(waitCtx, AgentCall{
 		Profile: d.Profile, SessionKey: session, DisplayName: displayName(job),
-		Prompt: prompt, SkipMemory: true, EnabledToolsets: job.EnabledToolsets,
+		Prompt: prompt, SkipMemory: true, EnabledToolsets: job.EnabledToolsets, MCPServers: job.MCPServers,
 	})
 	if err != nil {
 		failed := true

@@ -105,9 +105,12 @@ type Request struct {
 	// scheduled turns neither read the frozen pair nor disturb it.
 	SkipMemory bool
 	// EnabledToolsets restricts the builtin catalog for this request. Nil
-	// disables filtering; an empty list hides every builtin and suppresses
-	// the MCP bridge.
+	// disables filtering; an empty list hides every builtin. The MCP bridge
+	// is governed independently by MCPServers.
 	EnabledToolsets []string
+	// MCPServers scopes the MCP bridge (tool_search/describe/call) for this
+	// request. Nil exposes every profile server; an empty list exposes none.
+	MCPServers []string
 	// ClientTools are caller-supplied function definitions for this request only.
 	ClientTools []llm.Tool
 	// ClientToolChoice is the normalized caller preference. Mode is one of
