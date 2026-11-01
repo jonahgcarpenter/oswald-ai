@@ -11,19 +11,35 @@ func TestParseFrontmatterFull(t *testing.T) {
 	if front.name != "review" || front.description != "Review code" || front.version != "2.0" {
 		t.Fatalf("unexpected frontmatter: %+v", front)
 	}
-	if len(front.platforms) != 2 || front.platforms[0] != "discord" {
-		t.Fatalf("unexpected platforms: %v", front.platforms)
-	}
-	if len(front.tags) != 2 {
-		t.Fatalf("unexpected tags: %v", front.tags)
-	}
 	if body != "# Body\nDo things." {
 		t.Fatalf("unexpected body %q", body)
 	}
 }
 
+func TestParseFrontmatterIgnoresHermesHeaders(t *testing.T) {
+	content := "---\nname: github\ndescription: \"GitHub via gh CLI: PRs, issues, reviews.\"\nversion: 2.0.0\nauthor: Ben Barclay\nlicense: MIT\nplatforms: [linux, macos, windows]\nmetadata:\n  hermes:\n    tags: [github, gh]\n    category: software-development\n---\nbody\n"
+	front, _, ok := parseFrontmatter(content)
+	if !ok {
+		t.Fatal("expected ok parse")
+	}
+	if front.name != "github" || front.description != "GitHub via gh CLI: PRs, issues, reviews." || front.version != "2.0.0" {
+		t.Fatalf("unexpected frontmatter: %+v", front)
+	}
+}
+
+func TestParseFrontmatterIgnoresNestedKeys(t *testing.T) {
+	content := "---\nname: top\ndescription: Top level\nmetadata:\n  description: nested must not win\n  tags:\n    - leaked\n---\nbody\n"
+	front, _, ok := parseFrontmatter(content)
+	if !ok {
+		t.Fatal("expected ok parse")
+	}
+	if front.description != "Top level" {
+		t.Fatalf("nested key leaked: %+v", front)
+	}
+}
+
 func TestParseFrontmatterQuotedAndInlineList(t *testing.T) {
-	content := "---\nname: 'my skill'\ndescription: \"does stuff # not a comment\"\nplatforms: [discord, imessage]\n---\nbody\n"
+	content := "---\nname: 'my skill'\ndescription: \"does stuff # not a comment\"\nversion: 1.0\n---\nbody\n"
 	front, body, ok := parseFrontmatter(content)
 	if !ok {
 		t.Fatal("expected ok parse")
@@ -33,9 +49,6 @@ func TestParseFrontmatterQuotedAndInlineList(t *testing.T) {
 	}
 	if front.description != "does stuff # not a comment" {
 		t.Fatalf("unexpected description %q", front.description)
-	}
-	if len(front.platforms) != 2 {
-		t.Fatalf("unexpected platforms %v", front.platforms)
 	}
 	if body != "body" {
 		t.Fatalf("unexpected body %q", body)

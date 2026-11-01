@@ -158,3 +158,36 @@ func TestCreateWithCategory(t *testing.T) {
 		t.Fatalf("unexpected categorized view: %+v", viewed)
 	}
 }
+
+func TestUpdateBumpsPatchVersion(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if _, err := store.Create("bump", "Bump version", "Step one.", ""); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.Update("bump", "Step one.", "Step one, then two.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != "1.0.1" {
+		t.Fatalf("expected patch bump to 1.0.1, got %q", updated.Version)
+	}
+	// An explicit version edit is respected, not double-bumped.
+	again, err := store.Update("bump", "version: 1.0.1", "version: 2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Version != "2.0.0" {
+		t.Fatalf("expected explicit version to stick, got %q", again.Version)
+	}
+}
+
+func TestUpdateRejectsLongDescription(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if _, err := store.Create("desc", "Short desc", "Body.", ""); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("x", 61)
+	if _, err := store.Update("desc", "Short desc", long); err == nil {
+		t.Fatal("expected long description to fail")
+	}
+}

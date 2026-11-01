@@ -7,23 +7,22 @@ import (
 
 // Bounds for selection metadata. Bodies have their own cap in read.go.
 const (
-	// maxDescriptionRunes clips one skill's index description.
-	maxDescriptionRunes = 200
+	// maxDescriptionRunes caps one skill's index description at 60 chars.
+	maxDescriptionRunes = 60
 	// maxSkillNameRunes bounds a declared skill name.
 	maxSkillNameRunes = 64
 	// maxSkillFileBytes caps how much of one SKILL.md is ever read.
 	maxSkillFileBytes = 1 << 20
 )
 
-// parsedSkill is the frontmatter subset the catalog understands. Unknown
-// keys are ignored so libraries carrying richer metadata keep working.
+// parsedSkill is the frontmatter subset the catalog understands: name,
+// description, and version only. Every other key (author, license,
+// platforms, tags, metadata, etc.) is ignored so libraries carrying
+// richer metadata keep working.
 type parsedSkill struct {
-	name          string
-	description   string
-	version       string
-	platforms     []string
-	prerequisites []string
-	tags          []string
+	name        string
+	description string
+	version     string
 }
 
 // parseFrontmatter splits raw SKILL.md content into frontmatter and body.
@@ -49,13 +48,26 @@ func parseFrontmatter(content string) (front parsedSkill, body string, ok bool) 
 	return front, strings.TrimSpace(strings.Join(lines[end+1:], "\n")), true
 }
 
-// parseFrontmatterKeys reads flat "key: value" pairs plus "- item" list
-// continuations. Values may be bare, single/double quoted, or [a, b]
-// inline lists; full-line "#" comments are dropped.
+// parseFrontmatterKeys reads flat top-level "key: value" pairs for name,
+// description, and version only. Only lines starting at column 0 count as
+// keys: indented lines (nested maps like metadata:, list items) are ignored
+// entirely. Values may be bare or single/double quoted; full-line "#"
+// comments and trailing comments outside quotes are dropped.
 func parseFrontmatterKeys(lines []string) parsedSkill {
 	var out parsedSkill
-	current := ""
-	flush := func(key, value string) {
+	for _, line := range lines {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		key, value, found := strings.Cut(trimmed, ":")
+		if !found {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
 		value = unquote(strings.TrimSpace(cutComment(value)))
 		switch key {
 		case "name":
@@ -64,52 +76,9 @@ func parseFrontmatterKeys(lines []string) parsedSkill {
 			out.description = value
 		case "version":
 			out.version = value
-		case "platforms":
-			out.platforms = append(out.platforms, splitListValue(value)...)
-		case "prerequisites":
-			out.prerequisites = append(out.prerequisites, splitListValue(value)...)
-		case "tags":
-			out.tags = append(out.tags, splitListValue(value)...)
-		}
-	}
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "- ") && current != "" {
-			flush(current, strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))
-			continue
-		}
-		key, value, found := strings.Cut(trimmed, ":")
-		if !found {
-			current = ""
-			continue
-		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		switch key {
-		case "name", "description", "version", "platforms", "prerequisites", "tags":
-			current = key
-			flush(key, value)
-		default:
-			current = ""
 		}
 	}
 	return out
-}
-
-// splitListValue expands "a, b" and "[a, b]" inline forms into items.
-func splitListValue(value string) []string {
-	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, "[")
-	value = strings.TrimSuffix(value, "]")
-	var items []string
-	for _, item := range strings.Split(value, ",") {
-		if item = unquote(strings.TrimSpace(item)); item != "" {
-			items = append(items, item)
-		}
-	}
-	return items
 }
 
 // cutComment drops a trailing comment: a "#" outside quotes that starts

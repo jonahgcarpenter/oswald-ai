@@ -10,15 +10,12 @@ import (
 
 // RawEntry is one SKILL.md found on disk, before catalog resolution.
 type RawEntry struct {
-	Name          string
-	Description   string
-	Version       string
-	Platforms     []string
-	Prerequisites []string
-	Tags          []string
-	Dir           string
-	File          string
-	Root          string
+	Name        string
+	Description string
+	Version     string
+	Dir         string
+	File        string
+	Root        string
 }
 
 // scanRoots walks the managed skills root (empty or missing reads as
@@ -73,30 +70,14 @@ func scanRoot(root string) []RawEntry {
 			description = fallbackDescription(body)
 		}
 		out = append(out, RawEntry{
-			Name:          name,
-			Description:   description,
-			Version:       strings.TrimSpace(front.version),
-			Platforms:     normalizedList(front.platforms),
-			Prerequisites: normalizedList(front.prerequisites),
-			Tags:          normalizedList(front.tags),
-			Dir:           dir,
-			File:          path,
-			Root:          root,
+			Name:        name,
+			Description: description,
+			Version:     strings.TrimSpace(front.version),
+			Dir:         dir,
+			File:        path,
+			Root:        root,
 		})
 		return nil
 	})
-	return out
-}
-
-// normalizedList trims, drops empties, and dedupes a metadata list.
-func normalizedList(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	var out []string
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" && !seen[value] {
-			seen[value] = true
-			out = append(out, value)
-		}
-	}
 	return out
 }
