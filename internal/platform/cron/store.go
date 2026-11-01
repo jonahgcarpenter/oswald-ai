@@ -95,6 +95,7 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 		Repeat:          input.Repeat,
 		Deliver:         deliver,
 		EnabledToolsets: append([]string(nil), input.EnabledToolsets...),
+		MCPServers:      copyStringsPreserveEmpty(input.MCPServers),
 		Enabled:         true,
 		State:           StateScheduled,
 		PausedReason:    strings.TrimSpace(input.PausedReason),
@@ -173,7 +174,19 @@ func (s *Store) validate(r *Runner, job *Job) error {
 	if len(job.Skills) > 32 {
 		return errors.New("skills exceed bounds")
 	}
+	if err := ValidateMCPServers(job.MCPServers); err != nil {
+		return err
+	}
 	return nil
+}
+
+// copyStringsPreserveEmpty copies a string list keeping the nil-vs-empty
+// distinction: nil stays nil (all), an empty list stays empty (none).
+func copyStringsPreserveEmpty(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(in)), in...)
 }
 
 // Resolve finds a job by id, exact name, or unambiguous name substring.

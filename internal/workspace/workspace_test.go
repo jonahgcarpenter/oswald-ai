@@ -420,6 +420,58 @@ func TestCronjobManageDeliverValidation(t *testing.T) {
 	}
 }
 
+func TestCronjobManageMCPServers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	store := cron.NewStore(root)
+	ctx := requestctx.WithMetadata(testContext("req-cron-mcp"), requestctx.Metadata{RequestID: "req-cron-mcp", SessionID: "discord:chan1:alice"})
+	manage := NewCronjobManageHandler(ws, store)
+	// Omitted exposes all.
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
+	if err != nil {
+		t.Fatalf("create = %v", err)
+	}
+	jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+	stored, err := store.Resolve(jobID)
+	if err != nil || stored.MCPServers != nil {
+		t.Fatalf("omitted = %+v %v", stored, err)
+	}
+	// Explicit list scopes.
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "mcp_servers": []interface{}{"homeassistant", "spotify"}}); err != nil {
+		t.Fatalf("update = %v", err)
+	}
+	stored, _ = store.Resolve(jobID)
+	if len(stored.MCPServers) != 2 || stored.MCPServers[0] != "homeassistant" {
+		t.Fatalf("scoped = %+v", stored.MCPServers)
+	}
+	// Empty list disables.
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "mcp_servers": []interface{}{}}); err != nil {
+		t.Fatalf("clear = %v", err)
+	}
+	stored, _ = store.Resolve(jobID)
+	if stored.MCPServers == nil || len(stored.MCPServers) != 0 {
+		t.Fatalf("cleared = %+v, want non-nil empty", stored.MCPServers)
+	}
+	// List shows the state.
+	listed, err := manage(ctx, map[string]interface{}{"action": "list"})
+	if err != nil || !strings.Contains(listed.Content, "mcp=none") {
+		t.Fatalf("list = %+v %v", listed, err)
+	}
+	// Bad names and shapes fail closed.
+	for _, args := range []map[string]interface{}{
+		{"action": "create", "schedule": "in 1h", "prompt": "hi", "mcp_servers": []interface{}{"Spotify"}},
+		{"action": "create", "schedule": "in 1h", "prompt": "hi", "mcp_servers": []interface{}{"*"}},
+		{"action": "create", "schedule": "in 1h", "prompt": "hi", "mcp_servers": "homeassistant"},
+	} {
+		if _, err := manage(ctx, args); err == nil {
+			t.Fatalf("bad allowlist accepted: %v", args["mcp_servers"])
+		}
+	}
+}
+
 func TestTerminalDangerousApproveExecutes(t *testing.T) {
 	approvals.Reset()
 	defer approvals.Reset()

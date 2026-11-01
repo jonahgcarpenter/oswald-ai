@@ -689,6 +689,71 @@ func mustCreate(t *testing.T, store *Store, in Job) Job {
 	return job
 }
 
+func TestMCPServersValidation(t *testing.T) {
+	for _, name := range []string{"homeassistant", "robinhood", "spotify", "a1", "ab"} {
+		if err := ValidateMCPServers([]string{name}); err != nil {
+			t.Fatalf("valid %q rejected: %v", name, err)
+		}
+	}
+	for _, name := range []string{"Spotify", "HomeAssistant", "soul", "a", "has space", "has-dash", "UPPER", ""} {
+		if err := ValidateMCPServers([]string{name}); err == nil {
+			t.Fatalf("invalid %q accepted", name)
+		}
+	}
+	if err := ValidateMCPServers([]string{"*"}); err == nil {
+		t.Fatal("wildcard accepted")
+	}
+	many := make([]string, 33)
+	for i := range many {
+		many[i] = "srv"
+	}
+	if err := ValidateMCPServers(many); err == nil {
+		t.Fatal("oversize allowlist accepted")
+	}
+}
+
+func TestMCPServersRoundTripPreservesNilVsEmpty(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "every 1h", now)
+	omitted := mustCreate(t, store, Job{Schedule: sched, Prompt: "hi", Deliver: testDeliver()})
+	if omitted.MCPServers != nil {
+		t.Fatalf("omitted = %+v, want nil", omitted.MCPServers)
+	}
+	none := mustCreate(t, store, Job{Schedule: sched, Prompt: "hi", Deliver: testDeliver(), MCPServers: []string{}})
+	if none.MCPServers == nil || len(none.MCPServers) != 0 {
+		t.Fatalf("empty = %+v, want non-nil empty", none.MCPServers)
+	}
+	scoped := mustCreate(t, store, Job{Schedule: sched, Prompt: "hi", Deliver: testDeliver(), MCPServers: []string{"homeassistant", "spotify"}})
+	jobs, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Job{}
+	for _, j := range jobs {
+		byID[j.ID] = j
+	}
+	if got := byID[omitted.ID].MCPServers; got != nil {
+		t.Fatalf("omitted reloaded = %+v, want nil", got)
+	}
+	if got := byID[none.ID].MCPServers; got == nil || len(got) != 0 {
+		t.Fatalf("empty reloaded = %+v, want non-nil empty", got)
+	}
+	if got := byID[scoped.ID].MCPServers; len(got) != 2 || got[0] != "homeassistant" || got[1] != "spotify" {
+		t.Fatalf("scoped reloaded = %+v", got)
+	}
+	// Raw JSON shape: null vs [].
+	data, _ := os.ReadFile(filepath.Join(root, "cron", "jobs.json"))
+	text := string(data)
+	if !strings.Contains(text, `"mcp_servers": null`) {
+		t.Fatalf("nil not stored as null:\n%s", text)
+	}
+	if !strings.Contains(text, `"mcp_servers": []`) {
+		t.Fatalf("empty not stored as []:\n%s", text)
+	}
+}
+
 func TestConcurrentCreatesNoLoss(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)

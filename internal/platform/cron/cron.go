@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,16 +100,20 @@ type Job struct {
 	Repeat          RepeatState `json:"repeat"`
 	Deliver         Deliver     `json:"deliver"`
 	EnabledToolsets []string    `json:"enabled_toolsets,omitempty"`
-	Enabled         bool        `json:"enabled"`
-	State           string      `json:"state,omitempty"`
-	PausedAt        *string     `json:"paused_at"`
-	PausedReason    string      `json:"paused_reason,omitempty"`
-	CreatedAt       string      `json:"created_at"`
-	NextRunAt       *string     `json:"next_run_at"`
-	LastRunAt       *string     `json:"last_run_at"`
-	LastStatus      string      `json:"last_status,omitempty"`
-	LastError       string      `json:"last_delivery_error,omitempty"`
-	FailureStreak   int         `json:"failure_streak"`
+	// MCPServers scopes the MCP bridge for the run: nil exposes every
+	// profile server, an empty list exposes none. Stored without omitempty
+	// so an explicit empty list survives a save/load round-trip.
+	MCPServers    []string `json:"mcp_servers"`
+	Enabled       bool     `json:"enabled"`
+	State         string   `json:"state,omitempty"`
+	PausedAt      *string  `json:"paused_at"`
+	PausedReason  string   `json:"paused_reason,omitempty"`
+	CreatedAt     string   `json:"created_at"`
+	NextRunAt     *string  `json:"next_run_at"`
+	LastRunAt     *string  `json:"last_run_at"`
+	LastStatus    string   `json:"last_status,omitempty"`
+	LastError     string   `json:"last_delivery_error,omitempty"`
+	FailureStreak int      `json:"failure_streak"`
 	// SlotUnix is the claimed occurrence instant for ledger dedupe. It is
 	// never persisted; ClaimDue stamps it on the dispatched copy.
 	SlotUnix int64 `json:"-"`
@@ -133,6 +138,25 @@ func (j *Job) NextRunTime() (time.Time, bool) {
 
 // utcISO formats an instant as explicit UTC RFC3339.
 func utcISO(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// mcpServerNameRule mirrors the profile config rule for mcp_servers keys:
+// allowlist entries must be exact config spellings.
+var mcpServerNameRule = regexp.MustCompile(`^[a-z][a-z0-9_]{1,39}$`)
+
+// ValidateMCPServers checks MCP allowlist entries. Existence resolves at
+// fire time against the profile config; anything failing the name rule
+// fails here.
+func ValidateMCPServers(servers []string) error {
+	if len(servers) > 32 {
+		return errors.New("mcp_servers exceeds bounds")
+	}
+	for _, name := range servers {
+		if name == "soul" || !mcpServerNameRule.MatchString(name) {
+			return fmt.Errorf("unknown MCP server %q", name)
+		}
+	}
+	return nil
+}
 
 // normalizePlatform maps operator spellings to the stored platform.
 func normalizePlatform(raw string) (string, error) {

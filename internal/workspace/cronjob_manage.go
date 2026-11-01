@@ -35,7 +35,8 @@ func CronjobManageDefinition() llm.ToolDefinition {
 			"deliver_platform": {Type: "string", Description: "Delivery platform: discord or imessage. Omit with deliver_chat_id to default to the creating chat"},
 			"deliver_chat_id":  {Type: "string", Description: "Delivery channel/chat. Omit with deliver_platform to default to the creating chat"},
 			"deliver_user_id":  {Type: "string", Description: "Mention this user on groupchat responses; ignored in DMs"},
-			"enabled_toolsets": {Type: "array", Description: "Toolset allowlist ([] = zero-tool)", Items: &llm.ToolParameterProperty{Type: "string"}},
+			"enabled_toolsets": {Type: "array", Description: "Builtin toolset allowlist from core,terminal,code_execution,cronjob ([] = zero builtins)", Items: &llm.ToolParameterProperty{Type: "string"}},
+			"mcp_servers":      {Type: "array", Description: "MCP server allowlist by exact config name (omit = all profile servers; [] = no MCP; bridge tools appear only when servers are reachable)", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"repeat_times":     {Type: "integer", Description: "Run N times then auto-complete (omit = forever for recurring, once for one-shots; 0 = forever)", Minimum: float64Ptr(0)},
 			"paused":           {Type: "boolean", Description: "Create paused with a reason via paused_reason"},
 			"paused_reason":    {Type: "string", Description: "Reason when creating paused or pausing"},
@@ -67,7 +68,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 		if !ok || !principal.Authenticated() {
 			return governance.Result{}, errors.New("workspace: authenticated principal required")
 		}
-		if err := rejectUnknown(args, "action", "job_id", "name", "schedule", "prompt", "skills", "script", "no_agent", "deliver_platform", "deliver_chat_id", "deliver_user_id", "enabled_toolsets", "repeat_times", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
+		if err := rejectUnknown(args, "action", "job_id", "name", "schedule", "prompt", "skills", "script", "no_agent", "deliver_platform", "deliver_chat_id", "deliver_user_id", "enabled_toolsets", "mcp_servers", "repeat_times", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
 			return governance.Result{}, err
 		}
 		if _, has := args["model"]; has {
@@ -95,7 +96,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 				if job.NextRunAt != nil && strings.TrimSpace(*job.NextRunAt) != "" {
 					next = strings.TrimSpace(*job.NextRunAt)
 				}
-				fmt.Fprintf(&sb, "%s %s %s state=%s next=%s status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule.Display), job.State, next, job.LastStatus)
+				fmt.Fprintf(&sb, "%s %s %s state=%s next=%s mcp=%s status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule.Display), job.State, next, mcpDisplay(job.MCPServers), job.LastStatus)
 			}
 			return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
 		case "create":
@@ -237,7 +238,29 @@ func decodeCronInput(ctx context.Context, args map[string]interface{}) (cron.Job
 	job.PausedReason, _ = stringArg(args, "paused_reason")
 	job.Skills = stringSlice(args["skills"])
 	job.EnabledToolsets = stringSlice(args["enabled_toolsets"])
+	if raw, ok := args["mcp_servers"]; ok {
+		items, isList := raw.([]interface{})
+		if !isList {
+			return cron.Job{}, errors.New("mcp_servers must be an array of server names")
+		}
+		servers := stringSlice(items)
+		if err := cron.ValidateMCPServers(servers); err != nil {
+			return cron.Job{}, err
+		}
+		job.MCPServers = servers
+	}
 	return job, nil
+}
+
+// mcpDisplay renders the allowlist for list output: all, none, or names.
+func mcpDisplay(servers []string) string {
+	if servers == nil {
+		return "all"
+	}
+	if len(servers) == 0 {
+		return "none"
+	}
+	return strings.Join(servers, ",")
 }
 
 // decodeDeliverInput resolves the deliver target: explicit fields win, and
@@ -373,6 +396,17 @@ func applyCronUpdate(runner *cron.Runner, job *cron.Job, args map[string]interfa
 			}
 		}
 		job.EnabledToolsets = refs
+	}
+	if raw, ok := args["mcp_servers"]; ok {
+		items, isList := raw.([]interface{})
+		if !isList {
+			return errors.New("mcp_servers must be an array of server names")
+		}
+		servers := stringSlice(items)
+		if err := cron.ValidateMCPServers(servers); err != nil {
+			return err
+		}
+		job.MCPServers = servers
 	}
 	if raw, ok := args["script"]; ok {
 		script, _ := raw.(string)
