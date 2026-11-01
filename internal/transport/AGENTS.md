@@ -15,6 +15,9 @@ cron sender), `imessage/` (BlueBubbles client, webhook listener + registration, 
 coalescing, link-preview filtering, chronological thread replies, final-only responses, startup
 typing sweep), `openai/` (stateless bearer-key API). `media/` normalizes
 attachments and `media/imagecache/` pins private cache paths with a 24h TTL hook.
+BlueBubbles API reference: https://documenter.getpostman.com/view/765844/UV5RnfwM —
+send payloads carry no mention field (outbound @-prefixes are plain text), and the
+server normalizes chat GUID service prefixes (any/iMessage/SMS) on delivery.
 
 ## Admission (cheap before expensive)
 

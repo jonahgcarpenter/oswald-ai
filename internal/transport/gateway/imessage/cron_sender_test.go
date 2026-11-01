@@ -51,8 +51,8 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 
 	// Unknown DM session falls back to the canonical direct-chat GUID derived
 	// from the peer in the session key, so a fresh process can still deliver.
-	// The service segment is the concrete "iMessage" service, not "any":
-	// BlueBubbles send endpoints reject the "any" service.
+	// The canonical "iMessage" prefix is sent; the server normalizes service
+	// prefixes (any/iMessage/SMS) to the stored chat on delivery.
 	if err := sender.Deliver(context.Background(), "alice", "imessage:dm:stranger", "hi", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +75,21 @@ func TestCronSenderUnrecognizedKeyFailsClosed(t *testing.T) {
 	sender := g.CronSender()
 	if err := sender.Deliver(context.Background(), "alice", "unknown:shape:key", "hi", nil); err == nil {
 		t.Fatal("unrecognized session key sent")
+	}
+}
+
+// TestCronChatCacheDropsEmptyBindings guards the routing cache against
+// malformed webhooks (for example an empty chats array): empty session keys
+// and chat GUIDs are never stored, so a later delivery can never match them.
+func TestCronChatCacheDropsEmptyBindings(t *testing.T) {
+	rememberCronChat("", "some-guid")
+	rememberCronChat("imessage:dm:cache-guard-user", "")
+	rememberCronChat("  ", "  ")
+	if _, ok := lookupCronChat(""); ok {
+		t.Fatal("empty session key cached")
+	}
+	if _, ok := lookupCronChat("imessage:dm:cache-guard-user"); ok {
+		t.Fatal("empty chat GUID cached")
 	}
 }
 

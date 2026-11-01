@@ -66,10 +66,9 @@ type cronSender struct {
 // sessions carry their chat GUID in the key; DM sessions resolve through
 // remembered inbound traffic, falling back to the canonical BlueBubbles
 // iMessage direct-chat GUID ("iMessage;-;<handle>") so delivery works even
-// with no inbound traffic since process start. The service segment must be
-// the concrete "iMessage" service: the "any" service is only meaningful for
-// reading, and BlueBubbles send endpoints reject it (the AppleScript
-// fallback fails, and non-AppleScript methods report "Chat does not exist").
+// with no inbound traffic since process start. GUIDs pass through verbatim:
+// the server normalizes the service prefix (any/iMessage/SMS) to the stored
+// chat on send, so Tahoe-style "any" GUIDs route without rewriting here.
 // Text goes first and attachments follow top-level in the same chat: cron
 // turns answer no user message, so there is nothing to thread to.
 func (s cronSender) Deliver(ctx context.Context, _, sessionKey, text string, attachments []media.OutputAttachment) error {

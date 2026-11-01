@@ -110,6 +110,21 @@ func TestCronSenderUnrecognizedKeyFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCronChannelCacheDropsEmptyBindings guards the routing cache against
+// malformed traffic: empty session keys and channel IDs are never stored,
+// so a later delivery can never match them.
+func TestCronChannelCacheDropsEmptyBindings(t *testing.T) {
+	rememberCronChannel("", "some-channel")
+	rememberCronChannel("discord:dm:cache-guard-user", "")
+	rememberCronChannel("  ", "  ")
+	if _, ok := lookupCronChannel(""); ok {
+		t.Fatal("empty session key cached")
+	}
+	if _, ok := lookupCronChannel("discord:dm:cache-guard-user"); ok {
+		t.Fatal("empty channel cached")
+	}
+}
+
 // TestCronSenderDeliversAttachments covers the cron attachment boundary:
 // text goes first and file attachments follow in one message.
 func TestCronSenderDeliversAttachments(t *testing.T) {
