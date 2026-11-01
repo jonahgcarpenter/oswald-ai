@@ -172,14 +172,13 @@ func normalizePlatform(raw string) (string, error) {
 
 // ValidateDeliver checks a concrete delivery target.
 func ValidateDeliver(d Deliver) error {
-	if _, err := normalizePlatform(d.Platform); err != nil {
-		return err
-	}
-	if strings.TrimSpace(d.ChatID) == "" {
-		return errors.New("deliver chat_id is required")
-	}
-	return nil
+	_, err := NormalizeDeliver(d)
+	return err
 }
+
+// discordUserIDRule requires transport-native Discord snowflakes for
+// mentions and DM resolution; display names never resolve.
+var discordUserIDRule = regexp.MustCompile(`^[0-9]+$`)
 
 // NormalizeDeliver canonicalizes a delivery target's platform spelling.
 func NormalizeDeliver(d Deliver) (Deliver, error) {
@@ -190,6 +189,9 @@ func NormalizeDeliver(d Deliver) (Deliver, error) {
 	out := Deliver{Platform: platform, ChatID: strings.TrimSpace(d.ChatID), UserID: strings.TrimSpace(d.UserID)}
 	if out.ChatID == "" {
 		return Deliver{}, errors.New("deliver chat_id is required")
+	}
+	if out.UserID != "" && platform == DeliverDiscord && !discordUserIDRule.MatchString(out.UserID) {
+		return Deliver{}, errors.New("deliver user_id must be the Discord user ID (numeric snowflake), not a display name")
 	}
 	return out, nil
 }

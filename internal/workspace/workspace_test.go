@@ -311,7 +311,7 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := requestctx.WithMetadata(testContext("req-cron"), requestctx.Metadata{RequestID: "req-cron", SessionID: "discord:chan1:alice"})
+	ctx := requestctx.WithMetadata(testContext("req-cron"), requestctx.Metadata{RequestID: "req-cron", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "no_agent": true})
 	if err != nil || !strings.Contains(created.Content, "job_id:") {
@@ -322,7 +322,7 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Deliver.Platform != "discord" || stored.Deliver.ChatID != "chan1" || stored.Deliver.UserID != "alice" {
+	if stored.Deliver.Platform != "discord" || stored.Deliver.ChatID != "chan1" || stored.Deliver.UserID != "987654321" {
 		t.Fatalf("deliver not defaulted to creating chat: %+v", stored.Deliver)
 	}
 	listed, err := manage(ctx, map[string]interface{}{"action": "list"})
@@ -348,9 +348,9 @@ func TestCronjobManageNameAndDeliver(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := requestctx.WithMetadata(testContext("req-cron-name"), requestctx.Metadata{RequestID: "req-cron-name", SessionID: "discord:chan1:alice"})
+	ctx := requestctx.WithMetadata(testContext("req-cron-name"), requestctx.Metadata{RequestID: "req-cron-name", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
-	created, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "bob"})
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "112233445"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
 	}
@@ -359,7 +359,7 @@ func TestCronjobManageNameAndDeliver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Name != "brief" || stored.Deliver.Platform != "discord" || stored.Deliver.ChatID != "chan9" || stored.Deliver.UserID != "bob" {
+	if stored.Name != "brief" || stored.Deliver.Platform != "discord" || stored.Deliver.ChatID != "chan9" || stored.Deliver.UserID != "112233445" {
 		t.Fatalf("deliver not stored: %+v", stored)
 	}
 	// Fuzzy name resolution on update.
@@ -393,7 +393,7 @@ func TestCronjobManageDeliverValidation(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:alice"})
+	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 	if err != nil {
@@ -405,6 +405,9 @@ func TestCronjobManageDeliverValidation(t *testing.T) {
 	}
 	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_chat_id": ""}); err == nil {
 		t.Fatal("empty chat accepted")
+	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_user_id": "alice"}); err == nil {
+		t.Fatal("display-name user accepted")
 	}
 	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_chat_id": "chan2"}); err != nil {
 		t.Fatalf("chat update = %v", err)
@@ -427,7 +430,7 @@ func TestCronjobManageMCPServers(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := requestctx.WithMetadata(testContext("req-cron-mcp"), requestctx.Metadata{RequestID: "req-cron-mcp", SessionID: "discord:chan1:alice"})
+	ctx := requestctx.WithMetadata(testContext("req-cron-mcp"), requestctx.Metadata{RequestID: "req-cron-mcp", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
 	// Omitted exposes all.
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})

@@ -38,7 +38,7 @@ func writeScript(t *testing.T, root, name, body string) {
 }
 
 func testDeliver() Deliver {
-	return Deliver{Platform: "discord", ChatID: "chan1", UserID: "user1"}
+	return Deliver{Platform: "discord", ChatID: "chan1", UserID: "123456789"}
 }
 
 func mustParse(t *testing.T, raw string, now time.Time) (Schedule, time.Time) {
@@ -212,7 +212,7 @@ func TestCreateValidation(t *testing.T) {
 	if _, err := store.Create(now, testRunner(root), Job{Schedule: sched, Script: "ok.sh", NoAgent: true, Deliver: testDeliver()}); err != nil {
 		t.Fatalf("no_agent without prompt rejected: %v", err)
 	}
-	if _, err := store.Create(now, testRunner(root), Job{Schedule: sched, Prompt: "hi", Deliver: Deliver{Platform: "bluebubbles", ChatID: "chat1", UserID: "u1"}}); err != nil {
+	if _, err := store.Create(now, testRunner(root), Job{Schedule: sched, Prompt: "hi", Deliver: Deliver{Platform: "bluebubbles", ChatID: "chat1", UserID: "+15551234567"}}); err != nil {
 		t.Fatalf("bluebubbles alias rejected: %v", err)
 	} else {
 		jobs, _ := store.List()
@@ -488,8 +488,8 @@ func TestDispatchAgentDelivery(t *testing.T) {
 	if err != nil || !ex.Delivered || ex.Status == "delivery_failed" {
 		t.Fatalf("dispatch = %+v %q %v", ex, out, err)
 	}
-	got := sent["discord:chan1:user1"]
-	if !strings.Contains(got, "Bills 24") || !strings.HasPrefix(got, "<@user1> ") || strings.Contains(got, "Scheduled job") {
+	got := sent["discord:chan1:123456789"]
+	if !strings.Contains(got, "Bills 24") || !strings.HasPrefix(got, "<@123456789> ") || strings.Contains(got, "Scheduled job") {
 		t.Fatalf("sent = %q", got)
 	}
 }
@@ -526,10 +526,10 @@ func TestDispatchAgentDeliversAttachments(t *testing.T) {
 	if err != nil || !ex.Delivered || ex.Status == "delivery_failed" {
 		t.Fatalf("dispatch = %+v %v", ex, err)
 	}
-	if got := sent["discord:chan1:user1"]; !strings.Contains(got, "weekly sales") {
+	if got := sent["discord:chan1:123456789"]; !strings.Contains(got, "weekly sales") {
 		t.Fatalf("sent = %q", got)
 	}
-	files := sentFiles["discord:chan1:user1"]
+	files := sentFiles["discord:chan1:123456789"]
 	if len(files) != 1 || files[0].Filename != "sales.txt" || string(files[0].Data) != "row1" {
 		t.Fatalf("attachments = %+v", files)
 	}
@@ -549,14 +549,14 @@ func TestDispatchDMSkipsMention(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	sched, _ := mustParse(t, "in 1s", now)
-	mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Deliver: Deliver{Platform: "discord", ChatID: "user1", UserID: "user1"}})
+	mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Deliver: Deliver{Platform: "discord", ChatID: "123456789", UserID: "123456789"}})
 	time.Sleep(1100 * time.Millisecond)
 	due := store.ClaimDue(time.Now().UTC())
 	ex, _, err := d.RunOne(context.Background(), due[0], time.Minute)
 	if err != nil || !ex.Delivered {
 		t.Fatalf("dm = %+v %v", ex, err)
 	}
-	if got := sent["discord:dm:user1"]; got != "hello dm" {
+	if got := sent["discord:dm:123456789"]; got != "hello dm" {
 		t.Fatalf("dm sent = %q", got)
 	}
 }
@@ -687,6 +687,24 @@ func mustCreate(t *testing.T, store *Store, in Job) Job {
 		t.Fatal(err)
 	}
 	return job
+}
+
+func TestDeliverUserIDMustBeNative(t *testing.T) {
+	for _, id := range []string{"123456789", "1", ""} {
+		if _, err := NormalizeDeliver(Deliver{Platform: "discord", ChatID: "chan1", UserID: id}); err != nil {
+			t.Fatalf("discord user %q rejected: %v", id, err)
+		}
+	}
+	for _, id := range []string{"alice", "user1", "<@123>", "+15551234567"} {
+		if _, err := NormalizeDeliver(Deliver{Platform: "discord", ChatID: "chan1", UserID: id}); err == nil {
+			t.Fatalf("discord display user %q accepted", id)
+		}
+	}
+	for _, id := range []string{"+15551234567", "user@example.com", ""} {
+		if _, err := NormalizeDeliver(Deliver{Platform: "imessage", ChatID: "chat1", UserID: id}); err != nil {
+			t.Fatalf("imessage user %q rejected: %v", id, err)
+		}
+	}
 }
 
 func TestMCPServersValidation(t *testing.T) {
