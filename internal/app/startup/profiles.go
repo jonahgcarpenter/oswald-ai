@@ -257,7 +257,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)
-		cronRunner := &cron.Runner{Root: profile.ProfileRoot, Profile: name}
+		cronRunner := &cron.Runner{Root: profile.ProfileRoot, Profile: name, ScriptsDir: filepath.Join(profile.ProfileRoot, "scripts")}
 		if ws := workspace.NewWorkspace(profile.ProfileRoot, name); ws.Root() != "" {
 			cronRunner.Resolve = func(raw string) (string, error) {
 				abs, _, err := ws.Resolve(raw)
