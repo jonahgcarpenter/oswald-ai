@@ -33,12 +33,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   poppler-utils \
   python3 \
-  nodejs \
-  npm \
   chromium \
   fonts-liberation \
   fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*
+
+# Node.js 26 for MCP stdio servers (node/npx). The bookworm archive ships
+# Node 18, below what current MCP servers require, so install a pinned
+# upstream build into /usr/local — on PATH for the service and the agent
+# terminal alike.
+ARG NODE_VERSION=26.8.1
+RUN arch=$(dpkg --print-architecture) \
+  && case "$arch" in amd64) node_arch=x64;; arm64) node_arch=arm64;; *) echo "unsupported architecture $arch for Node install" >&2; exit 1;; esac \
+  && tarball="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+  && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt \
+  && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${tarball}" -o "/tmp/${tarball}" \
+  && grep "${tarball}" /tmp/SHASUMS256.txt | (cd /tmp && sha256sum -c -) \
+  && tar -xJf "/tmp/${tarball}" -C /usr/local --strip-components=1 \
+  && rm -f "/tmp/${tarball}" /tmp/SHASUMS256.txt \
+  && node -v && npm -v && npx -v
 
 # GitHub CLI for agent-assisted repo workflows; auth comes from GH_TOKEN at
 # runtime, never from the image.
