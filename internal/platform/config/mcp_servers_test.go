@@ -89,6 +89,38 @@ func TestAddMCPServerStdio(t *testing.T) {
 	}
 }
 
+// A fresh `oswald setup` root declares a bare `mcp_servers:` key with a null
+// value. The first add must replace it with a mapping instead of appending to
+// the scalar, which would serialize to nothing and report false success.
+func TestAddMCPServerToBareSection(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	doc := mcpTestConfig + "mcp_servers:\n"
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(doc), 0600); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://example.com/mcp"
+	if err := AddMCPServer(root, "default", "docs", MCPServerSpec{URL: &url}); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), "docs:") {
+		t.Fatalf("first add to bare section did not persist:\n%s", after)
+	}
+	cfg, err := LoadProfiles(root)
+	if err != nil {
+		t.Fatalf("staged write does not validate: %v", err)
+	}
+	if len(cfg.MCPServers) != 1 || cfg.MCPServers[0].Name != "docs" {
+		t.Fatalf("servers = %+v", cfg.MCPServers)
+	}
+}
+
 func TestAddMCPServerRejects(t *testing.T) {
 	url := "https://example.com/mcp"
 	cmd := "npx"

@@ -74,6 +74,11 @@ type ServerInfo struct {
 	Reason      string
 }
 
+// Failed reports whether the last connection attempt for the server failed.
+// Callers checking only the tool list would mistake a dead server for an
+// empty one: a failed server returns no specs with a populated Reason.
+func (info ServerInfo) Failed() bool { return info.Status == serverStatusError }
+
 // OAuthConfig holds resolved per-server OAuth parameters. Secrets must not
 // be logged. A nil *OAuthConfig on ServerConfig disables OAuth.
 type OAuthConfig struct {

@@ -76,7 +76,8 @@ mediated write path (staged validation before write, previous bytes kept as last
 beside the file, atomic replace) — there is no generic `config set`; `oswald config` is
 read-only (`show|get|validate`). `list` never
 dials and never prints endpoints, headers, or secrets. `test` dials once via the same transport
-constructors as the runtime bridge. `remove` keeps `mcp-tokens/<server>.*` unless `--with-tokens`
+constructors as the runtime bridge, reporting a failed server with its connection reason
+instead of an empty ok. `remove` keeps `mcp-tokens/<server>.*` unless `--with-tokens`
 is passed. Flag secrets (`--oauth-client-secret`, header values) follow the `env set` posture:
 never echoed or logged.
 

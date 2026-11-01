@@ -116,13 +116,22 @@ func mutateMCPServer(root, profile, name string, mustExist bool, mutate func(mcp
 	if err != nil {
 		return err
 	}
-	if servers == nil {
+	if servers == nil || servers.Kind != yaml.MappingNode {
+		// Fresh `oswald setup` roots declare a bare `mcp_servers:` key with a
+		// null value. Appends to that scalar would serialize to nothing, so a
+		// first add would report success without persisting. Replace it with
+		// a mapping in place instead.
 		if mustExist {
 			return fmt.Errorf("unknown MCP server %q", name)
 		}
-		servers = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		node.Content = append(node.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "mcp_servers"}, servers)
+		if existing := mappingManagedChild(node, "mcp_servers"); existing != nil {
+			*existing = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			servers = existing
+		} else {
+			servers = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			node.Content = append(node.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "mcp_servers"}, servers)
+		}
 	}
 	child := mappingManagedChild(servers, name)
 	if mustExist && child == nil {

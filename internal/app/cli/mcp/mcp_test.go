@@ -188,6 +188,22 @@ func TestTestCommandDisabledAndUnknown(t *testing.T) {
 	}
 }
 
+func TestTestCommandFailedServer(t *testing.T) {
+	root := mcpTestRoot(t)
+	if code, _, stderr := mcpRun(t, root, "add", "ghost", "--command", "oswald-definitely-missing-binary"); code != 0 {
+		t.Fatalf("add = %d %s", code, stderr)
+	}
+	code, _, stderr := mcpRun(t, root, "test", "ghost")
+	if code == 0 {
+		t.Fatal("broken server test accepted")
+	}
+	for _, want := range []string{"ghost", "oswald-definitely-missing-binary", "PATH"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("test stderr missing %q: %q", want, stderr)
+		}
+	}
+}
+
 func TestRemoveWithTokens(t *testing.T) {
 	root := mcpTestRoot(t)
 	if code, _, stderr := mcpRun(t, root, "add", "docs", "--url", "https://example.com/mcp"); code != 0 {

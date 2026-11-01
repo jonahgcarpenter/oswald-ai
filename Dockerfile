@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libsqlite3-0 \
   sqlite3 \
   libstdc++6 \
+  libatomic1 \
   ffmpeg \
   poppler-utils \
   python3 \

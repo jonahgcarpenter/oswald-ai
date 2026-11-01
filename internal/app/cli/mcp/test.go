@@ -70,6 +70,14 @@ func testCmd(ctx context.Context, root string, args []string, stdout, stderr io.
 		fmt.Fprintf(stderr, "oswald: %s\n", config.SafeErrorText(err))
 		return exitError
 	}
+	if info.Failed() {
+		reason := strings.TrimSpace(info.Reason)
+		if reason == "" {
+			reason = config.FallbackErrorText
+		}
+		fmt.Fprintf(stderr, "oswald: %s: %s\n", name, reason)
+		return exitError
+	}
 	_ = info
 	if len(specs) == 0 {
 		fmt.Fprintf(stdout, "ok %s: 0 tools\n", name)
