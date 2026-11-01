@@ -48,9 +48,13 @@ type profileDependencies struct {
 	newGateways func(*config.Config, identity.Resolver, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
 }
 
-// brokerWorkerCount is fixed: the upstream model backend owns request queuing,
-// so the broker only needs one worker to drain its per-conversation lanes.
-const brokerWorkerCount = 1
+// brokerWorkerCount bounds concurrent agent turns. Lanes stay strictly FIFO
+// per user/session; workers only let unrelated lanes overlap. The count is a
+// RAM knob, not a throughput knob: worst-case memory is workers times the
+// per-turn footprint plus the bounded queue, and past-capacity submissions
+// shed with ErrQueueFull instead of growing memory. Model-side queuing stays
+// with the vLLM backend.
+const brokerWorkerCount = 5
 
 func runProfiles(ctx context.Context, cfg *config.Config, rootLog *config.Logger) error {
 	return runProfilesWith(ctx, cfg, rootLog, profileDependencies{newClient: func(cfg *config.Config, log *config.Logger) llm.Chatter {
