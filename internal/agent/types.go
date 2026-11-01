@@ -131,6 +131,10 @@ type Request struct {
 	Images      []llm.InputImage
 	Documents   []media.DocumentRef
 	StreamFunc  func(StreamChunk)
+	// Steer carries follow-ups steered into this running turn. The broker
+	// adds entries concurrently; the agent drains them at iteration
+	// boundaries. Nil disables steering. Stateless requests never steer.
+	Steer *SteerInbox
 }
 
 // ClientToolChoice constrains the merged Oswald and caller tool catalog for

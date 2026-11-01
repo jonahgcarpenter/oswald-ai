@@ -887,7 +887,7 @@ func TestBrokerSameLaneSerialUnderParallelWorkers(t *testing.T) {
 	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	submit := func(id, session string) chan Result {
 		ch := make(chan Result, 1)
-		if err := b.Submit(&Request{RequestID: id, Principal: principal, SessionKey: session, Prompt: "hi", ResponseChan: ch}); err != nil {
+		if err := b.Submit(&Request{RequestID: id, Principal: principal, SessionKey: session, Prompt: "hi", ForceQueue: true, ResponseChan: ch}); err != nil {
 			t.Fatal(err)
 		}
 		return ch
@@ -1057,5 +1057,241 @@ func TestTransportCancellationAbortsActiveWork(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("transport-cancelled active work never completed")
+	}
+}
+
+type steerDrainProcessor struct {
+	hostStarted chan struct{}
+	release     chan struct{}
+	calls       *atomic.Int32
+	drained     *atomic.Int32
+}
+
+func (p *steerDrainProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
+	if p.calls.Add(1) == 1 {
+		close(p.hostStarted)
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if req.Steer != nil {
+			p.drained.Add(int32(len(req.Steer.Drain())))
+		}
+	}
+	return &agent.Response{Response: "host-ok"}, nil
+}
+
+func TestBrokerSteerConsumedFansOutWithoutExtraCall(t *testing.T) {
+	var calls, drained atomic.Int32
+	hostStarted := make(chan struct{})
+	release := make(chan struct{})
+	processor := &steerDrainProcessor{hostStarted: hostStarted, release: release, calls: &calls, drained: &drained}
+	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	hostCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "host", Principal: principal, SessionKey: "lane-a", Prompt: "start long task", ResponseChan: hostCh}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hostStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host never started")
+	}
+	steerCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "steer-1", Principal: principal, SessionKey: "lane-a", Prompt: "correction", ResponseChan: steerCh}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case res := <-hostCh:
+		if res.Err != nil || res.Response == nil || res.Response.Response != "host-ok" {
+			t.Fatalf("host result = %+v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("host timed out")
+	}
+	select {
+	case res := <-steerCh:
+		if res.Err != nil || res.Response == nil || res.Response.Response != "host-ok" {
+			t.Fatalf("steer result = %+v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("steer timed out")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("processor calls = %d, want 1 (no dead call, no second turn)", got)
+	}
+	if got := drained.Load(); got != 1 {
+		t.Fatalf("drained steers = %d, want 1", got)
+	}
+}
+
+type unconsumedHostProcessor struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *unconsumedHostProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
+	if p.calls.Add(1) == 1 {
+		close(p.started)
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return &agent.Response{Response: "host-done"}, nil
+	}
+	return &agent.Response{Response: "steer-turn"}, nil
+}
+
+func TestBrokerSteerUnconsumedRunsAsNextTurn(t *testing.T) {
+	release := make(chan struct{})
+	hostProc := &unconsumedHostProcessor{started: make(chan struct{}), release: release}
+	b := NewBroker(hostProc, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	hostCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "host", Principal: principal, SessionKey: "lane-a", Prompt: "long task", ResponseChan: hostCh}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hostProc.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host never started")
+	}
+	steerCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "steer-1", Principal: principal, SessionKey: "lane-a", Prompt: "follow-up", ResponseChan: steerCh}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case <-hostCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host timed out")
+	}
+	select {
+	case res := <-steerCh:
+		if res.Err != nil || res.Response == nil {
+			t.Fatalf("steer next-turn result = %+v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unconsumed steer never ran as next turn")
+	}
+	if got := hostProc.calls.Load(); got != 2 {
+		t.Fatalf("processor calls = %d, want 2 (host + requeued steer turn)", got)
+	}
+}
+
+type countingBlockProcessor struct {
+	calls   *atomic.Int32
+	started chan struct{}
+	once    *sync.Once
+	release chan struct{}
+}
+
+func (p *countingBlockProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
+	if p.calls.Add(1) == 1 {
+		p.once.Do(func() { close(p.started) })
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return &agent.Response{Response: "ok"}, nil
+}
+
+func TestBrokerForceQueueBypassesSteer(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	b := NewBroker(&countingBlockProcessor{calls: &calls, started: started, once: &once, release: release}, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	hostCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "host", Principal: principal, SessionKey: "lane-a", Prompt: "task", ResponseChan: hostCh}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host never started")
+	}
+	queuedCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "queued", Principal: principal, SessionKey: "lane-a", Prompt: "explicit queue", ForceQueue: true, ResponseChan: queuedCh}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-queuedCh:
+		t.Fatal("forced queue completed before host released")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-hostCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host timed out")
+	}
+	select {
+	case <-queuedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued follow-up timed out")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("processor calls = %d, want 2", got)
+	}
+}
+
+func TestBrokerSteerRejectsMediaAndStateless(t *testing.T) {
+	release := make(chan struct{})
+	hostProc := &unconsumedHostProcessor{started: make(chan struct{}), release: release}
+	b := NewBroker(hostProc, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	hostCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "host", Principal: principal, SessionKey: "lane-a", Prompt: "task", ResponseChan: hostCh}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hostProc.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host never started")
+	}
+	mediaCh := make(chan Result, 1)
+	mediaReq := &Request{RequestID: "media", Principal: principal, SessionKey: "lane-a", Prompt: "with image", Images: []llm.InputImage{{MimeType: "image/png", Data: "eA=="}}, ResponseChan: mediaCh}
+	if err := b.Submit(mediaReq); err != nil {
+		t.Fatal(err)
+	}
+	statelessCh := make(chan Result, 1)
+	// Stateless uses ForceQueue to assert queue path deterministically.
+	if err := b.Submit(&Request{RequestID: "stateless", Principal: principal, SessionKey: "lane-a", Prompt: "stateless", Stateless: true, ForceQueue: true, ResponseChan: statelessCh}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case <-hostCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host timed out")
+	}
+	select {
+	case <-mediaCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("media follow-up timed out")
+	}
+	select {
+	case <-statelessCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stateless follow-up timed out")
+	}
+	if got := hostProc.calls.Load(); got != 3 {
+		t.Fatalf("processor calls = %d, want 3 (media and stateless queue, never steer)", got)
 	}
 }
