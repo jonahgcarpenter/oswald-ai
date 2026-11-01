@@ -283,7 +283,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	for name, store := range stores {
 		profile, _ := directory.Config(name)
 		worker := compaction.NewProfileService(store)
-		commands, err := commandbuiltin.NewProfileService(store, requestBroker, profile.ProfileRoot, summarizers[name], store)
+		commands, err := commandbuiltin.NewProfileService(store, requestBroker, profile.ProfileRoot, summarizers[name], store, requestBroker)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}

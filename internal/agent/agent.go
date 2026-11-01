@@ -530,6 +530,43 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			messages = append(messages[:len(messages)-1], llm.ChatMessage{Role: "user", Content: historyContext}, messages[len(messages)-1])
 		}
 	}
+	// Steered follow-ups ride the running turn instead of queueing behind it.
+	// Drains happen at iteration boundaries so every extra model call carries
+	// new user input and no dead call fires on unchanged messages. Entries
+	// still pending when the host finishes auto-run as the next turn.
+	steerInbox := request.Steer
+	steeredCount := 0
+	drainSteers := func() int {
+		if steerInbox == nil || request.Stateless {
+			return 0
+		}
+		steers := steerInbox.Drain()
+		if len(steers) == 0 {
+			return 0
+		}
+		added := 0
+		for _, st := range steers {
+			text := strings.TrimSpace(st.Text)
+			if text == "" {
+				continue
+			}
+			messages = append(messages, llm.ChatMessage{Role: "user", Content: text})
+			if strings.TrimSpace(userMemoryContent) == "" {
+				userMemoryContent = text
+			} else {
+				userMemoryContent = userMemoryContent + "\n\n" + text
+			}
+			added++
+		}
+		if added > 0 {
+			steeredCount += added
+			reqLog.Debug("agent.steer.consumed", "consumed steered follow-ups", config.F("steer_count", added), config.F("steered_total_count", steeredCount))
+			if streamCallback != nil {
+				streamCallback(StreamChunk{Type: ChunkStatus, Text: "Incorporating follow-up..."})
+			}
+		}
+		return added
+	}
 	if request.Stateless {
 		promptContext.RequiredEstimate = tokenbudget.EstimateRequest(messages, initialCatalog.Tools)
 		promptContext.EstimatedBefore = promptContext.RequiredEstimate
@@ -745,6 +782,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				}
 			}
 		}
+		// Steers drained here ride the next model call with new user input.
+		// Draining before assignment guarantees no dead call on unchanged
+		// messages; each extra iteration below carries steered text.
+		drainSteers()
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
 			return &Response{Kind: "over_budget", Model: a.model}, nil
@@ -903,6 +944,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// another iteration with the full tool catalog intact so tool-driven
 		// work can continue.
 		if len(resp.Message.ToolCalls) == 0 {
+			// A steered follow-up always forces one more model call so the
+			// correction is never swallowed by loop exit and never fires a
+			// dead call on unchanged messages.
+			if drainSteers() > 0 {
+				continue
+			}
 			visibleContent := accumulatedContent.String()
 			if visibleContent == "" {
 				visibleContent = resp.Message.Content
@@ -1263,6 +1310,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			toolHistory.Batches = append(toolHistory.Batches, historyBatch)
 		}
 		messages = boundImageToolResults(messages)
+		// Steers appended here ride the tools-disabled final answer when the
+		// budget is spent; otherwise the next iteration drains them.
+		drainSteers()
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
 			reqLog.Debug("agent.tool_budget.exhausted", "tool governance budget exhausted",

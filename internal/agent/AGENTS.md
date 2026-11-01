@@ -69,6 +69,9 @@ finalize: pick final content, resolve MEDIA/FILE, AppendPendingSessionTurn (skip
   (same confinement, no image validation, any MIME).
 - **Reasoning is never persisted** in conversation or tool history. Summaries and tool history are
   untrusted lower-authority reference — quoted context, never deployment instruction.
+- **Steers never create dead calls.** Drained follow-ups append as `user` messages before the
+  next model call, so every extra iteration carries new input; empty steers are ignored and
+  unconsumed steers become the next turn instead of firing an unchanged-prompt call.
 - **Skills never dangle.** The index and record-it guidance join trusted context only when
   `skill_manage` survives catalog gating for the request (restricted toolsets omit both);
   the memory paragraph's skills closer names no tool, so it holds unconditionally.

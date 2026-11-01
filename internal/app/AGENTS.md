@@ -34,8 +34,8 @@ Scoped groups mirror the top-level `config.yaml` keys one-to-one: `providers` �
 mutation stays fenced to the calling scope (`OSWALD_HOME` profile) and fails closed on
 contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`) and profile
 lifecycle (`profile create|rename|delete`) additionally require the default scope. `commands/` holds the `Definition/Request/Result/Handler` contract and
-`/name` parsing; `builtin/` registers the six public handlers (`/help`, `/new`, `/stop`,
-`/approve`, `/deny`, `/compact`).
+`/name` parsing; `builtin/` registers the seven public handlers (`/help`, `/new`, `/stop`,
+`/approve`, `/deny`, `/compact`, `/queue`).
 
 ## Validation and reload (how edits take effect)
 
@@ -62,7 +62,10 @@ files, and a stable fingerprint never fires twice, so rapid successive writes co
 - `/new` ends the open session (`end_reason='new_session'`), bumps generation, and denies pending
   approvals — history stays searchable under the old generation.
 - `/stop` cancels active agent work in the conversation and preserves queued prompts; `/stop all`
-  is rejected. Commands outlive transport cancellation.
+  is rejected. Steered follow-ups survive `/stop` as queued next turns. Commands outlive transport cancellation.
+- `/queue <prompt>` forces FIFO queueing for the next turn. Plain messages steer into the running
+  turn by default (text-only, consumed after the next tool result); unconsumed steers auto-run
+  as the next turn.
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.

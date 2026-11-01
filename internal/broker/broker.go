@@ -55,6 +55,9 @@ type Request struct {
 	IsDirect    bool
 	ChatLabel   string
 	Prompt      string
+	// ForceQueue forces lane-queueing even when steering would otherwise
+	// attach to the running turn. Set by /queue; plain messages steer.
+	ForceQueue bool
 	// PlatformMessageID is the untrusted inbound transport message identifier.
 	PlatformMessageID string
 	// ChatDisplayName is the untrusted plain conversation name.
@@ -110,6 +113,12 @@ type Result struct {
 	Err               error
 }
 
+type steerEntry struct {
+	req       *Request
+	queuedAt  time.Time
+	stopWatch func() bool
+}
+
 type work struct {
 	queuedAt          time.Time
 	workerActive      bool
@@ -129,6 +138,13 @@ type work struct {
 	ownerUserID       string
 	state             workState
 	deliverOnce       sync.Once
+	// steerInbox collects follow-ups steered into this running turn.
+	// steerEntries maps steered request IDs to their original requests in
+	// arrival order (steerOrder) so consumed turns fan out and unconsumed
+	// turns auto-run as lane followers.
+	steerInbox   *agent.SteerInbox
+	steerEntries map[string]*steerEntry
+	steerOrder   []string
 }
 
 type workState uint8
@@ -213,6 +229,7 @@ type Broker struct {
 	lanes           map[LaneKey][]*work
 	userFences      map[string]*userFence
 	outstanding     int
+	steerCount      int
 	accepting       bool
 	started         bool
 	background      *backgroundPermit
@@ -280,7 +297,9 @@ func (b *Broker) Start() {
 	})
 }
 
-// Submit enqueues an agent request. Rejected requests receive one immediate result.
+// Submit enqueues an agent request. A plain message to a busy lane steers
+// into the running turn; /queue sets ForceQueue to wait for the next turn.
+// Rejected requests receive one immediate result.
 func (b *Broker) Submit(req *Request) error {
 	if req.ResponseChan == nil {
 		req.ResponseChan = make(chan Result, 1)
@@ -288,6 +307,150 @@ func (b *Broker) Submit(req *Request) error {
 	if req.Usage == nil {
 		req.Usage = requestctx.NewUsageCollector()
 	}
+	if handled, err := b.trySteer(req); handled {
+		return err
+	}
+	return b.submitEnqueue(req)
+}
+
+// trySteer attaches req to the running head of its lane when eligible.
+// It reports whether the request was consumed as a steer (accepted or
+// rejected with an immediate terminal result) plus the submission error to
+// return: shutdown and queue-full rejections return ErrShuttingDown and
+// ErrQueueFull so gateways mark them rejected instead of completed.
+func (b *Broker) trySteer(req *Request) (bool, error) {
+	if req.ForceQueue || req.Stateless || len(req.Images) != 0 || len(req.Documents) != 0 {
+		return false, nil
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return false, nil
+	}
+	key := laneKey(req.Principal, req.SessionKey)
+	b.mu.Lock()
+	if !b.accepting {
+		b.mu.Unlock()
+		reason, text := "shutting_down", "request rejected: broker shutting down"
+		b.log.Warn("broker.request.rejected", "rejected broker request",
+			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+			config.F("profile", req.Principal.CanonicalUserID),
+			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
+		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
+		return true, ErrShuttingDown
+	}
+	lane := b.lanes[key]
+	if len(lane) == 0 {
+		b.mu.Unlock()
+		return false, nil
+	}
+	head := lane[0]
+	if head.state != workRunning || head.request == nil || head.request.Stateless || head.steerInbox == nil {
+		b.mu.Unlock()
+		return false, nil
+	}
+	limit := requestQueueSize + b.workerCount
+	if b.outstanding+b.steerCount >= limit {
+		b.mu.Unlock()
+		reason, text := "queue_full", "request rejected: broker queue full"
+		b.log.Warn("broker.request.rejected", "rejected broker request",
+			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+			config.F("profile", req.Principal.CanonicalUserID),
+			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
+		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
+		return true, ErrQueueFull
+	}
+	if head.steerEntries == nil {
+		head.steerEntries = make(map[string]*steerEntry)
+	}
+	queuedAt := time.Now()
+	head.steerInbox.Add(strings.TrimSpace(req.Prompt), req.RequestID)
+	head.steerEntries[req.RequestID] = &steerEntry{req: req, queuedAt: queuedAt}
+	head.steerOrder = append(head.steerOrder, req.RequestID)
+	b.steerCount++
+	if b.background != nil {
+		b.background.cancel()
+	}
+	b.mu.Unlock()
+	transport := req.Ctx
+	if transport == nil {
+		transport = b.lifecycleCtx
+	}
+	if err := transport.Err(); err != nil {
+		b.removeSteer(key, head, req.RequestID, context.Cause(transport))
+		return true, nil
+	}
+	stop := context.AfterFunc(transport, func() {
+		b.removeSteer(key, head, req.RequestID, context.Cause(transport))
+	})
+	b.mu.Lock()
+	if entry, ok := head.steerEntries[req.RequestID]; ok {
+		entry.stopWatch = stop
+	} else {
+		b.mu.Unlock()
+		stop()
+		return true, nil
+	}
+	b.mu.Unlock()
+	b.log.Debug("broker.request.steered", "steered follow-up into running turn",
+		config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+		config.F("chat_id", req.ChatID), config.F("session_id", req.SessionKey))
+	return true, nil
+}
+
+// removeSteer drops one pending steer after transport cancellation.
+func (b *Broker) removeSteer(key LaneKey, head *work, requestID string, cause error) {
+	if head == nil || head.steerInbox == nil {
+		return
+	}
+	if _, ok := head.steerInbox.Remove(requestID); !ok {
+		return
+	}
+	b.mu.Lock()
+	entry, ok := head.steerEntries[requestID]
+	if ok {
+		delete(head.steerEntries, requestID)
+		if b.steerCount > 0 {
+			b.steerCount--
+		}
+	}
+	b.mu.Unlock()
+	if !ok {
+		return
+	}
+	if entry.stopWatch != nil {
+		entry.stopWatch()
+	}
+	if cause == nil {
+		cause = context.Canceled
+	}
+	deliverResult(entry.req.ResponseChan, Result{Principal: entry.req.Principal, Err: cause, ExecutionComplete: true})
+}
+
+// submitEnqueue builds agent lane work and enqueues it as a FIFO follower.
+func (b *Broker) submitEnqueue(req *Request) error {
+	w := b.buildAgentWork(req)
+	b.log.Debug("broker.request.queued", "queued broker request",
+		config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+		config.F("chat_id", req.ChatID), config.F("session_id", req.SessionKey))
+	if err := b.enqueue(w); err != nil {
+		w.cancel(err)
+		reason := "queue_full"
+		text := "request rejected: broker queue full"
+		if errors.Is(err, ErrShuttingDown) {
+			reason = "shutting_down"
+			text = "request rejected: broker shutting down"
+		}
+		b.log.Warn("broker.request.rejected", "rejected broker request",
+			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+			config.F("profile", req.Principal.CanonicalUserID),
+			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
+		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
+		return err
+	}
+	return nil
+}
+
+// buildAgentWork creates lane work for one agent request with its own steer inbox.
+func (b *Broker) buildAgentWork(req *Request) *work {
 	requestCtx, cancel := context.WithCancelCause(b.lifecycleCtx)
 	meta := req.Metadata
 	meta.RequestID = req.RequestID
@@ -303,10 +466,10 @@ func (b *Broker) Submit(req *Request) error {
 		requestCtx = toolclarify.WithNotifier(requestCtx, req.ClarifyAsk)
 	}
 	requestCtx = requestctx.WithUsageCollector(requestCtx, req.Usage)
-	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}
-	// Transport cancellation (for example an HTTP client disconnect) cancels
-	// this request's work without touching the conversation lane or queued
-	// prompts. The watch is released on first delivery.
+	inbox := agent.NewSteerInbox()
+	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID, steerInbox: inbox, steerEntries: make(map[string]*steerEntry)}
+	// Transport cancellation cancels this request's work without touching
+	// the conversation lane or queued prompts. The watch is released on first delivery.
 	transport := req.Ctx
 	if transport == nil {
 		transport = b.lifecycleCtx
@@ -333,10 +496,12 @@ func (b *Broker) Submit(req *Request) error {
 	w.run = func() error {
 		if cause := context.Cause(w.ctx); cause != nil {
 			deliver(Result{Err: cause, ExecutionComplete: true})
+			b.settleSteers(w, nil, cause)
 			return nil
 		}
 		if cause := context.Cause(w.ctx); cause != nil {
 			deliver(Result{Principal: req.Principal, Err: cause, ExecutionComplete: true})
+			b.settleSteers(w, nil, cause)
 			return nil
 		}
 		b.mu.Lock()
@@ -345,7 +510,7 @@ func (b *Broker) Submit(req *Request) error {
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, SkipMemory: req.SkipMemory, EnabledToolsets: req.EnabledToolsets, MCPServers: req.MCPServers, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, ClientParallelToolCalls: req.ClientParallelToolCalls, ClientGeneration: req.ClientGeneration, ServiceTier: req.ServiceTier, Images: req.Images, Documents: req.Documents, StreamFunc: req.StreamFunc,
-			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile,
+			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile, Steer: inbox,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)
 		if cause := context.Cause(w.ctx); cause != nil {
@@ -353,6 +518,7 @@ func (b *Broker) Submit(req *Request) error {
 			resp = nil
 		}
 		deliver(Result{Response: resp, Principal: req.Principal, Err: err, ExecutionComplete: true})
+		b.settleSteers(w, resp, err)
 		return nil
 	}
 	w.finish = func(err error) {
@@ -361,30 +527,144 @@ func (b *Broker) Submit(req *Request) error {
 			complete := !w.workerActive || w.executionFinished
 			b.mu.Unlock()
 			deliver(Result{Err: err, ExecutionComplete: complete})
+			b.settleSteers(w, nil, err)
 		}
 	}
-	b.log.Debug("broker.request.queued", "queued broker request",
+	return w
+}
+
+// settleSteers fans out consumed follow-ups and requeues unconsumed ones.
+// Consumed entries share the host response so no dead model call fires for
+// them. Unconsumed entries (and every steer when the host fails) auto-run as
+// the next turns in arrival order.
+func (b *Broker) settleSteers(host *work, resp *agent.Response, hostErr error) {
+	if host == nil || host.steerInbox == nil {
+		return
+	}
+	drained := host.steerInbox.Drained()
+	pending := host.steerInbox.Pending()
+	if len(drained) == 0 && len(pending) == 0 {
+		return
+	}
+	drainedSet := make(map[string]struct{}, len(drained))
+	for _, st := range drained {
+		drainedSet[st.RequestID] = struct{}{}
+	}
+	b.mu.Lock()
+	order := append([]string(nil), host.steerOrder...)
+	entries := make(map[string]*steerEntry, len(host.steerEntries))
+	for id, entry := range host.steerEntries {
+		entries[id] = entry
+	}
+	host.steerEntries = make(map[string]*steerEntry)
+	host.steerOrder = nil
+	// Clear the inbox so late arrivals after settlement become normal followers.
+	host.steerInbox.TakeAll()
+	failed := hostErr != nil
+	b.mu.Unlock()
+	consume := func(id string) {
+		b.mu.Lock()
+		entry, ok := entries[id]
+		if ok {
+			delete(entries, id)
+			if b.steerCount > 0 {
+				b.steerCount--
+			}
+		}
+		b.mu.Unlock()
+		if !ok || entry == nil {
+			return
+		}
+		if entry.stopWatch != nil {
+			entry.stopWatch()
+		}
+		if failed {
+			b.requeueSteer(host.key, entry)
+			return
+		}
+		duration := time.Since(entry.queuedAt).Milliseconds()
+		b.log.Debug("broker.request.steered", "completed steered follow-up with host turn",
+			config.F("request_id", entry.req.RequestID),
+			config.F("gateway", entry.req.Principal.Gateway),
+			config.F("chat_id", entry.req.ChatID))
+		deliverResult(entry.req.ResponseChan, Result{Response: resp, Principal: entry.req.Principal, QueueWaitMS: 0, AgentDurationMS: duration, ExecutionComplete: true})
+	}
+	requeue := func(id string) {
+		b.mu.Lock()
+		entry, ok := entries[id]
+		if ok {
+			delete(entries, id)
+			if b.steerCount > 0 {
+				b.steerCount--
+			}
+		}
+		b.mu.Unlock()
+		if !ok || entry == nil {
+			return
+		}
+		if entry.stopWatch != nil {
+			entry.stopWatch()
+		}
+		b.requeueSteer(host.key, entry)
+	}
+	if failed {
+		for _, id := range order {
+			if _, ok := entries[id]; !ok {
+				continue
+			}
+			requeue(id)
+		}
+		return
+	}
+	for _, st := range drained {
+		consume(st.RequestID)
+	}
+	for _, st := range pending {
+		if _, ok := drainedSet[st.RequestID]; ok {
+			continue
+		}
+		requeue(st.RequestID)
+	}
+	// Entries removed by transport cancellation are already gone.
+	for id := range entries {
+		requeue(id)
+	}
+}
+
+// requeueSteer converts one unconsumed steer into a FIFO lane follower that
+// preserves the original arrival time for queue-wait telemetry.
+func (b *Broker) requeueSteer(key LaneKey, entry *steerEntry) {
+	if entry == nil || entry.req == nil {
+		return
+	}
+	req := entry.req
+	req.ForceQueue = true
+	w := b.buildAgentWork(req)
+	w.queuedAt = entry.queuedAt
+	if w.queuedAt.IsZero() {
+		w.queuedAt = time.Now()
+	}
+	b.log.Debug("broker.request.queued", "queued unconsumed steer as next turn",
 		config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
 		config.F("chat_id", req.ChatID), config.F("session_id", req.SessionKey))
 	if err := b.enqueue(w); err != nil {
-		cancel(err)
+		w.cancel(err)
 		reason := "queue_full"
 		text := "request rejected: broker queue full"
 		if errors.Is(err, ErrShuttingDown) {
 			reason = "shutting_down"
 			text = "request rejected: broker shutting down"
 		}
-		b.log.Warn("broker.request.rejected", "rejected broker request",
+		b.log.Warn("broker.request.rejected", "rejected requeued steer",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
 			config.F("profile", req.Principal.CanonicalUserID),
 			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
 		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
-		return err
 	}
-	return nil
 }
 
 // CancelActiveAgentWork cancels the currently running foreground request in one conversation.
+// Steered follow-ups survive as queued next turns via host settlement.
 func (b *Broker) CancelActiveAgentWork(canonicalUserID, sessionID string) CancelReport {
 	canonicalUserID = strings.TrimSpace(canonicalUserID)
 	sessionID = strings.TrimSpace(sessionID)
@@ -393,20 +673,22 @@ func (b *Broker) CancelActiveAgentWork(canonicalUserID, sessionID string) Cancel
 	}
 	return b.cancelAgentWork(func(w *work) bool {
 		return w.state == workRunning && w.ownerUserID == canonicalUserID && w.key.SessionID == sessionID
-	})
+	}, false)
 }
 
-// CancelAllAgentWork cancels all active and queued foreground agent requests.
+// CancelAllAgentWork cancels all active and queued foreground agent requests,
+// including steered follow-ups that have not yet been consumed.
 func (b *Broker) CancelAllAgentWork() CancelReport {
 	return b.cancelAgentWork(func(w *work) bool {
 		return w.state == workRunning || w.state == workQueued
-	})
+	}, true)
 }
 
-func (b *Broker) cancelAgentWork(matches func(*work) bool) CancelReport {
+func (b *Broker) cancelAgentWork(matches func(*work) bool, failSteers bool) CancelReport {
 	b.mu.Lock()
 	var report CancelReport
 	var canceled []*work
+	var failedSteers []*steerEntry
 	for _, lane := range b.lanes {
 		for _, w := range lane {
 			if w.request == nil || !matches(w) {
@@ -420,11 +702,41 @@ func (b *Broker) cancelAgentWork(matches func(*work) bool) CancelReport {
 			w.state = workCanceled
 			w.cancel(ErrAgentWorkCanceled)
 			canceled = append(canceled, w)
+			if failSteers && w.steerInbox != nil && len(w.steerEntries) > 0 {
+				for id, entry := range w.steerEntries {
+					failedSteers = append(failedSteers, entry)
+					delete(w.steerEntries, id)
+				}
+				w.steerOrder = nil
+				w.steerInbox.TakeAll()
+				// Correct double counting: only add steers beyond works.
+				// (Works already counted above; steers are extra.)
+				// Recompute simply: steers add len(failedSteers) total.
+				// Undo the запутанный adjustment by recounting below.
+				_ = report
+			}
+		}
+	}
+	if len(failedSteers) > 0 {
+		report.QueuedCanceled += len(failedSteers)
+		if b.steerCount >= len(failedSteers) {
+			b.steerCount -= len(failedSteers)
+		} else {
+			b.steerCount = 0
 		}
 	}
 	b.mu.Unlock()
 	for _, w := range canceled {
 		w.finish(ErrAgentWorkCanceled)
+	}
+	for _, entry := range failedSteers {
+		if entry == nil || entry.req == nil {
+			continue
+		}
+		if entry.stopWatch != nil {
+			entry.stopWatch()
+		}
+		deliverResult(entry.req.ResponseChan, Result{Principal: entry.req.Principal, Err: ErrAgentWorkCanceled, ExecutionComplete: true})
 	}
 	return report
 }
@@ -471,7 +783,7 @@ func (b *Broker) enqueue(w *work) error {
 		return ErrShuttingDown
 	}
 	limit := requestQueueSize + b.workerCount
-	if b.outstanding >= limit {
+	if b.outstanding+b.steerCount >= limit {
 		b.mu.Unlock()
 		return ErrQueueFull
 	}
@@ -493,7 +805,9 @@ func (b *Broker) enqueue(w *work) error {
 		}
 	}
 	b.lanes[w.key] = append(lane, w)
-	w.queuedAt = time.Now()
+	if w.queuedAt.IsZero() {
+		w.queuedAt = time.Now()
+	}
 	b.outstanding++
 	b.workWG.Add(1)
 	isHead := len(lane) == 0
@@ -510,7 +824,7 @@ func (b *Broker) enqueue(w *work) error {
 // is active or queued. Accepted foreground work cancels the returned context.
 func (b *Broker) TryAcquireLowPriority(parent context.Context) (context.Context, func(), bool) {
 	b.mu.Lock()
-	if !b.accepting || !b.started || b.outstanding != 0 || b.background != nil {
+	if !b.accepting || !b.started || b.outstanding+b.steerCount != 0 || b.background != nil {
 		b.mu.Unlock()
 		return nil, nil, false
 	}
@@ -542,7 +856,7 @@ func (b *Broker) Shutdown() {
 		if b.background != nil {
 			b.background.cancel()
 		}
-		queued := b.outstanding
+		queued := b.outstanding + b.steerCount
 		started := b.started
 		b.mu.Unlock()
 		b.log.Debug("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", queued))
@@ -560,16 +874,37 @@ func (b *Broker) Shutdown() {
 func (b *Broker) rejectPendingWork() {
 	b.mu.Lock()
 	var pending []*work
+	var failedSteers []*steerEntry
 	for _, lane := range b.lanes {
-		pending = append(pending, lane...)
+		for _, w := range lane {
+			pending = append(pending, w)
+			if w.steerInbox != nil && len(w.steerEntries) > 0 {
+				for id, entry := range w.steerEntries {
+					failedSteers = append(failedSteers, entry)
+					delete(w.steerEntries, id)
+				}
+				w.steerOrder = nil
+				w.steerInbox.TakeAll()
+			}
+		}
 	}
 	b.lanes = make(map[LaneKey][]*work)
 	b.outstanding = 0
+	b.steerCount = 0
 	b.mu.Unlock()
 	for _, w := range pending {
 		b.cancelFenceReservations(w)
 		w.finish(ErrShuttingDown)
 		b.workWG.Done()
+	}
+	for _, entry := range failedSteers {
+		if entry == nil || entry.req == nil {
+			continue
+		}
+		if entry.stopWatch != nil {
+			entry.stopWatch()
+		}
+		deliverResult(entry.req.ResponseChan, Result{Principal: entry.req.Principal, Err: ErrShuttingDown, ExecutionComplete: true})
 	}
 }
 
