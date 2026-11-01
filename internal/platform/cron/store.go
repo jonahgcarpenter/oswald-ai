@@ -80,7 +80,7 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 	if input.Schedule.Kind == ScheduleOnce && !next.After(now) {
 		return Job{}, errors.New("one-shot schedule must be in the future")
 	}
-	platform, err := normalizePlatform(input.Deliver.Platform)
+	deliver, err := NormalizeDeliver(input.Deliver)
 	if err != nil {
 		return Job{}, err
 	}
@@ -93,7 +93,7 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 		NoAgent:         input.NoAgent,
 		Schedule:        input.Schedule,
 		Repeat:          input.Repeat,
-		Deliver:         Deliver{Platform: platform, ChatID: strings.TrimSpace(input.Deliver.ChatID), UserID: strings.TrimSpace(input.Deliver.UserID)},
+		Deliver:         deliver,
 		EnabledToolsets: append([]string(nil), input.EnabledToolsets...),
 		Enabled:         true,
 		State:           StateScheduled,

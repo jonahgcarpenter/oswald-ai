@@ -156,6 +156,19 @@ func ValidateDeliver(d Deliver) error {
 	return nil
 }
 
+// NormalizeDeliver canonicalizes a delivery target's platform spelling.
+func NormalizeDeliver(d Deliver) (Deliver, error) {
+	platform, err := normalizePlatform(d.Platform)
+	if err != nil {
+		return Deliver{}, err
+	}
+	out := Deliver{Platform: platform, ChatID: strings.TrimSpace(d.ChatID), UserID: strings.TrimSpace(d.UserID)}
+	if out.ChatID == "" {
+		return Deliver{}, errors.New("deliver chat_id is required")
+	}
+	return out, nil
+}
+
 // Execution is one ledger entry.
 type Execution struct {
 	JobID             string   `json:"job_id"`
