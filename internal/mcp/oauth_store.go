@@ -15,10 +15,18 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
-// tokenDirName is the profile-local directory holding OAuth material. It
-// lives beside config.yaml, souls, and state.db inside the private profile
-// root; directory backups already cover it.
-const tokenDirName = "mcp-tokens"
+// mcpDirName is the profile-local parent holding all MCP private material.
+// It lives beside config.yaml, souls, and state.db inside the private profile
+// root; directory backups already cover it. The whole tree is workspace-
+// protected: the agent can neither read nor write under it.
+const mcpDirName = "mcp"
+
+// serverDirForRoot returns one server's private directory (mcp/<server>/,
+// holding OAuth tokens or a stdio home) without creating anything. Missing
+// directories simply mean nothing was ever stored.
+func serverDirForRoot(root, server string) string {
+	return filepath.Join(root, mcpDirName, server)
+}
 
 const maxTokenFileBytes = 64 * 1024
 
@@ -52,10 +60,10 @@ const (
 	clientMethodDCR      = "dcr"
 )
 
-// tokenStore owns the private per-profile OAuth files for one MCP server:
-// <server>.json (tokens), <server>.client.json (DCR credentials),
-// <server>.meta.json (authorization-server metadata cache), and
-// <server>.cimd-off (marker: CIMD refused, use DCR).
+// tokenStore owns the private per-profile OAuth files for one MCP server
+// under mcp/<server>/: <server>.json (tokens), <server>.client.json (DCR
+// credentials), <server>.meta.json (authorization-server metadata cache),
+// and <server>.cimd-off (marker: CIMD refused, use DCR).
 type tokenStore struct {
 	dir    string
 	server string
@@ -69,10 +77,31 @@ func newTokenStore(profileRoot, server string) (*tokenStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensurePrivateDir(filepath.Join(root, tokenDirName)); err != nil {
+	if err := ensurePrivateDir(filepath.Join(root, mcpDirName)); err != nil {
 		return nil, err
 	}
-	return &tokenStore{dir: filepath.Join(root, tokenDirName), server: server}, nil
+	dir := serverDirForRoot(root, server)
+	if err := ensurePrivateDir(dir); err != nil {
+		return nil, err
+	}
+	return &tokenStore{dir: dir, server: server}, nil
+}
+
+// EnsureServerDir seeds one server's private directory (mcp/<server>/)
+// with owner-only permissions. Existing entries are left untouched; unsafe
+// paths fail closed.
+func EnsureServerDir(profileRoot, server string) error {
+	if err := validateServerName(server); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(profileRoot)
+	if err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(filepath.Join(root, mcpDirName)); err != nil {
+		return err
+	}
+	return ensurePrivateDir(serverDirForRoot(root, server))
 }
 
 func ensurePrivateDir(dir string) error {
@@ -122,6 +151,21 @@ func repairTokenDir(dir, profile string) {
 	logTokenRepair(profile, "", "mcp_tokens_dir", before)
 }
 
+func repairServerDir(dir, profile, server string) {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(dir, 0700); err != nil {
+		return
+	}
+	logTokenRepair(profile, server, "mcp_server_dir", before)
+}
+
 func repairTokenFile(path, profile, server, artifact string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
@@ -137,9 +181,11 @@ func repairTokenFile(path, profile, server, artifact string) {
 	logTokenRepair(profile, server, artifact, before)
 }
 
-// RepairTokens tightens permissions on existing MCP OAuth material without
-// creating anything. Missing paths stay missing so creation remains lazy;
-// symlinks and foreign-owned paths are left for the fail-closed checks.
+// RepairTokens tightens permissions on the MCP hierarchy without creating
+// anything. Missing paths stay missing so creation remains lazy; symlinks
+// and foreign-owned paths are left for the fail-closed checks. Each server
+// owns mcp/<server>/ (OAuth tokens or a stdio home); unknown subdirectories
+// with valid server names are repaired the same way.
 func RepairTokens(profileRoot, profile string, servers []string) {
 	if strings.TrimSpace(profileRoot) == "" || strings.TrimSpace(profile) == "" {
 		return
@@ -148,8 +194,8 @@ func RepairTokens(profileRoot, profile string, servers []string) {
 	if err != nil {
 		return
 	}
-	dir := filepath.Join(root, tokenDirName)
-	repairTokenDir(dir, profile)
+	mcpDir := filepath.Join(root, mcpDirName)
+	repairTokenDir(mcpDir, profile)
 	suffixes := []struct{ suffix, artifact string }{
 		{".json", "mcp_tokens_tokens"},
 		{".client.json", "mcp_tokens_client"},
@@ -157,37 +203,35 @@ func RepairTokens(profileRoot, profile string, servers []string) {
 		{".cimd-off", "mcp_tokens_cimd_off"},
 		{".lock", "mcp_tokens_lock"},
 	}
+	repairOne := func(server string) {
+		dir := serverDirForRoot(root, server)
+		repairServerDir(dir, profile, server)
+		for _, entry := range suffixes {
+			repairTokenFile(filepath.Join(dir, server+entry.suffix), profile, server, entry.artifact)
+		}
+	}
 	seen := map[string]bool{}
 	for _, server := range servers {
 		if validateServerName(server) != nil || seen[server] {
 			continue
 		}
 		seen[server] = true
-		for _, entry := range suffixes {
-			repairTokenFile(filepath.Join(dir, server+entry.suffix), profile, server, entry.artifact)
-		}
+		repairOne(server)
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(mcpDir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !entry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		for _, suffix := range suffixes {
-			if !strings.HasSuffix(name, suffix.suffix) || len(name) == len(suffix.suffix) {
-				continue
-			}
-			server := strings.TrimSuffix(name, suffix.suffix)
-			if validateServerName(server) != nil || seen[server+suffix.suffix] {
-				break
-			}
-			seen[server+suffix.suffix] = true
-			repairTokenFile(filepath.Join(dir, name), profile, server, suffix.artifact)
-			break
+		server := entry.Name()
+		if validateServerName(server) != nil || seen[server] {
+			continue
 		}
+		seen[server] = true
+		repairOne(server)
 	}
 }
 

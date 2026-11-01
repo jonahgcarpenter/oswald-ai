@@ -67,7 +67,7 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "default")
 	// Same-profile: secrets and operator config sealed, everything else readable.
-	for _, raw := range []string{".env", ".env.local", "config.yaml", "mcp-tokens/tok", "deploy.pem", "vault/credentials.json"} {
+	for _, raw := range []string{".env", ".env.local", "config.yaml", "mcp/robinhood/robinhood.json", "mcp/spotify/auth.json", "deploy.pem", "vault/credentials.json"} {
 		if _, _, err := ws.Resolve(raw); err == nil {
 			t.Fatalf("protected path allowed: %q", raw)
 		}
@@ -112,7 +112,7 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 			t.Fatalf("named read denied: %q: %v", raw, err)
 		}
 	}
-	if _, _, err := named.Resolve("mcp-tokens/x"); err == nil {
+	if _, _, err := named.Resolve("mcp/spotify/auth.json"); err == nil {
 		t.Fatal("named secret allowed")
 	}
 	if _, _, err := named.ResolveWrite("SOUL.md"); err != nil {

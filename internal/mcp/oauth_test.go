@@ -587,7 +587,7 @@ func TestOAuthTokenStoreEnforcesPrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, file := range []string{"oauthsrv.json"} {
-		info, err := os.Stat(filepath.Join(root, tokenDirName, file))
+		info, err := os.Stat(filepath.Join(serverDirForRoot(root, "oauthsrv"), file))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -595,7 +595,7 @@ func TestOAuthTokenStoreEnforcesPrivacy(t *testing.T) {
 			t.Fatalf("token file perms = %o", info.Mode().Perm())
 		}
 	}
-	dirInfo, err := os.Stat(filepath.Join(root, tokenDirName))
+	dirInfo, err := os.Stat(serverDirForRoot(root, "oauthsrv"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,5 +608,77 @@ func TestOAuthTokenStoreEnforcesPrivacy(t *testing.T) {
 	}
 	if _, ok, err := store.LoadClient(ctx); err != nil || ok {
 		t.Fatalf("unexpected client = %t %v", ok, err)
+	}
+}
+
+func TestTokenStoreUsesMCPHierarchy(t *testing.T) {
+	store, root := testOAuthStore(t)
+	want := filepath.Join(root, "mcp", "oauthsrv")
+	if store.dir != want {
+		t.Fatalf("store dir = %q, want %q", store.dir, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mcp")); err != nil {
+		t.Fatalf("mcp parent missing: %v", err)
+	}
+}
+
+func TestEnsureServerDirSeedsPrivateTree(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureServerDir(root, "spotify"); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(root, "mcp"),
+		filepath.Join(root, "mcp", "spotify"),
+	} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("missing %s: %v", dir, err)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			t.Fatalf("perms %s = %o", dir, info.Mode().Perm())
+		}
+	}
+	if err := EnsureServerDir(root, "Bad Name!"); err == nil {
+		t.Fatal("bad server name accepted")
+	}
+}
+
+func TestRepairTokensRepairsMCPHierarchyWithoutCreating(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "mcp", "spotify")
+	RepairTokens(root, "alice", []string{"spotify"})
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatal("repair created missing hierarchy")
+	}
+	dirs := []string{
+		filepath.Join(root, "mcp"),
+		filepath.Join(root, "mcp", "spotify"),
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokFile := filepath.Join(root, "mcp", "spotify", "spotify.json")
+	if err := os.WriteFile(tokFile, []byte(`{"access_token":"a","issuer":"https://example.com"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	RepairTokens(root, "alice", []string{"spotify"})
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			t.Fatalf("perms %s = %o", dir, info.Mode().Perm())
+		}
+	}
+	info, err := os.Stat(tokFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		t.Fatalf("token perms = %o", info.Mode().Perm())
 	}
 }

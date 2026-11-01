@@ -23,7 +23,9 @@ type profileConfiguration struct {
 
 // NewProfileManager creates isolated lazy MCP sessions from resolved profile
 // configuration. No database, encrypted settings, or account service is used.
-// Configuration changes take effect on restart.
+// Configuration changes take effect on restart. Each server owns a private
+// mcp/<name>/ directory (owner-only, missing entries only): a stdio home or
+// OAuth tokens, created lazily on first use.
 func NewProfileManager(owner, profileRoot string, servers []config.MCPServer, log *config.Logger) (*Manager, error) {
 	if owner == "" {
 		return nil, errors.New("MCP profile owner is required")
@@ -46,6 +48,16 @@ func NewProfileManager(owner, profileRoot string, servers []config.MCPServer, lo
 		resolved.Scope = ScopeUser
 		resolved.OwnerUserID = owner
 		source.servers = append(source.servers, resolved)
+	}
+	if strings.TrimSpace(profileRoot) != "" {
+		for _, srv := range source.servers {
+			if srv.Transport != TransportStdio {
+				continue
+			}
+			if err := EnsureServerDir(profileRoot, srv.Name); err != nil {
+				return nil, err
+			}
+		}
 	}
 	manager := newManager(source, log)
 	manager.profileRoot = profileRoot

@@ -91,7 +91,7 @@ func TestAddEditRemoveRoundTrip(t *testing.T) {
 	if strings.Contains(string(data), "command: npx") || !strings.Contains(string(data), "https://example.com/mcp") {
 		t.Fatalf("switch did not clear stdio keys:\n%s", data)
 	}
-	if code, out, _ := mcpRun(t, root, "remove", "local"); code != 0 || !strings.Contains(out, "tokens kept") {
+	if code, out, _ := mcpRun(t, root, "remove", "local"); code != 0 || !strings.Contains(out, "directory kept") {
 		t.Fatalf("remove = %d %q", code, out)
 	}
 	if code, _, _ := mcpRun(t, root, "remove", "local"); code == 0 {
@@ -204,12 +204,12 @@ func TestTestCommandFailedServer(t *testing.T) {
 	}
 }
 
-func TestRemoveWithTokens(t *testing.T) {
+func TestRemoveFull(t *testing.T) {
 	root := mcpTestRoot(t)
 	if code, _, stderr := mcpRun(t, root, "add", "docs", "--url", "https://example.com/mcp"); code != 0 {
 		t.Fatalf("add = %d %s", code, stderr)
 	}
-	tokDir := filepath.Join(root, "mcp-tokens")
+	tokDir := filepath.Join(root, "mcp", "docs")
 	if err := os.MkdirAll(tokDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -217,19 +217,19 @@ func TestRemoveWithTokens(t *testing.T) {
 	if err := os.WriteFile(tokFile, []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, _ := mcpRun(t, root, "remove", "docs"); code != 0 || !strings.Contains(out, "tokens kept") {
+	if code, out, _ := mcpRun(t, root, "remove", "docs"); code != 0 || !strings.Contains(out, "directory kept") {
 		t.Fatalf("remove = %d %q", code, out)
 	}
 	if _, err := os.Stat(tokFile); err != nil {
-		t.Fatal("default remove deleted tokens")
+		t.Fatal("default remove deleted directory")
 	}
 	if code, _, stderr := mcpRun(t, root, "add", "docs", "--url", "https://example.com/mcp"); code != 0 {
 		t.Fatalf("re-add = %d %s", code, stderr)
 	}
-	if code, out, _ := mcpRun(t, root, "remove", "docs", "--with-tokens"); code != 0 || !strings.Contains(out, "and its tokens") {
-		t.Fatalf("remove with tokens = %d %q", code, out)
+	if code, out, _ := mcpRun(t, root, "remove", "docs", "--full"); code != 0 || !strings.Contains(out, "and its directory") {
+		t.Fatalf("remove full = %d %q", code, out)
 	}
 	if _, err := os.Stat(tokFile); !os.IsNotExist(err) {
-		t.Fatal("tokens survived --with-tokens")
+		t.Fatal("directory survived --full")
 	}
 }

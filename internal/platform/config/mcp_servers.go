@@ -3,8 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,7 +66,7 @@ func UpdateMCPServer(root, profile, name string, spec MCPServerSpec) error {
 }
 
 // RemoveMCPServer deletes the mcp_servers.<name> entry, reporting whether it
-// existed. Token material under mcp-tokens/ is left alone; use --with-tokens
+// existed. Server directory under mcp/<name>/ is left alone; use --full
 // handling in the caller to drop it too.
 func RemoveMCPServer(root, profile, name string) (bool, error) {
 	configPath, err := ConfigPathForProfile(root, profile)
@@ -415,18 +413,4 @@ func stringMapNode(values map[string]string) *yaml.Node {
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: values[key]})
 	}
 	return node
-}
-
-// mcpTokenDirForProfile returns the profile token directory without creating
-// anything. Missing directories simply mean no tokens were ever stored.
-func mcpTokenDirForProfile(profileRoot, server string) (string, error) {
-	abs, err := filepath.Abs(profileRoot)
-	if err != nil {
-		return "", errors.New("invalid configuration root")
-	}
-	info, err := os.Stat(abs)
-	if err != nil || !info.IsDir() {
-		return "", errors.New("invalid configuration root")
-	}
-	return filepath.Join(abs, "mcp-tokens", server), nil
 }

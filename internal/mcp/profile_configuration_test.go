@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,5 +81,38 @@ func TestProfileMCPCloseFencesLateConnectionAndIsIdempotent(t *testing.T) {
 	}
 	if _, err := manager.ensureConnected(context.Background(), ServerConfig{}); err == nil {
 		t.Fatal("closed manager accepted a connection")
+	}
+}
+
+func TestProfileManagerSeedsStdioServerDir(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	root := t.TempDir()
+	entries := []config.MCPServer{{Name: "spotify", Command: "/bin/true", Enabled: true}}
+	manager, err := NewProfileManager("alice", root, entries, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	dir := filepath.Join(root, "mcp", "spotify")
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("server dir missing: %v", err)
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		t.Fatalf("server dir perms = %o", info.Mode().Perm())
+	}
+}
+
+func TestProfileManagerSkipsServerDirForHTTP(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	root := t.TempDir()
+	entries := []config.MCPServer{{Name: "example", URL: "https://example.com/mcp", Enabled: true}}
+	manager, err := NewProfileManager("alice", root, entries, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := os.Stat(filepath.Join(root, "mcp", "example")); !os.IsNotExist(err) {
+		t.Fatal("HTTP server seeded a private dir")
 	}
 }
