@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -186,6 +187,7 @@ type Execution struct {
 type Store struct {
 	root     string
 	mu       sync.Mutex
+	fileMu   sync.Mutex
 	inFlight map[string]bool
 }
 
@@ -238,6 +240,44 @@ func (s *Store) dir() (string, error) {
 		return "", errors.New("cron store is unavailable")
 	}
 	return filepath.Join(s.root, "cron"), nil
+}
+
+// jobsLockTimeout bounds waiting for a sibling process holding jobs.lock.
+const jobsLockTimeout = 30 * time.Second
+
+// lockJobs serializes a load→modify→save section across processes with an
+// flock on cron/.jobs.lock plus the in-process file mutex, so gateway,
+// CLI, and tool writes cannot clobber each other. On lock timeout it
+// degrades to in-process locking so the scheduler stays alive.
+func (s *Store) lockJobs() (unlock func()) {
+	s.fileMu.Lock()
+	release := func() { s.fileMu.Unlock() }
+	dir, err := s.dir()
+	if err != nil {
+		return release
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return release
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".jobs.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return release
+	}
+	deadline := time.Now().Add(jobsLockTimeout)
+	for {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return func() {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+				s.fileMu.Unlock()
+			}
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close()
+			return release
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (s *Store) loadJobs() ([]Job, error) {

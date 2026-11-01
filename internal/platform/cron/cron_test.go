@@ -689,6 +689,30 @@ func mustCreate(t *testing.T, store *Store, in Job) Job {
 	return job
 }
 
+func TestConcurrentCreatesNoLoss(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "every 1h", now)
+	const n = 20
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := store.Create(now, testRunner(root), Job{Schedule: sched, Prompt: "hi", Deliver: testDeliver()})
+			errs <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs, err := store.List()
+	if err != nil || len(jobs) != n {
+		t.Fatalf("jobs = %d %v", len(jobs), err)
+	}
+}
+
 func TestEveryParsesToUTCWallClock(t *testing.T) {
 	loc, err := time.LoadLocation("America/Chicago")
 	if err != nil {

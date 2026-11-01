@@ -122,6 +122,8 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 	if err := s.validate(r, &job); err != nil {
 		return Job{}, err
 	}
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return Job{}, err
@@ -228,6 +230,8 @@ func (s *Store) Mutate(id string, fn func(*Job) error) (Job, error) {
 }
 
 func (s *Store) mutateID(id string, fn func(*Job) error) (Job, error) {
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return Job{}, err
@@ -255,12 +259,14 @@ func (s *Store) Remove(id string) error {
 	if err != nil {
 		return err
 	}
-	jobs, err := s.loadJobs()
+	unlock := s.lockJobs()
+	defer unlock()
+	stored, err := s.loadJobs()
 	if err != nil {
 		return err
 	}
-	kept := jobs[:0]
-	for _, candidate := range jobs {
+	kept := stored[:0]
+	for _, candidate := range stored {
 		if candidate.ID == job.ID {
 			continue
 		}
@@ -334,6 +340,8 @@ func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job, slotUnix 
 // newly auto-paused the job on consecutive failures.
 func (s *Store) finishRun(id, status, deliveryErr string, failed bool) bool {
 	now := time.Now().UTC()
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return false
@@ -485,6 +493,8 @@ func (s *Store) LastOutput(jobID string) string {
 // same slot.
 func (s *Store) ClaimDue(now time.Time) []Job {
 	now = now.UTC()
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return nil
