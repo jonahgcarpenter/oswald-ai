@@ -9,7 +9,9 @@ ownership, DNS-gated dial, paginated `ListTools`); `provider.go` is the bridge s
 sees; `naming.go` parses `mcp__<server>__<remote>` qualified names (legacy `server.remote` forms
 resolve for history attribution only, never for execution); `schema.go` projects remote schemas;
 `result.go` flattens results within rune bounds; `profile_configuration.go` / `validate.go` /
-`http_transport.go` enforce the server config rules. `oauth*.go` implement discovery, browser and
+`http_transport.go` enforce the server config rules; `stdio_resolve.go` resolves `npx -y <pkg>`
+to the installed npm-cache binary (conservative fallback to plain `npx` so cold machines still
+install) and names missing stdio binaries per server. `oauth*.go` implement discovery, browser and
 device flows, and the token store with cross-process refresh fencing.
 
 ## Bridge protocol (what the model actually sees)
