@@ -22,18 +22,18 @@ func TestSameTierDuplicatesLoadByPath(t *testing.T) {
 	}
 }
 
-func TestPlatformGating(t *testing.T) {
+func TestNoPlatformGating(t *testing.T) {
 	root := t.TempDir()
 	entries := []RawEntry{
 		{Name: "open", Dir: filepath.Join(root, "open"), Root: root},
-		{Name: "gated", Platforms: []string{"discord"}, Dir: filepath.Join(root, "gated"), Root: root},
+		{Name: "gated", Dir: filepath.Join(root, "gated"), Root: root},
 	}
 	if skills := resolveCatalog(entries, "discord"); len(skills) != 2 {
 		t.Fatalf("expected 2 skills on discord, got %+v", skills)
 	}
 	skills := resolveCatalog(entries, "imessage")
-	if len(skills) != 1 || skills[0].Name != "open" {
-		t.Fatalf("expected only ungated skill, got %+v", skills)
+	if len(skills) != 2 {
+		t.Fatalf("expected all skills visible, got %+v", skills)
 	}
 }
 

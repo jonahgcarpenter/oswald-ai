@@ -3,36 +3,28 @@ package skills
 import (
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // Skill is one loadable skill after catalog resolution. LoadName is what a
 // view call accepts: the declared name when unique, otherwise the exact
 // path relative to the skills root.
 type Skill struct {
-	Name          string
-	Description   string
-	Version       string
-	Platforms     []string
-	Prerequisites []string
-	Tags          []string
-	Category      string
-	LoadName      string
-	Dir           string
-	File          string
+	Name        string
+	Description string
+	Version     string
+	Category    string
+	LoadName    string
+	Dir         string
+	File        string
 }
 
-// resolveCatalog turns scanned entries into the visible, loadable catalog
-// for one platform (the gateway name, case-insensitive; gated skills need
-// an exact match, ungated skills show everywhere). Same-named skills stay
+// resolveCatalog turns scanned entries into the visible, loadable catalog.
+// The platform argument is accepted for call compatibility but ignored:
+// every skill is visible on every gateway. Same-named skills stay
 // individually loadable by relative path.
-func resolveCatalog(entries []RawEntry, platform string) []Skill {
-	platform = strings.ToLower(strings.TrimSpace(platform))
+func resolveCatalog(entries []RawEntry, _ string) []Skill {
 	byName := make(map[string][]RawEntry)
 	for _, entry := range entries {
-		if !visibleOn(entry.Platforms, platform) {
-			continue
-		}
 		byName[entry.Name] = append(byName[entry.Name], entry)
 	}
 	var out []Skill
@@ -46,21 +38,6 @@ func resolveCatalog(entries []RawEntry, platform string) []Skill {
 		return out[i].LoadName < out[j].LoadName
 	})
 	return out
-}
-
-// visibleOn reports whether a platforms gate admits this platform. An
-// empty gate admits everything; a gated skill needs an exact
-// case-insensitive platform match.
-func visibleOn(platforms []string, platform string) bool {
-	if len(platforms) == 0 {
-		return true
-	}
-	for _, gated := range platforms {
-		if strings.ToLower(gated) == platform {
-			return true
-		}
-	}
-	return false
 }
 
 // resolveNameGroup settles every entry sharing one declared name.
@@ -97,16 +74,13 @@ func resolveNameGroup(name string, group []RawEntry) []Skill {
 // parent directory relative to the skills root ("general" at the top level).
 func toSkill(entry RawEntry, loadName, root string) Skill {
 	return Skill{
-		Name:          entry.Name,
-		Description:   entry.Description,
-		Version:       entry.Version,
-		Platforms:     entry.Platforms,
-		Prerequisites: entry.Prerequisites,
-		Tags:          entry.Tags,
-		Category:      categoryFor(entry.Dir, root),
-		LoadName:      loadName,
-		Dir:           entry.Dir,
-		File:          entry.File,
+		Name:        entry.Name,
+		Description: entry.Description,
+		Version:     entry.Version,
+		Category:    categoryFor(entry.Dir, root),
+		LoadName:    loadName,
+		Dir:         entry.Dir,
+		File:        entry.File,
 	}
 }
 

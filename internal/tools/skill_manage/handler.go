@@ -104,9 +104,6 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 	if result.Version != "" {
 		fmt.Fprintf(&sb, "Version: %s\n", outputpkg.Clean(result.Version))
 	}
-	if len(result.Prerequisites) > 0 {
-		fmt.Fprintf(&sb, "Prerequisites: %s\n", outputpkg.Clean(strings.Join(result.Prerequisites, ", ")))
-	}
 	sb.WriteString("\n")
 	if result.FilePath != "" {
 		sb.WriteString(outputpkg.Clean(result.FileContent))
