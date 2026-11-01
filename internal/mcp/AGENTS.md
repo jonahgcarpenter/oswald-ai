@@ -17,7 +17,9 @@ device flows, and the token store with cross-process refresh fencing.
 ## Bridge protocol (what the model actually sees)
 
 The model never sees servers or deferred tools — exactly `tool_search`, `tool_describe`, and
-`tool_call`, all connecting lazily at catalog-build and execution time, never at startup:
+`tool_call`, all connecting lazily at catalog-build and execution time, never at startup.
+Request-scoped views (`WithServers`) restrict all three paths to named servers — nil exposes
+every server; search, describe misses, and direct calls outside the scope fail closed:
 
 - `tool_search`: 1–7 keyword queries plus an optional per-query limit (default 5, clamped 1–25).
   Every query word must appear in the tool text; scoring prefers name over server over description

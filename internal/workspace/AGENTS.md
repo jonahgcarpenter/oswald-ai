@@ -94,8 +94,9 @@ after creation, newest 64 per profile, pruned hourly; `StopAll` kills non-persis
 store close.
 
 `cronjob_manage` owns schedules end to end (`create|list|update|pause|resume|remove|run`), rejects
-`model/provider/base_url` overrides, and runs with zero-tool `enabled_toolsets:[]`. Scripts get
-stdout injection, monitors get diff gates with first-tick baselines, delivery is origin-only.
+`model/provider/base_url` overrides, and runs with zero-tool `enabled_toolsets:[]`. Scripts resolve
+under per-profile `scripts/` with stdout injection, delivery targets the concrete `deliver` object
+(defaulting to the creating chat), and UTC schedules are converted by the model before scheduling.
 
 ## Tests
 

@@ -40,13 +40,16 @@ func TestRunScriptFileCreatesScratch(t *testing.T) {
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(root, "job.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0600); err != nil {
+	scripts := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(scripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scripts, "job.sh"), []byte("#!/bin/sh\necho hi\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	scratch := filepath.Join(root, "cache", "scratch")
-	r := &Runner{Root: root, Scratch: scratch, Resolve: func(raw string) (string, error) { return raw, nil }}
-	out, err := runScriptFile(context.Background(), r, script, "", 30)
+	r := &Runner{Root: root, ScriptsDir: scripts, Scratch: scratch}
+	out, err := runScriptFile(context.Background(), r, "job.sh", 30)
 	if err != nil || out != "hi" {
 		t.Fatalf("script failed: %q %v", out, err)
 	}

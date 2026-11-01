@@ -16,19 +16,16 @@ import (
 )
 
 // MCPProvider resolves request-scoped deferred MCP tools through the
-// tool_search, tool_describe, and tool_call bridge.
-type MCPProvider interface {
-	BridgeTools(ctx context.Context, principal identity.Principal) []llm.Tool
-	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}) (mcp.ExecutionResult, bool, error)
-	ToolPolicy(name string) governance.ToolPolicy
-}
+// tool_search, tool_describe, and tool_call bridge. It is the mcp package's
+// provider view; server scoping rides WithServers.
+type MCPProvider = mcp.ProviderView
 
 type offeredToolCatalog struct {
 	Tools    []llm.Tool
 	Policies map[string]governance.ToolPolicy
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure, enabledToolsets []string) offeredToolCatalog {
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure, enabledToolsets []string, mcpServers []string) offeredToolCatalog {
 	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
 	allowed := allowedBuiltins(enabledToolsets)
 	add := func(tool llm.Tool, policy governance.ToolPolicy) {
@@ -58,15 +55,38 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 			}
 		}
 	}
-	// A restricted toolset list suppresses the MCP bridge so scheduled runs
-	// get deterministic catalogs; nil leaves interactive behavior unchanged.
-	if enabledToolsets != nil || a.mcpProvider == nil {
+	// The MCP bridge is governed by the server allowlist, independently of
+	// builtin filtering: nil exposes every profile server, an empty list
+	// exposes none, and a list scopes to those servers.
+	bridge := a.mcpProviderForRequest(mcpServers)
+	if bridge == nil {
 		return catalog
 	}
-	for _, tool := range a.mcpProvider.BridgeTools(ctx, principal) {
-		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
+	for _, tool := range bridge.BridgeTools(ctx, principal) {
+		name := tool.Function.Name
+		if _, exists := catalog.Policies[name]; name == "" || exists {
+			continue
+		}
+		catalog.Tools = append(catalog.Tools, tool)
+		catalog.Policies[name] = bridge.ToolPolicy(name)
 	}
 	return catalog
+}
+
+// mcpProviderForRequest resolves the bridge view for one request: nil when
+// no provider is configured or the allowlist explicitly names no servers;
+// otherwise the shared provider, scoped when the allowlist names servers.
+func (a *Agent) mcpProviderForRequest(allow []string) MCPProvider {
+	if a.mcpProvider == nil {
+		return nil
+	}
+	if allow != nil && len(allow) == 0 {
+		return nil
+	}
+	if allow == nil {
+		return a.mcpProvider
+	}
+	return a.mcpProvider.WithServers(allow)
 }
 
 // allowedBuiltins maps toolset names to their member tools. Nil means no
@@ -187,12 +207,12 @@ func (a *Agent) isClientToolCall(clientTools []llm.Tool, name string) bool {
 	return false
 }
 
-func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *exposure.Exposure) (governance.Result, error) {
+func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *exposure.Exposure, mcp MCPProvider) (governance.Result, error) {
 	if a.registry.HasHandler(name) {
 		return a.registry.Execute(ctx, name, args)
 	}
-	if a.mcpProvider != nil {
-		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args); handled {
+	if mcp != nil {
+		if result, handled, err := mcp.Execute(ctx, principal, name, args); handled {
 			return result.Result, err
 		}
 	}

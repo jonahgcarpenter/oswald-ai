@@ -61,15 +61,20 @@ expiry, restart, `/new`, and `/stop` all deny).
 ## Scheduling (`cron/`)
 
 Per-profile jobs in `cron/jobs.json` with atomic rewrites (plus `executions.jsonl`, pruned to the
-newest 1000): `scheduled|paused|completed|running` states, fuzzy id-or-name resolution, origin
-capture, `repeat{times,completed}` auto-complete, and `ok|error|delivery_failed|blocked_config`
-outcomes. The grammar covers durations, `every` phrases, 5-field cron, RFC3339, and `in` one-shots.
-Validation rejects injection, out-of-CWD scripts and context, monitor xor, and user-owned
-`model/provider/base_url`. `ClaimDue` advances `next_run_at` before dispatch with exact-instant
-ledger dedupe (skipped duplicates stay silent), restore-once for orphaned slots, and a half-period
-catch-up clamp (120s–2h, one-shot grace retire); unparsable schedules record `blocked_config`
-instead of running. A per-profile 30s ticker with re-arm wake drives dispatch at a 30m ceiling
-into the origin chat only — `[SILENT]` suppresses, and nothing mirrors into history.
+newest 1000): `scheduled|paused|completed|running` states plus `enabled`, fuzzy id-or-name
+resolution, concrete `deliver{platform,chat_id,user_id}` targets (no origin indirection; groupchat
+`user_id` mentions, DMs ignore it), `repeat{times,null=forever,completed}` auto-complete, and
+`failure_streak` auto-pause at 3 with a target alert. Schedules store the parsed dict
+`{kind:cron|interval|once,expr|minutes|run_at,display}` with UTC ISO `created_at/next_run_at`
+(`null` when unscheduled); the grammar covers durations, `every` phrases, 5-field cron, RFC3339,
+and `in` one-shots, all UTC wall-clock. Scripts live under per-profile `scripts/` (jailed,
+must exist). Validation rejects injection, script escapes, bad deliver targets, and user-owned
+`model/provider/base_url`; unknown or legacy fields fail closed with a manual-update error (no
+migration). `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe
+(skipped duplicates stay silent), restore-once for orphaned runs, and one-shot grace retire;
+unparsable schedules record `blocked_config` instead of running. A per-profile 30s ticker with
+re-arm wake drives dispatch at a 30m ceiling — `[SILENT]` suppresses, and nothing mirrors into
+history.
 
 ## Shared contracts (`requestctx/`, `lease/`, `prune/`)
 

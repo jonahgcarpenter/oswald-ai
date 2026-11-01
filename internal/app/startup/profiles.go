@@ -79,7 +79,7 @@ func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cron
 			RequestID:   config.NewRequestID(),
 			Principal:   identity.Principal{CanonicalUserID: call.Profile, Gateway: "cron", ExternalID: "cron:" + call.Profile, Assurance: identity.AssuranceCronScheduler},
 			DisplayName: call.DisplayName, SessionKey: call.SessionKey, Prompt: call.Prompt,
-			SkipMemory: call.SkipMemory, EnabledToolsets: call.EnabledToolsets,
+			SkipMemory: call.SkipMemory, EnabledToolsets: call.EnabledToolsets, MCPServers: call.MCPServers,
 			ResponseChan: resp,
 		})
 		if err != nil {
@@ -257,7 +257,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)
-		cronRunner := &cron.Runner{Root: profile.ProfileRoot, Profile: name}
+		cronRunner := &cron.Runner{Root: profile.ProfileRoot, Profile: name, ScriptsDir: filepath.Join(profile.ProfileRoot, "scripts")}
 		if ws := workspace.NewWorkspace(profile.ProfileRoot, name); ws.Root() != "" {
 			cronRunner.Resolve = func(raw string) (string, error) {
 				abs, _, err := ws.Resolve(raw)

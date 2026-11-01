@@ -3,8 +3,6 @@ package cron
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,60 +22,109 @@ type resolveFunc func(raw string) (string, error)
 // dirFunc maps a workdir argument to an existing directory inside the CWD.
 type dirFunc func(raw string) (string, error)
 
-// Runner executes job scripts and resolves workspace paths.
+// Runner executes job scripts resolved under the profile scripts directory.
 type Runner struct {
 	Resolve    resolveFunc
 	ResolveDir dirFunc
 	Root       string
+	ScriptsDir string
 	Scratch    string
 	Profile    string
 }
 
+// ResolveScript maps a script name to an absolute path inside the scripts
+// directory. Bare names resolve under ScriptsDir (falling back to
+// <root>/scripts); absolute, home-relative, and traversal paths fail closed.
+func (r *Runner) ResolveScript(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", errors.New("script path is required")
+	}
+	if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "~") || (len(name) >= 2 && name[1] == ':') {
+		return "", errors.New("script path must be relative to the scripts directory")
+	}
+	base := strings.TrimSpace(r.ScriptsDir)
+	if base == "" && strings.TrimSpace(r.Root) != "" {
+		base = filepath.Join(r.Root, "scripts")
+	}
+	if strings.TrimSpace(base) == "" {
+		return "", errors.New("scripts directory is unavailable")
+	}
+	abs := filepath.Join(base, filepath.FromSlash(name))
+	rel, err := filepath.Rel(base, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("script path escapes the scripts directory")
+	}
+	info, err := os.Lstat(abs)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errors.New("script path must exist inside the scripts directory")
+	}
+	return abs, nil
+}
+
 // Create validates and stores a new job.
 func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
-	if strings.TrimSpace(input.Schedule) == "" {
+	now = now.UTC()
+	if strings.TrimSpace(input.Schedule.Kind) == "" {
 		return Job{}, errors.New("schedule is required")
 	}
-	parsed, err := ParseSchedule(input.Schedule, now)
+	switch input.Schedule.Kind {
+	case ScheduleCron, ScheduleInterval, ScheduleOnce:
+	default:
+		return Job{}, errors.New("unknown schedule kind")
+	}
+	next, err := ScheduleNext(input.Schedule, now)
+	if err != nil {
+		return Job{}, err
+	}
+	if input.Schedule.Kind == ScheduleOnce && !next.After(now) {
+		return Job{}, errors.New("one-shot schedule must be in the future")
+	}
+	deliver, err := NormalizeDeliver(input.Deliver)
 	if err != nil {
 		return Job{}, err
 	}
 	job := Job{
 		ID:              newJobID(),
 		Name:            strings.TrimSpace(input.Name),
-		Schedule:        strings.TrimSpace(input.Schedule),
 		Prompt:          strings.TrimSpace(input.Prompt),
 		Skills:          append([]string(nil), input.Skills...),
 		Script:          strings.TrimSpace(input.Script),
-		MonitorURL:      strings.TrimSpace(input.MonitorURL),
-		MonitorScript:   strings.TrimSpace(input.MonitorScript),
 		NoAgent:         input.NoAgent,
-		Deliver:         strings.TrimSpace(input.Deliver),
-		ContextFrom:     append([]string(nil), input.ContextFrom...),
-		Continuity:      input.Continuity,
-		EnabledToolsets: append([]string(nil), input.EnabledToolsets...),
-		Workdir:         strings.TrimSpace(input.Workdir),
-		AttachToSession: strings.TrimSpace(input.AttachToSession),
+		Schedule:        input.Schedule,
 		Repeat:          input.Repeat,
-		CatchUp:         input.CatchUp,
+		Deliver:         deliver,
+		EnabledToolsets: append([]string(nil), input.EnabledToolsets...),
+		MCPServers:      copyStringsPreserveEmpty(input.MCPServers),
+		Enabled:         true,
 		State:           StateScheduled,
-		OriginGateway:   strings.TrimSpace(input.OriginGateway),
-		OriginSession:   strings.TrimSpace(input.OriginSession),
-		NextRunUnix:     parsed.Next.Unix(),
-		CreatedUnix:     now.Unix(),
-		UpdatedUnix:     now.Unix(),
+		PausedReason:    strings.TrimSpace(input.PausedReason),
+		CreatedAt:       utcISO(now),
 	}
-	// Delivery is always populated: an omitted target delivers to the
-	// creating chat.
-	if job.Deliver == "" {
-		job.Deliver = "origin"
-	}
-	if job.Repeat.Times < 0 {
+	if job.Repeat.Times != nil && *job.Repeat.Times < 0 {
 		return Job{}, errors.New("repeat times must not be negative")
+	}
+	if job.Repeat.Times == nil && job.Schedule.Kind == ScheduleOnce {
+		one := 1
+		job.Repeat.Times = &one
+	}
+	if strings.TrimSpace(input.State) == StatePaused {
+		job.Enabled = false
+		job.State = StatePaused
+		at := utcISO(now)
+		job.PausedAt = &at
+		if job.PausedReason == "" {
+			job.PausedReason = "Created paused."
+		}
+	} else {
+		at := utcISO(next)
+		job.NextRunAt = &at
 	}
 	if err := s.validate(r, &job); err != nil {
 		return Job{}, err
 	}
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return Job{}, err
@@ -104,35 +151,12 @@ func (s *Store) validate(r *Runner, job *Job) error {
 			return err
 		}
 	}
-	if job.MonitorURL != "" && job.MonitorScript != "" {
-		return errors.New("monitor_script and monitor_url are exclusive")
-	}
 	if err := ValidateDeliver(job.Deliver); err != nil {
 		return err
 	}
-	if job.OriginSession != "" && job.OriginGateway == "" {
-		return errors.New("origin session requires an origin gateway")
-	}
-	if r != nil {
-		if job.Script != "" {
-			if _, err := r.Resolve(job.Script); err != nil {
-				return errors.New("script path must exist inside the working directory")
-			}
-		}
-		if job.MonitorScript != "" {
-			if _, err := r.Resolve(job.MonitorScript); err != nil {
-				return errors.New("monitor script must exist inside the working directory")
-			}
-		}
-		for _, ref := range job.ContextFrom {
-			if _, err := r.Resolve(ref); err != nil {
-				return fmt.Errorf("context_from %q is not accessible", ref)
-			}
-		}
-		if job.Workdir != "" {
-			if _, err := r.ResolveDir(job.Workdir); err != nil {
-				return errors.New("workdir is not accessible")
-			}
+	if r != nil && job.Script != "" {
+		if _, err := r.ResolveScript(job.Script); err != nil {
+			return err
 		}
 	}
 	for _, toolset := range job.EnabledToolsets {
@@ -147,10 +171,22 @@ func (s *Store) validate(r *Runner, job *Job) error {
 			return fmt.Errorf("unknown toolset %q", toolset)
 		}
 	}
-	if len(job.Skills) > 32 || len(job.ContextFrom) > 32 {
-		return errors.New("skills/context_from exceed bounds")
+	if len(job.Skills) > 32 {
+		return errors.New("skills exceed bounds")
+	}
+	if err := ValidateMCPServers(job.MCPServers); err != nil {
+		return err
 	}
 	return nil
+}
+
+// copyStringsPreserveEmpty copies a string list keeping the nil-vs-empty
+// distinction: nil stays nil (all), an empty list stays empty (none).
+func copyStringsPreserveEmpty(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(in)), in...)
 }
 
 // Resolve finds a job by id, exact name, or unambiguous name substring.
@@ -207,6 +243,8 @@ func (s *Store) Mutate(id string, fn func(*Job) error) (Job, error) {
 }
 
 func (s *Store) mutateID(id string, fn func(*Job) error) (Job, error) {
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return Job{}, err
@@ -219,8 +257,6 @@ func (s *Store) mutateID(id string, fn func(*Job) error) (Job, error) {
 		if err := fn(&updated); err != nil {
 			return Job{}, err
 		}
-		updated.Paused = updated.State == StatePaused
-		updated.UpdatedUnix = time.Now().Unix()
 		jobs[i] = updated
 		if err := s.saveJobs(jobs); err != nil {
 			return Job{}, err
@@ -236,12 +272,14 @@ func (s *Store) Remove(id string) error {
 	if err != nil {
 		return err
 	}
-	jobs, err := s.loadJobs()
+	unlock := s.lockJobs()
+	defer unlock()
+	stored, err := s.loadJobs()
 	if err != nil {
 		return err
 	}
-	kept := jobs[:0]
-	for _, candidate := range jobs {
+	kept := stored[:0]
+	for _, candidate := range stored {
 		if candidate.ID == job.ID {
 			continue
 		}
@@ -278,34 +316,28 @@ func (s *Store) RunNow(ctx context.Context, r *Runner, id string) (Execution, st
 		return Execution{}, "", errors.New("job is already running")
 	}
 	defer s.Release(job.ID)
-	return s.runScriptJob(ctx, r, &job)
+	var slotUnix int64
+	if next, ok := job.NextRunTime(); ok {
+		slotUnix = next.Unix()
+	}
+	return s.runScriptJob(ctx, r, &job, slotUnix)
 }
 
 // runScriptJob runs a no_agent script job inline and records the ledger.
-func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job) (Execution, string, error) {
-	started := time.Now()
-	workdir := scriptWorkdir(r, job)
-	skip, skipErr := s.checkMonitor(ctx, r, job, workdir)
-	if skipErr != nil {
-		return Execution{}, "", skipErr
-	}
-	if skip {
-		ex := Execution{JobID: job.ID, Instant: job.LastInstant, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: "skipped_monitor_unchanged", Delivered: true}
-		s.appendLedger(ex)
-		return ex, "", nil
-	}
-	out, err := runScriptFile(ctx, r, job.Script, workdir, 3600)
+func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job, slotUnix int64) (Execution, string, error) {
+	started := time.Now().UTC()
+	out, err := runScriptFile(ctx, r, job.Script, 3600)
 	status := "completed_script"
 	if err != nil {
 		status = "script_error"
 	}
 	if strings.TrimSpace(out) == "" {
-		ex := Execution{JobID: job.ID, Instant: job.LastInstant, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: status, Delivered: true}
+		ex := Execution{JobID: job.ID, Instant: slotUnix, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: status, Delivered: true}
 		s.appendLedger(ex)
 		s.finishRun(job.ID, status, "", false)
 		return ex, "", nil
 	}
-	ex := Execution{JobID: job.ID, Instant: job.LastInstant, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: status, OutputPreview: preview(out), Delivered: false}
+	ex := Execution{JobID: job.ID, Instant: slotUnix, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: status, OutputPreview: preview(out), Delivered: false}
 	d := DispatcherFor(s.root)
 	if d == nil {
 		d = &Dispatcher{Store: s, Runner: r}
@@ -316,85 +348,54 @@ func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job) (Executio
 	return ex, out, nil
 }
 
-func scriptWorkdir(r *Runner, job *Job) string {
-	workdir := ""
-	if r != nil {
-		workdir = r.Root
-		if job.Workdir != "" && r.ResolveDir != nil {
-			if resolved, err := r.ResolveDir(job.Workdir); err == nil {
-				workdir = resolved
-			}
-		}
-	}
-	return workdir
-}
-
-// checkMonitor runs the monitor diff gate. First tick establishes the
-// baseline. True means unchanged since baseline: skip this run.
-func (s *Store) checkMonitor(ctx context.Context, r *Runner, job *Job, workdir string) (bool, error) {
-	if job.MonitorScript == "" || r == nil {
-		return false, nil
-	}
-	bound, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-	out, merr := runScriptFile(bound, r, job.MonitorScript, workdir, 120)
-	if merr != nil {
-		return false, nil
-	}
-	hash := hashString(out)
-	if job.BaselineHash != "" && hash == job.BaselineHash {
-		return true, nil
-	}
-	s.persistBaseline(job.ID, hash)
-	return false, nil
-}
-
-// finishRun records completion: status, delivery error, failure accounting,
-// repeat progress, and terminal transitions.
-func (s *Store) finishRun(id, status, deliveryErr string, failed bool) {
+// finishRun records completion: status, delivery error, streak accounting,
+// repeat progress, and terminal transitions. It reports whether this run
+// newly auto-paused the job on consecutive failures.
+func (s *Store) finishRun(id, status, deliveryErr string, failed bool) bool {
+	now := time.Now().UTC()
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
-		return
+		return false
 	}
+	autoPaused := false
 	for i := range jobs {
 		if jobs[i].ID != id {
 			continue
 		}
+		at := utcISO(now)
 		jobs[i].LastStatus = status
 		jobs[i].LastError = deliveryErr
-		jobs[i].LastRunUnix = time.Now().Unix()
-		jobs[i].UpdatedUnix = jobs[i].LastRunUnix
-		jobs[i].Pending = PendingSlot{}
+		jobs[i].LastRunAt = &at
 		if failed {
-			jobs[i].FailureCount++
+			jobs[i].FailureStreak++
+		} else {
+			jobs[i].FailureStreak = 0
 		}
 		if jobs[i].State == StateRunning {
 			jobs[i].State = StateScheduled
 		}
-		if jobs[i].Repeat.Times > 0 {
+		if jobs[i].Repeat.Times != nil && *jobs[i].Repeat.Times > 0 {
 			jobs[i].Repeat.Completed++
-			if jobs[i].Repeat.Completed >= jobs[i].Repeat.Times {
+			if jobs[i].Repeat.Completed >= *jobs[i].Repeat.Times {
 				jobs[i].State = StateCompleted
+				jobs[i].Enabled = false
 			}
 		}
-		jobs[i].Paused = jobs[i].State == StatePaused
+		if failed && jobs[i].FailureStreak >= FailureStreakLimit && jobs[i].State == StateScheduled {
+			jobs[i].State = StatePaused
+			jobs[i].Enabled = false
+			pausedAt := utcISO(now)
+			jobs[i].PausedAt = &pausedAt
+			jobs[i].PausedReason = fmt.Sprintf("auto-paused after %d consecutive failures", jobs[i].FailureStreak)
+			jobs[i].NextRunAt = nil
+			autoPaused = true
+		}
 		break
 	}
 	_ = s.saveJobs(jobs)
-}
-
-func (s *Store) persistBaseline(id, hash string) {
-	jobs, err := s.loadJobs()
-	if err != nil {
-		return
-	}
-	for i := range jobs {
-		if jobs[i].ID == id {
-			jobs[i].BaselineHash = hash
-			break
-		}
-	}
-	_ = s.saveJobs(jobs)
+	return autoPaused
 }
 
 // ledgerCompleted reports whether an execution row completed that exact
@@ -504,6 +505,9 @@ func (s *Store) LastOutput(jobID string) string {
 // lands before any work starts, so a crash mid-run can never refire the
 // same slot.
 func (s *Store) ClaimDue(now time.Time) []Job {
+	now = now.UTC()
+	unlock := s.lockJobs()
+	defer unlock()
 	jobs, err := s.loadJobs()
 	if err != nil {
 		return nil
@@ -524,94 +528,70 @@ func (s *Store) ClaimDue(now time.Time) []Job {
 		if job.EffectivePaused() {
 			continue
 		}
+		if !job.Enabled {
+			continue
+		}
 		// Restore once: a persisted running state with no live claim means
-		// the owner is gone. Requeue that instant once, never replay N.
+		// the owner is gone. Requeue without replaying history.
 		if job.State == StateRunning && !live[job.ID] {
 			job.State = StateScheduled
-			if job.Pending.Instant > 0 {
-				job.NextRunUnix = job.Pending.Instant
+			if job.NextRunAt == nil && job.Schedule.Kind == ScheduleOnce && strings.TrimSpace(job.Schedule.RunAt) != "" {
+				runAt := strings.TrimSpace(job.Schedule.RunAt)
+				job.NextRunAt = &runAt
 			}
-			job.Pending = PendingSlot{}
 			job.LastStatus = "restored_pending"
 			changed = true
 		}
-		if job.NextRunUnix <= 0 || now.Unix() < job.NextRunUnix {
+		next, ok := job.NextRunTime()
+		if !ok || now.Before(next) {
 			continue
 		}
-		slot := job.NextRunUnix
+		slot := next.Unix()
 		// Already fired never refires: a completed ledger row for this
 		// exact instant suppresses the slot.
 		if s.ledgerCompleted(job.ID, slot) {
-			parsed, perr := ParseSchedule(job.Schedule, now)
-			if perr != nil || !parsed.Repeat {
-				job.NextRunUnix = 0
+			if job.Schedule.IsRepeat() {
+				if advance, perr := ScheduleNext(job.Schedule, now); perr == nil {
+					at := utcISO(advance)
+					job.NextRunAt = &at
+				} else {
+					job.NextRunAt = nil
+				}
 			} else {
-				job.NextRunUnix = parsed.Next.Unix()
+				job.NextRunAt = nil
 			}
 			job.LastStatus = "skipped_duplicate_slot"
 			changed = true
 			continue
 		}
-		period := SchedulePeriod(job.Schedule, now)
-		if period > 0 {
-			half := period / 2
-			if half < 120*time.Second {
-				half = 120 * time.Second
-			}
-			if half > 2*time.Hour {
-				half = 2 * time.Hour
-			}
-			catchUp := true
-			if job.CatchUp != nil {
-				catchUp = *job.CatchUp
-			}
-			if !catchUp && now.Sub(time.Unix(slot, 0)) > half {
-				parsed, perr := ParseSchedule(job.Schedule, now)
-				if perr != nil || !parsed.Repeat {
-					job.NextRunUnix = 0
-				} else {
-					job.NextRunUnix = parsed.Next.Unix()
-				}
-				job.LastStatus = "skipped_catchup"
-				changed = true
-				continue
-			}
-		} else {
+		if !job.Schedule.IsRepeat() && now.Sub(next) > 2*time.Hour {
 			// One-shots past a short grace retire with a diagnostic.
-			if now.Sub(time.Unix(slot, 0)) > 2*time.Hour {
-				job.NextRunUnix = 0
-				job.LastStatus = "retired_missed_oneshot"
-				changed = true
-				continue
-			}
+			job.NextRunAt = nil
+			job.LastStatus = "retired_missed_oneshot"
+			changed = true
+			continue
 		}
-		parsed, err := ParseSchedule(job.Schedule, now)
-		if err != nil {
-			// A due absolute one-shot no longer parses (ParseSchedule
-			// requires RFC3339 times to be in the future), which would
-			// miss its only slot. Claim it anyway.
-			if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(job.Schedule)); perr == nil && t.Unix() == slot {
-				parsed = Parsed{Next: t, Repeat: false}
-				err = nil
-			}
-		}
+		advance, err := ScheduleNext(job.Schedule, now)
 		if err != nil {
 			job.LastStatus = "blocked_config"
 			job.LastError = "schedule no longer parses"
 			changed = true
 			continue
 		}
-		job.LastInstant = slot
-		if !parsed.Repeat {
-			job.NextRunUnix = 0
+		// A due stored one-shot claims its recorded instant even though a
+		// fresh parse would reject it as past.
+		if !job.Schedule.IsRepeat() {
+			job.NextRunAt = nil
 		} else {
-			job.NextRunUnix = parsed.Next.Unix()
+			at := utcISO(advance)
+			job.NextRunAt = &at
 		}
 		job.State = StateRunning
-		job.Pending = PendingSlot{Instant: slot, ClaimedUnix: now.Unix()}
-		job.UpdatedUnix = now.Unix()
+		job.Enabled = true
 		changed = true
-		due = append(due, *job)
+		claimed := *job
+		claimed.SlotUnix = slot
+		due = append(due, claimed)
 	}
 	if changed {
 		_ = s.saveJobs(jobs)
@@ -619,10 +599,10 @@ func (s *Store) ClaimDue(now time.Time) []Job {
 	return due
 }
 
-func runScriptFile(ctx context.Context, r *Runner, script, workdir string, boundSecs int) (string, error) {
-	abs := script
-	if r != nil && r.Resolve != nil {
-		resolved, err := r.Resolve(script)
+func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int) (string, error) {
+	abs := strings.TrimSpace(script)
+	if r != nil {
+		resolved, err := r.ResolveScript(script)
 		if err != nil {
 			return "", err
 		}
@@ -642,8 +622,8 @@ func runScriptFile(ctx context.Context, r *Runner, script, workdir string, bound
 	default:
 		cmd = exec.CommandContext(bound, "/bin/sh", abs)
 	}
-	if workdir != "" {
-		cmd.Dir = workdir
+	if r != nil && r.Root != "" {
+		cmd.Dir = r.Root
 	}
 	env := []string{"PATH=/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8"}
 	if r != nil {
@@ -701,9 +681,9 @@ func repairCronFile(path, profile, artifact string) {
 	logCronRepair(profile, artifact, before)
 }
 
-// RepairProfile tightens permissions on existing cron material without
-// creating anything. Missing paths stay missing; symlinks and foreign-owned
-// paths are left for the fail-closed checks.
+// RepairProfile tightens permissions on existing cron material and ensures
+// the per-profile scripts directory exists. Missing files stay missing;
+// symlinks and foreign-owned paths are left for the fail-closed checks.
 func RepairProfile(profileRoot, profile string) {
 	if strings.TrimSpace(profileRoot) == "" || strings.TrimSpace(profile) == "" {
 		return
@@ -712,6 +692,10 @@ func RepairProfile(profileRoot, profile string) {
 	repairCronDir(dir, profile, "cron_dir")
 	repairCronFile(filepath.Join(dir, "jobs.json"), profile, "cron_jobs")
 	repairCronFile(filepath.Join(dir, "executions.jsonl"), profile, "cron_executions")
+	scripts := filepath.Join(profileRoot, "scripts")
+	if err := os.MkdirAll(scripts, 0700); err == nil {
+		repairCronDir(scripts, profile, "cron_scripts")
+	}
 }
 
 func ensureScratchDir(root, scratch, profile string) {
@@ -750,11 +734,6 @@ func ensureScratchDir(root, scratch, profile string) {
 			logCronRepair(profile, "cron_scratch", before)
 		}
 	}
-}
-
-func hashString(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }
 
 func preview(s string) string {

@@ -302,18 +302,29 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "job.sh"), []byte("#!/bin/sh\necho cron-hi\n"), 0700); err != nil {
+	scripts := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(scripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scripts, "job.sh"), []byte("#!/bin/sh\necho cron-hi\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := testContext("req-cron")
+	ctx := requestctx.WithMetadata(testContext("req-cron"), requestctx.Metadata{RequestID: "req-cron", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "no_agent": true})
 	if err != nil || !strings.Contains(created.Content, "job_id:") {
 		t.Fatalf("create = %+v %v", created, err)
 	}
 	jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+	stored, err := store.Resolve(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Deliver.Platform != "discord" || stored.Deliver.ChatID != "chan1" || stored.Deliver.UserID != "987654321" {
+		t.Fatalf("deliver not defaulted to creating chat: %+v", stored.Deliver)
+	}
 	listed, err := manage(ctx, map[string]interface{}{"action": "list"})
 	if err != nil || !strings.Contains(listed.Content, jobID) {
 		t.Fatalf("list = %+v %v", listed, err)
@@ -325,18 +336,21 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "model": "x"}); err == nil {
 		t.Fatal("model override accepted")
 	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "monitor_url": "https://x.example"}); err == nil {
+		t.Fatal("dropped monitor field accepted")
+	}
 }
 
-func TestCronjobManageNameAndOrigin(t *testing.T) {
+func TestCronjobManageNameAndDeliver(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := requestctx.WithMetadata(testContext("req-cron-name"), requestctx.Metadata{RequestID: "req-cron-name", SessionID: "discord:chan1:alice"})
+	ctx := requestctx.WithMetadata(testContext("req-cron-name"), requestctx.Metadata{RequestID: "req-cron-name", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
-	created, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief", "schedule": "in 1h", "prompt": "hi"})
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "112233445"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
 	}
@@ -345,16 +359,24 @@ func TestCronjobManageNameAndOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Name != "brief" || stored.OriginGateway != "discord" || stored.OriginSession != "discord:chan1:alice" {
-		t.Fatalf("origin not captured: %+v", stored)
-	}
-	if stored.Deliver != "origin" {
-		t.Fatalf("deliver not defaulted to origin: %+v", stored)
+	if stored.Name != "brief" || stored.Deliver.Platform != "discord" || stored.Deliver.ChatID != "chan9" || stored.Deliver.UserID != "112233445" {
+		t.Fatalf("deliver not stored: %+v", stored)
 	}
 	// Fuzzy name resolution on update.
 	updated, err := manage(ctx, map[string]interface{}{"action": "pause", "job_id": "brie", "paused_reason": "test"})
 	if err != nil || !strings.Contains(updated.Content, "paused") {
 		t.Fatalf("fuzzy pause = %+v %v", updated, err)
+	}
+	stored, err = store.Resolve(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != cron.StatePaused || stored.NextRunAt != nil || stored.PausedReason != "test" {
+		t.Fatalf("pause = %+v", stored)
+	}
+	resumed, err := manage(ctx, map[string]interface{}{"action": "resume", "job_id": jobID})
+	if err != nil || !strings.Contains(resumed.Content, "resumed") {
+		t.Fatalf("resume = %+v %v", resumed, err)
 	}
 	if _, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief-two", "schedule": "in 1h", "prompt": "hi"}); err != nil {
 		t.Fatal(err)
@@ -364,34 +386,92 @@ func TestCronjobManageNameAndOrigin(t *testing.T) {
 	}
 }
 
-func TestCronjobManageDeliverOriginOnly(t *testing.T) {
+func TestCronjobManageDeliverValidation(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
-	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:alice"})
+	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:987654321"})
 	manage := NewCronjobManageHandler(ws, store)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
 	}
 	jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
-	for _, target := range []string{"local", "all", "discord:chan1:user1"} {
-		if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver": target}); err == nil {
-			t.Fatalf("target %q accepted", target)
-		}
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_platform": "sms"}); err == nil {
+		t.Fatal("bad platform accepted")
 	}
-	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver": ""}); err != nil {
-		t.Fatalf("empty reset = %v", err)
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_chat_id": ""}); err == nil {
+		t.Fatal("empty chat accepted")
+	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_user_id": "alice"}); err == nil {
+		t.Fatal("display-name user accepted")
+	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_chat_id": "chan2"}); err != nil {
+		t.Fatalf("chat update = %v", err)
 	}
 	stored, err := store.Resolve(jobID)
-	if err != nil || stored.Deliver != "origin" {
-		t.Fatalf("reset = %+v %v", stored, err)
+	if err != nil || stored.Deliver.ChatID != "chan2" || stored.Deliver.Platform != "discord" {
+		t.Fatalf("deliver merge = %+v %v", stored, err)
 	}
-	if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "failure_deliver": "origin"}); err == nil {
-		t.Fatal("failure_deliver accepted")
+	// No session context and no explicit target fails closed.
+	bare := testContext("req-cron-bare")
+	if _, err := manage(bare, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"}); err == nil {
+		t.Fatal("missing deliver accepted without session")
+	}
+}
+
+func TestCronjobManageMCPServers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	store := cron.NewStore(root)
+	ctx := requestctx.WithMetadata(testContext("req-cron-mcp"), requestctx.Metadata{RequestID: "req-cron-mcp", SessionID: "discord:chan1:987654321"})
+	manage := NewCronjobManageHandler(ws, store)
+	// Omitted exposes all.
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
+	if err != nil {
+		t.Fatalf("create = %v", err)
+	}
+	jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+	stored, err := store.Resolve(jobID)
+	if err != nil || stored.MCPServers != nil {
+		t.Fatalf("omitted = %+v %v", stored, err)
+	}
+	// Explicit list scopes.
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "mcp_servers": []interface{}{"homeassistant", "spotify"}}); err != nil {
+		t.Fatalf("update = %v", err)
+	}
+	stored, _ = store.Resolve(jobID)
+	if len(stored.MCPServers) != 2 || stored.MCPServers[0] != "homeassistant" {
+		t.Fatalf("scoped = %+v", stored.MCPServers)
+	}
+	// Empty list disables.
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "mcp_servers": []interface{}{}}); err != nil {
+		t.Fatalf("clear = %v", err)
+	}
+	stored, _ = store.Resolve(jobID)
+	if stored.MCPServers == nil || len(stored.MCPServers) != 0 {
+		t.Fatalf("cleared = %+v, want non-nil empty", stored.MCPServers)
+	}
+	// List shows the state.
+	listed, err := manage(ctx, map[string]interface{}{"action": "list"})
+	if err != nil || !strings.Contains(listed.Content, "mcp=none") {
+		t.Fatalf("list = %+v %v", listed, err)
+	}
+	// Bad names and shapes fail closed.
+	for _, args := range []map[string]interface{}{
+		{"action": "create", "schedule": "in 1h", "prompt": "hi", "mcp_servers": []interface{}{"Spotify"}},
+		{"action": "create", "schedule": "in 1h", "prompt": "hi", "mcp_servers": []interface{}{"*"}},
+		{"action": "create", "schedule": "in 1h", "prompt": "hi", "mcp_servers": "homeassistant"},
+	} {
+		if _, err := manage(ctx, args); err == nil {
+			t.Fatalf("bad allowlist accepted: %v", args["mcp_servers"])
+		}
 	}
 }
 

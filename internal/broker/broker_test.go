@@ -164,6 +164,7 @@ func TestWorkerForwardsPrincipalToProcessor(t *testing.T) {
 		DisplayName:  "Alice",
 		SessionKey:   "imessage:alice",
 		Prompt:       "hello",
+		MCPServers:   []string{},
 		ResponseChan: make(chan Result, 1),
 	}
 	b.Submit(req)
@@ -181,6 +182,9 @@ func TestWorkerForwardsPrincipalToProcessor(t *testing.T) {
 	case got := <-processor.requests:
 		if got.Principal != principal || got.RequestID != req.RequestID || got.SessionKey != req.SessionKey || got.DisplayName != req.DisplayName || got.Prompt != req.Prompt {
 			t.Fatalf("forwarded request = %+v", got)
+		}
+		if got.MCPServers == nil || len(got.MCPServers) != 0 {
+			t.Fatalf("mcp allowlist not preserved as empty: %#v", got.MCPServers)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for processor request")

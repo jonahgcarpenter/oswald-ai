@@ -14,7 +14,8 @@ Stateless API turns share the whole path but skip persistence and return `over_b
 instead of compacting.
 
 The files split by responsibility: `context.go` (prompt assembly), `tools.go` (catalog merge,
-`executeTool`, governance text), `tool_history.go` (model-visible vs persisted redacted calls),
+`executeTool`, governance text; the MCP bridge follows the request server allowlist — nil
+exposes all servers, empty exposes none), `tool_history.go` (model-visible vs persisted redacted calls),
 `session_images.go` / `image_tool_results.go` /
 `image_retry.go` (image planning, newest-4 retention, downscaling retries), `media_tokens.go`
 (MEDIA/FILE resolution), `stream.go` (`StreamChunk`), `session_store.go` (persistence contract: resolve,

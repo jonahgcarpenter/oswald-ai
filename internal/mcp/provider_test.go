@@ -39,6 +39,122 @@ func bridgeTestManager(t *testing.T, owner string) *Manager {
 	return manager
 }
 
+func twoServerBridgeManager(t *testing.T, owner string) *Manager {
+	t.Helper()
+	store := testStore(t)
+	addTestUsers(t, store, owner)
+	ctx := context.Background()
+	manager := newManager(store, config.NewLogger(config.LevelError))
+	addServer := func(name, tool, remote, description string) {
+		cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: owner, Name: name, Transport: TransportStreamableHTTP, URL: "https://example.com/" + name, Enabled: true})
+		if err != nil {
+			t.Fatalf("save %s: %v", name, err)
+		}
+		manager.sessions[scopeKey(cfg)] = &server{config: cfg, tools: []ToolSpec{
+			{Name: tool, Server: name, RemoteName: remote, Description: description, Handler: fixtureHandler("ok-" + name)},
+		}}
+	}
+	addServer("home", "mcp__home__turn_on", "turn_on", "Turn on a light")
+	addServer("spotify", "mcp__spotify__play", "play", "Play a track")
+	return manager
+}
+
+func TestBridgeWithServersScopesSearch(t *testing.T) {
+	provider := NewProvider(twoServerBridgeManager(t, "user_1"))
+	view := provider.WithServers([]string{"spotify"})
+	result, handled, err := view.Execute(context.Background(), testPrincipal("user_1"), ToolSearch, map[string]interface{}{"queries": []interface{}{"play"}})
+	if err != nil || !handled {
+		t.Fatalf("search handled=%t err=%v", handled, err)
+	}
+	var envelope struct {
+		Data bridgeSearchData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
+		t.Fatal(err)
+	}
+	for name := range envelope.Data.Tools {
+		if !strings.HasPrefix(name, "mcp__spotify__") {
+			t.Fatalf("out-of-scope tool advertised: %q", name)
+		}
+	}
+	if _, ok := envelope.Data.Tools["mcp__spotify__play"]; !ok {
+		t.Fatalf("scoped tool missing: %+v", envelope.Data.Tools)
+	}
+}
+
+func TestBridgeWithServersEmptySearchSourcesAreScoped(t *testing.T) {
+	provider := NewProvider(twoServerBridgeManager(t, "user_1"))
+	view := provider.WithServers([]string{"home"})
+	result, _, err := view.Execute(context.Background(), testPrincipal("user_1"), ToolSearch, map[string]interface{}{"queries": "zxqyblorp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data bridgeSearchData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Data.AvailableSources) != 1 || envelope.Data.AvailableSources[0] != "home" {
+		t.Fatalf("available sources leaked scope: %+v", envelope.Data.AvailableSources)
+	}
+}
+
+func TestBridgeWithServersRejectsOutOfScopeCallAndDescribe(t *testing.T) {
+	provider := NewProvider(twoServerBridgeManager(t, "user_1"))
+	view := provider.WithServers([]string{"home"})
+	described, _, err := view.Execute(context.Background(), testPrincipal("user_1"), ToolDescribe, map[string]interface{}{"names": "mcp__spotify__play"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var describeEnvelope struct {
+		Data bridgeDescribeData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(described.Content), &describeEnvelope.Data); err != nil {
+		t.Fatal(err)
+	}
+	if len(describeEnvelope.Data.NotFound) != 1 {
+		t.Fatalf("out-of-scope describe = %+v", describeEnvelope.Data)
+	}
+	called, _, err := view.Execute(context.Background(), testPrincipal("user_1"), ToolCall, map[string]interface{}{"calls": []interface{}{
+		map[string]interface{}{"name": "mcp__spotify__play", "arguments": map[string]interface{}{}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callEnvelope struct {
+		Data bridgeCallData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(called.Content), &callEnvelope.Data); err != nil {
+		t.Fatal(err)
+	}
+	if len(callEnvelope.Data.Results) != 1 || !strings.Contains(callEnvelope.Data.Results[0].Error, "not in scope") {
+		t.Fatalf("out-of-scope call = %+v", callEnvelope.Data.Results)
+	}
+	// The allowlisted server still executes.
+	allowed, _, err := view.Execute(context.Background(), testPrincipal("user_1"), ToolCall, map[string]interface{}{"calls": []interface{}{
+		map[string]interface{}{"name": "mcp__home__turn_on", "arguments": map[string]interface{}{"entity": "lamp"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(allowed.Content, "ok-home") {
+		t.Fatalf("scoped call failed: %s", allowed.Content)
+	}
+}
+
+func TestBridgeWithServersNilExposesAll(t *testing.T) {
+	provider := NewProvider(twoServerBridgeManager(t, "user_1"))
+	view := provider.WithServers(nil)
+	result, _, err := view.Execute(context.Background(), testPrincipal("user_1"), ToolSearch, map[string]interface{}{"queries": []interface{}{"turn", "play"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "mcp__home__turn_on") || !strings.Contains(result.Content, "mcp__spotify__play") {
+		t.Fatalf("nil scope hid servers: %s", result.Content)
+	}
+}
+
 func TestBridgeToolsAdvertiseThreeTools(t *testing.T) {
 	provider := NewProvider(bridgeTestManager(t, "user_1"))
 	tools := provider.BridgeTools(context.Background(), testPrincipal("user_1"))

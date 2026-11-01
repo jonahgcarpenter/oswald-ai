@@ -66,8 +66,13 @@ type Request struct {
 	// SkipMemory mirrors agent.Request.SkipMemory for scheduled turns.
 	SkipMemory bool
 	// EnabledToolsets mirrors agent.Request.EnabledToolsets. Nil disables
-	// filtering; an empty list hides every builtin and the MCP bridge.
-	EnabledToolsets  []string
+	// filtering; an empty list hides every builtin. The MCP bridge is
+	// governed independently by MCPServers.
+	EnabledToolsets []string
+	// MCPServers mirrors agent.Request.MCPServers. Nil exposes every profile
+	// MCP server through the tool_search bridge; an empty list exposes none.
+	// Passed through verbatim so nil and empty stay distinct.
+	MCPServers       []string
 	ClientTools      []llm.Tool
 	ClientToolChoice agent.ClientToolChoice
 	// ClientParallelToolCalls carries the caller's explicit
@@ -339,7 +344,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.mu.Unlock()
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
-			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, SkipMemory: req.SkipMemory, EnabledToolsets: req.EnabledToolsets, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, ClientParallelToolCalls: req.ClientParallelToolCalls, ClientGeneration: req.ClientGeneration, ServiceTier: req.ServiceTier, Images: req.Images, Documents: req.Documents, StreamFunc: req.StreamFunc,
+			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, SkipMemory: req.SkipMemory, EnabledToolsets: req.EnabledToolsets, MCPServers: req.MCPServers, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, ClientParallelToolCalls: req.ClientParallelToolCalls, ClientGeneration: req.ClientGeneration, ServiceTier: req.ServiceTier, Images: req.Images, Documents: req.Documents, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)
