@@ -8,6 +8,7 @@
 package cron
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,19 @@ import (
 // AllowedToolsets bounds enabled_toolsets entries.
 var AllowedToolsets = []string{"core", "terminal", "code_execution", "cronjob"}
 
+// Schedule kinds for the stored parsed schedule.
+const (
+	ScheduleCron     = "cron"
+	ScheduleInterval = "interval"
+	ScheduleOnce     = "once"
+)
+
+// Delivery platforms for the concrete deliver target.
+const (
+	DeliverDiscord  = "discord"
+	DeliverIMessage = "imessage"
+)
+
 // Job states for the scheduling state machine.
 const (
 	StateScheduled = "scheduled"
@@ -33,97 +47,113 @@ const (
 	StateRunning   = "running"
 )
 
-// RepeatState counts bounded runs: Times <= 0 repeats forever.
+// FailureStreakLimit auto-pauses a job: this many consecutive failed runs
+// park the schedule and alert the deliver target.
+const FailureStreakLimit = 3
+
+// RepeatState counts bounded runs: Times == nil repeats forever, which is
+// the default for recurring schedules. One-shots default to Times == 1.
 type RepeatState struct {
-	Times     int `json:"times"`
-	Completed int `json:"completed"`
+	Times     *int `json:"times"`
+	Completed int  `json:"completed"`
 }
 
-// PendingSlot marks a dispatched-but-unfinished occurrence for restore-once.
-type PendingSlot struct {
-	Instant     int64 `json:"instant"`
-	ClaimedUnix int64 `json:"claimed_unix"`
+// Schedule is the stored parsed schedule. All wall-clock occurrences are
+// UTC: the model converts local intent before scheduling.
+type Schedule struct {
+	Kind    string `json:"kind"`
+	Expr    string `json:"expr,omitempty"`
+	Minutes int    `json:"minutes,omitempty"`
+	RunAt   string `json:"run_at,omitempty"`
+	Display string `json:"display,omitempty"`
 }
 
-// Job is one scheduled unit of work.
+// IsRepeat reports whether the schedule recurs.
+func (s Schedule) IsRepeat() bool { return s.Kind == ScheduleCron || s.Kind == ScheduleInterval }
+
+// Deliver is the concrete delivery target. There is no origin indirection:
+// the target is captured at create time.
+type Deliver struct {
+	Platform string `json:"platform"`
+	ChatID   string `json:"chat_id"`
+	UserID   string `json:"user_id,omitempty"`
+}
+
+// SessionKey renders the deliver target as a transport session key
+// (<platform>:<chat>:<user>) shared with the gateway senders.
+func (d Deliver) SessionKey() string {
+	return strings.TrimSpace(d.Platform) + ":" + strings.TrimSpace(d.ChatID) + ":" + strings.TrimSpace(d.UserID)
+}
+
+// Job is one scheduled unit of work. Timestamps are UTC RFC3339; a null
+// next_run_at means unscheduled (paused, completed, or settled one-shot).
 type Job struct {
 	ID              string      `json:"id"`
 	Name            string      `json:"name,omitempty"`
-	Schedule        string      `json:"schedule"`
-	Prompt          string      `json:"prompt"`
+	Prompt          string      `json:"prompt,omitempty"`
 	Skills          []string    `json:"skills,omitempty"`
 	Script          string      `json:"script,omitempty"`
-	MonitorURL      string      `json:"monitor_url,omitempty"`
-	MonitorScript   string      `json:"monitor_script,omitempty"`
-	BaselineHash    string      `json:"baseline_hash,omitempty"`
 	NoAgent         bool        `json:"no_agent"`
-	Deliver         string      `json:"deliver,omitempty"`
-	ContextFrom     []string    `json:"context_from,omitempty"`
-	Continuity      bool        `json:"continuity"`
-	EnabledToolsets []string    `json:"enabled_toolsets,omitempty"`
-	Workdir         string      `json:"workdir,omitempty"`
-	AttachToSession string      `json:"attach_to_session,omitempty"`
+	Schedule        Schedule    `json:"schedule"`
 	Repeat          RepeatState `json:"repeat"`
-	CatchUp         *bool       `json:"catch_up,omitempty"`
-	Paused          bool        `json:"paused"`
+	Deliver         Deliver     `json:"deliver"`
+	EnabledToolsets []string    `json:"enabled_toolsets,omitempty"`
+	Enabled         bool        `json:"enabled"`
 	State           string      `json:"state,omitempty"`
-	OriginGateway   string      `json:"origin_gateway,omitempty"`
-	OriginSession   string      `json:"origin_session,omitempty"`
+	PausedAt        *string     `json:"paused_at"`
 	PausedReason    string      `json:"paused_reason,omitempty"`
-	FailureCount    int         `json:"failure_count"`
-	Pending         PendingSlot `json:"pending_slot"`
-	LastInstant     int64       `json:"last_instant"`
-	NextRunUnix     int64       `json:"next_run_at"`
-	LastRunUnix     int64       `json:"last_run_at"`
+	CreatedAt       string      `json:"created_at"`
+	NextRunAt       *string     `json:"next_run_at"`
+	LastRunAt       *string     `json:"last_run_at"`
 	LastStatus      string      `json:"last_status,omitempty"`
 	LastError       string      `json:"last_delivery_error,omitempty"`
-	CreatedUnix     int64       `json:"created_unix"`
-	UpdatedUnix     int64       `json:"updated_unix"`
-}
-
-// UnmarshalJSON keeps old jobs readable: a legacy boolean "repeat" meant
-// catch-up behavior, and "paused" implies the paused state.
-func (j *Job) UnmarshalJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	repeatRaw := raw["repeat"]
-	delete(raw, "repeat")
-	rest, err := json.Marshal(raw)
-	if err != nil {
-		return err
-	}
-	type plain Job
-	if err := json.Unmarshal(rest, (*plain)(j)); err != nil {
-		return err
-	}
-	if len(repeatRaw) > 0 {
-		var legacy bool
-		if err := json.Unmarshal(repeatRaw, &legacy); err == nil {
-			j.CatchUp = &legacy
-		} else if err := json.Unmarshal(repeatRaw, &j.Repeat); err != nil {
-			return err
-		}
-	}
-	if j.State == "" {
-		j.State = StateScheduled
-		if j.Paused {
-			j.State = StatePaused
-		}
-	}
-	j.Paused = j.State == StatePaused
-	// Delivery is always populated: legacy jobs stored before the
-	// origin-only contract default to the creating chat.
-	if strings.TrimSpace(j.Deliver) == "" {
-		j.Deliver = "origin"
-	}
-	return nil
+	FailureStreak   int         `json:"failure_streak"`
+	// SlotUnix is the claimed occurrence instant for ledger dedupe. It is
+	// never persisted; ClaimDue stamps it on the dispatched copy.
+	SlotUnix int64 `json:"-"`
 }
 
 // EffectivePaused reports whether a job must never fire.
 func (j *Job) EffectivePaused() bool {
 	return j.State == StatePaused || j.State == StateCompleted
+}
+
+// NextRunTime parses the stored next_run_at instant.
+func (j *Job) NextRunTime() (time.Time, bool) {
+	if j == nil || j.NextRunAt == nil || strings.TrimSpace(*j.NextRunAt) == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(*j.NextRunAt))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
+}
+
+// utcISO formats an instant as explicit UTC RFC3339.
+func utcISO(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// normalizePlatform maps operator spellings to the stored platform.
+func normalizePlatform(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "discord":
+		return DeliverDiscord, nil
+	case "imessage", "bluebubbles", "blue_bubbles":
+		return DeliverIMessage, nil
+	default:
+		return "", errors.New("deliver platform must be discord or imessage")
+	}
+}
+
+// ValidateDeliver checks a concrete delivery target.
+func ValidateDeliver(d Deliver) error {
+	if _, err := normalizePlatform(d.Platform); err != nil {
+		return err
+	}
+	if strings.TrimSpace(d.ChatID) == "" {
+		return errors.New("deliver chat_id is required")
+	}
+	return nil
 }
 
 // Execution is one ledger entry.
@@ -209,9 +239,27 @@ func (s *Store) loadJobs() ([]Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	var jobs []Job
-	if err := json.Unmarshal(data, &jobs); err != nil {
-		return nil, err
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
+	// Strict shape with no migration: the operator updates the file by
+	// hand, so any legacy or foreign entry fails closed with guidance.
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("jobs.json needs manual update (unsupported shape): %v", err)
+	}
+	jobs := make([]Job, 0, len(raw))
+	for i, item := range raw {
+		var job Job
+		dec := json.NewDecoder(bytes.NewReader(item))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&job); err != nil {
+			return nil, fmt.Errorf("jobs.json needs manual update (entry %d unsupported): %v", i, err)
+		}
+		if strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.Schedule.Kind) == "" {
+			return nil, fmt.Errorf("jobs.json needs manual update (entry %d unsupported): missing id or schedule", i)
+		}
+		jobs = append(jobs, job)
 	}
 	return jobs, nil
 }
@@ -264,7 +312,7 @@ func (s *Store) List() ([]Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedUnix > jobs[j].CreatedUnix })
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt > jobs[j].CreatedAt })
 	return jobs, nil
 }
 
@@ -295,58 +343,108 @@ func ScanPrompt(prompt string) error {
 	return nil
 }
 
-// ValidateDeliver checks delivery targets. Origin (the creating chat) is
-// the only supported target; the tool keeps the deliver parameter so future
-// targets can be added without a schema change.
-func ValidateDeliver(target string) error {
-	target = strings.TrimSpace(target)
-	if target == "origin" {
-		return nil
-	}
-	return errors.New("invalid deliver target: origin is the only delivery target")
-}
-
-// Parsed is a resolved schedule.
-type Parsed struct {
-	Next   time.Time
-	Period time.Duration
-	Repeat bool
-}
-
-// ParseSchedule resolves human and cron schedules.
-func ParseSchedule(raw string, now time.Time) (Parsed, error) {
+// ParseSchedule resolves a human or cron schedule into the stored dict
+// plus its next UTC occurrence. There is no migration: unparsable input is
+// a plain error and unparsable stored jobs record blocked_config.
+func ParseSchedule(raw string, now time.Time) (Schedule, time.Time, error) {
+	now = now.UTC()
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return Parsed{}, errors.New("schedule is required")
+		return Schedule{}, time.Time{}, errors.New("schedule is required")
 	}
 	lower := strings.ToLower(s)
 	if rest, ok := strings.CutPrefix(lower, "in "); ok {
 		d, err := parseDurationWord(strings.TrimSpace(rest))
 		if err != nil {
-			return Parsed{}, err
+			return Schedule{}, time.Time{}, err
 		}
-		return Parsed{Next: now.Add(d), Repeat: false}, nil
+		next := now.Add(d)
+		dur := strings.TrimSpace(raw[3:])
+		return Schedule{Kind: ScheduleOnce, RunAt: utcISO(next), Display: "once in " + dur}, next, nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		if !t.After(now) {
-			return Parsed{}, errors.New("one-shot schedule must be in the future")
+		next := t.UTC()
+		if !next.After(now) {
+			return Schedule{}, time.Time{}, errors.New("one-shot schedule must be in the future")
 		}
-		return Parsed{Next: t, Repeat: false}, nil
+		return Schedule{Kind: ScheduleOnce, RunAt: utcISO(next), Display: "once at " + next.Format("2006-01-02 15:04")}, next, nil
 	}
 	if rest, ok := strings.CutPrefix(lower, "every "); ok {
-		return parseEvery(strings.TrimSpace(rest), now)
+		return parseEverySchedule(strings.TrimSpace(rest), strings.TrimSpace(raw), now)
 	}
 	if d, err := parseDurationWord(lower); err == nil {
-		return Parsed{Next: now.Add(d), Period: d, Repeat: true}, nil
+		next := now.Add(d)
+		mins := durationMinutes(d)
+		return Schedule{Kind: ScheduleInterval, Minutes: mins, Display: "every " + s}, next, nil
 	}
 	if fields := strings.Fields(s); len(fields) == 5 {
 		next, err := nextCron(fields, now)
 		if err != nil {
-			return Parsed{}, err
+			return Schedule{}, time.Time{}, err
 		}
-		return Parsed{Next: next, Period: 24 * time.Hour, Repeat: true}, nil
+		return Schedule{Kind: ScheduleCron, Expr: s, Display: s}, next, nil
 	}
-	return Parsed{}, errors.New("schedule must be like 30m, every 2h, every monday 9am, 0 9 * * *, an RFC3339 one-shot, or in 30m")
+	return Schedule{}, time.Time{}, errors.New("schedule must be like 30m, every 2h, every monday 9am, 0 9 * * *, an RFC3339 one-shot, or in 30m")
+}
+
+// ScheduleNext computes the next UTC occurrence after now for a stored schedule.
+func ScheduleNext(sched Schedule, now time.Time) (time.Time, error) {
+	now = now.UTC()
+	switch sched.Kind {
+	case ScheduleOnce:
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(sched.RunAt))
+		if err != nil {
+			return time.Time{}, errors.New("one-shot run_at does not parse")
+		}
+		return t.UTC(), nil
+	case ScheduleInterval:
+		if sched.Minutes <= 0 {
+			return time.Time{}, errors.New("interval minutes must be positive")
+		}
+		return now.Add(time.Duration(sched.Minutes) * time.Minute), nil
+	case ScheduleCron:
+		fields := strings.Fields(sched.Expr)
+		if len(fields) != 5 {
+			return time.Time{}, errors.New("cron expression must have 5 fields")
+		}
+		return nextCron(fields, now)
+	default:
+		return time.Time{}, errors.New("unknown schedule kind")
+	}
+}
+
+// SchedulePeriod estimates the recurrence period for grace math: exact
+// for intervals, measured from two cron occurrences, zero for one-shots.
+func SchedulePeriod(sched Schedule, now time.Time) time.Duration {
+	switch sched.Kind {
+	case ScheduleInterval:
+		return time.Duration(sched.Minutes) * time.Minute
+	case ScheduleCron:
+		fields := strings.Fields(sched.Expr)
+		if len(fields) != 5 {
+			return 24 * time.Hour
+		}
+		first, err := nextCron(fields, now.UTC())
+		if err != nil {
+			return 24 * time.Hour
+		}
+		second, err := nextCron(fields, first)
+		if err != nil || !second.After(first) {
+			return 24 * time.Hour
+		}
+		return second.Sub(first)
+	default:
+		return 0
+	}
+}
+
+// durationMinutes renders a duration as whole minutes, minimum 1.
+func durationMinutes(d time.Duration) int {
+	m := int(d / time.Minute)
+	if m < 1 {
+		return 1
+	}
+	return m
 }
 
 func parseDurationWord(s string) (time.Duration, error) {
@@ -370,9 +468,11 @@ var weekdays = map[string]time.Weekday{
 	"thursday": time.Thursday, "friday": time.Friday, "saturday": time.Saturday, "sunday": time.Sunday,
 }
 
-func parseEvery(rest string, now time.Time) (Parsed, error) {
+func parseEverySchedule(rest, display string, now time.Time) (Schedule, time.Time, error) {
+	now = now.UTC()
 	if d, err := parseDurationWord(rest); err == nil {
-		return Parsed{Next: now.Add(d), Period: d, Repeat: true}, nil
+		next := now.Add(d)
+		return Schedule{Kind: ScheduleInterval, Minutes: durationMinutes(d), Display: "every " + rest}, next, nil
 	}
 	fields := strings.Fields(strings.ToLower(rest))
 	// every day 9am / every monday 9am / every monday
@@ -387,28 +487,28 @@ func parseEvery(rest string, now time.Time) (Parsed, error) {
 	if day == "day" || day == "daily" {
 		hour, min, err := parseClock(timePart)
 		if err != nil {
-			return Parsed{}, err
+			return Schedule{}, time.Time{}, err
 		}
-		next := time.Date(now.Year(), now.Month(), now.Day()+1, hour, min, 0, 0, now.Location())
-		if candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location()); candidate.After(now) {
+		next := time.Date(now.Year(), now.Month(), now.Day()+1, hour, min, 0, 0, time.UTC)
+		if candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, time.UTC); candidate.After(now) {
 			next = candidate
 		}
-		return Parsed{Next: next, Period: 24 * time.Hour, Repeat: true}, nil
+		return Schedule{Kind: ScheduleCron, Expr: fmt.Sprintf("%d %d * * *", min, hour), Display: display}, next, nil
 	}
 	weekday, ok := weekdays[day]
 	if !ok {
-		return Parsed{}, errors.New("invalid every schedule")
+		return Schedule{}, time.Time{}, errors.New("invalid every schedule")
 	}
 	hour, min := 9, 0
 	if strings.TrimSpace(timePart) != "" {
 		var err error
 		hour, min, err = parseClock(timePart)
 		if err != nil {
-			return Parsed{}, err
+			return Schedule{}, time.Time{}, err
 		}
 	}
-	next := nextWeekday(now, weekday, hour, min)
-	return Parsed{Next: next, Period: 7 * 24 * time.Hour, Repeat: true}, nil
+	next := nextWeekday(now.UTC(), weekday, hour, min)
+	return Schedule{Kind: ScheduleCron, Expr: fmt.Sprintf("%d %d * * %d", min, hour, int(weekday)), Display: display}, next, nil
 }
 
 func parseClock(s string) (int, int, error) {
@@ -603,44 +703,4 @@ func nextCron(fields []string, now time.Time) (time.Time, error) {
 		}
 	}
 	return time.Time{}, errors.New("no cron occurrence within 8 years")
-}
-
-// SchedulePeriod estimates the recurrence period for grace math: exact
-// for durations and every-phrases, measured from two cron occurrences,
-// zero for one-shots.
-func SchedulePeriod(expr string, now time.Time) time.Duration {
-	lower := strings.ToLower(strings.TrimSpace(expr))
-	if rest, ok := strings.CutPrefix(lower, "in "); ok {
-		if _, err := parseDurationWord(strings.TrimSpace(rest)); err == nil {
-			return 0
-		}
-	}
-	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(expr)); err == nil {
-		return 0
-	}
-	if rest, ok := strings.CutPrefix(lower, "every "); ok {
-		if d, err := parseDurationWord(strings.TrimSpace(rest)); err == nil {
-			return d
-		}
-		fields := strings.Fields(strings.TrimSpace(rest))
-		if len(fields) > 0 && (fields[0] == "day" || fields[0] == "daily") {
-			return 24 * time.Hour
-		}
-		return 7 * 24 * time.Hour
-	}
-	if d, err := parseDurationWord(lower); err == nil {
-		return d
-	}
-	if fields := strings.Fields(strings.TrimSpace(expr)); len(fields) == 5 {
-		first, err := nextCron(fields, now)
-		if err != nil {
-			return 24 * time.Hour
-		}
-		second, err := nextCron(fields, first)
-		if err != nil || !second.After(first) {
-			return 24 * time.Hour
-		}
-		return second.Sub(first)
-	}
-	return 24 * time.Hour
 }
