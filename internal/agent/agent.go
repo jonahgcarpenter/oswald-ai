@@ -458,7 +458,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 
-	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets)
+	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers)
+	mcpView := a.mcpProviderForRequest(request.MCPServers)
 	if request.Stateless {
 		var choiceErr error
 		initialCatalog, choiceErr = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
@@ -686,7 +687,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// provider, and must not count as model calls in the usage ledger.
 		respSynthetic := false
 
-		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets)
+		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers)
 		if request.Stateless {
 			var choiceErr error
 			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
@@ -1021,7 +1022,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					}
 				}
 				if execErr == nil {
-					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
+					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure, mcpView)
 				}
 				if execErr == nil && len(result.Images) > 0 {
 					if !isImageInputTool(toolName) || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {

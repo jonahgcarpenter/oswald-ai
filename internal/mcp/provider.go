@@ -10,8 +10,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -40,12 +40,27 @@ const (
 
 const toolSearchDescriptionTemplate = "Search {N} additional tools that are loaded on demand. Takes a list of queries searched in parallel against the same catalog; send one query per distinct capability you need. Queries are keyword searches, not questions: the app or service name plus an action and object, no filler words (`gmail send email`, `nvidia driver status`, not `what's my GPU driver version?`); a word no tool contains makes the query return nothing. Returns matching tool names grouped per query plus a shared map with each tool's description. Follow with `tool_describe` to load full parameter schemas, then `tool_call` to invoke. Tools listed at the top of this system prompt are already available and do not need to be searched."
 
+// ProviderView is the request-visible bridge surface: deferred MCP tools
+// bridged through tool_search, tool_describe, and tool_call, optionally
+// scoped to named servers.
+type ProviderView interface {
+	BridgeTools(ctx context.Context, principal identity.Principal) []llm.Tool
+	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}) (ExecutionResult, bool, error)
+	ToolPolicy(name string) governance.ToolPolicy
+	// WithServers returns a view scoped to the named servers. Nil exposes
+	// every server.
+	WithServers(allow []string) ProviderView
+}
+
 // Provider exposes deferred MCP tools through the tool_search, tool_describe,
 // and tool_call bridge. No per-server discovery tools or direct deferred
 // tools are advertised; the bridge is the only model-visible MCP surface.
 type Provider struct {
 	manager       *Manager
 	reservedTools map[string]bool
+	// servers scopes the bridge to named servers. Nil exposes every server;
+	// matching is exact against the configured server name.
+	servers []string
 }
 
 func NewProvider(manager *Manager, reservedToolNames ...string) *Provider {
@@ -57,6 +72,23 @@ func NewProvider(manager *Manager, reservedToolNames ...string) *Provider {
 		}
 	}
 	return provider
+}
+
+// WithServers returns a view of the provider scoped to the named servers.
+// A nil allowlist exposes every server. The view shares the manager; only
+// the catalog filter differs, so request-scoped views never disturb the
+// shared provider.
+func (p *Provider) WithServers(allow []string) ProviderView {
+	if p == nil {
+		return nil
+	}
+	q := *p
+	if allow == nil {
+		q.servers = nil
+	} else {
+		q.servers = append(make([]string, 0, len(allow)), allow...)
+	}
+	return &q
 }
 
 // BridgeTools returns the three bridge definitions for an authenticated
@@ -175,7 +207,8 @@ func floatPtr(value float64) *float64 { return &value }
 
 // deferredCatalog rebuilds the stateless deferred-tool catalog from the live
 // visible tool specs on every call. Reserved and malformed entries are
-// dropped; the result is sorted by name.
+// dropped; out-of-scope servers are dropped on scoped views; the result is
+// sorted by name.
 func (p *Provider) deferredCatalog(ctx context.Context, userID string) ([]registry.CatalogEntry, error) {
 	specs := p.manager.ToolSpecs(ctx, userID)
 	entries := make([]registry.CatalogEntry, 0, len(specs))
@@ -187,6 +220,19 @@ func (p *Provider) deferredCatalog(ctx context.Context, userID string) ([]regist
 			continue
 		}
 		entries = append(entries, registry.CatalogEntry{Name: spec.Name, Description: spec.Description, Source: registry.ToolSourceMCP, Server: spec.Server, Parameters: mapParams(spec.Parameters)})
+	}
+	if p.servers != nil {
+		allowed := make(map[string]bool, len(p.servers))
+		for _, server := range p.servers {
+			allowed[server] = true
+		}
+		scoped := make([]registry.CatalogEntry, 0, len(entries))
+		for _, entry := range entries {
+			if allowed[entry.Server] {
+				scoped = append(scoped, entry)
+			}
+		}
+		entries = scoped
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	return entries, nil

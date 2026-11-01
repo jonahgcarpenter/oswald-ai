@@ -1998,6 +1998,11 @@ func (p *fakeMCPProvider) ToolPolicy(string) governance.ToolPolicy {
 	return testToolPolicy()
 }
 
+func (p *fakeMCPProvider) WithServers(allow []string) mcp.ProviderView {
+	q := *p
+	return &q
+}
+
 func (p *fakeMCPProvider) Execute(_ context.Context, _ identity.Principal, name string, _ map[string]interface{}) (mcp.ExecutionResult, bool, error) {
 	p.executed = append(p.executed, name)
 	switch name {

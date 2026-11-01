@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -72,17 +73,49 @@ func TestToolsForRequestToolsetFilter(t *testing.T) {
 	ctx := context.Background()
 	principal := cronPrincipal()
 
-	full := a.toolsForRequest(ctx, principal, exposure.NewExposure(), nil)
+	full := a.toolsForRequest(ctx, principal, exposure.NewExposure(), nil, nil)
 	if len(full.Tools) != 3 {
 		t.Fatalf("unfiltered catalog = %d tools", len(full.Tools))
 	}
-	core := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{"core"})
+	core := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{"core"}, nil)
 	if len(core.Tools) != 1 || core.Tools[0].Function.Name != workspace.ReadFileName {
 		t.Fatalf("core catalog = %v", catalogToolNames(core.Tools))
 	}
-	empty := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{})
+	empty := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{}, nil)
 	if len(empty.Tools) != 0 {
 		t.Fatalf("zero-tool catalog = %v", catalogToolNames(empty.Tools))
+	}
+}
+
+func TestToolsForRequestMCPAllowlist(t *testing.T) {
+	reg := registry.New(config.NewLogger(config.LevelError))
+	chat := &fakeChatter{}
+	a, _ := newTestAgent(t, chat, nil, reg)
+	a.mcpProvider = &fakeMCPProvider{}
+	ctx := context.Background()
+	principal := cronPrincipal()
+	hasBridge := func(catalog offeredToolCatalog) bool {
+		return catalogHas(catalog, mcp.ToolSearch) && catalogHas(catalog, mcp.ToolDescribe) && catalogHas(catalog, mcp.ToolCall)
+	}
+	// Nil allowlist exposes the bridge, independently of builtin filtering.
+	if catalog := a.toolsForRequest(ctx, principal, exposure.NewExposure(), nil, nil); !hasBridge(catalog) {
+		t.Fatal("nil allowlist dropped the bridge")
+	}
+	if catalog := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{"core"}, nil); !hasBridge(catalog) {
+		t.Fatal("restricted toolsets dropped the bridge")
+	}
+	// An explicit list scopes but keeps the bridge advertised.
+	if catalog := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{}, []string{"home"}); !hasBridge(catalog) {
+		t.Fatal("zero builtins with servers dropped the bridge")
+	}
+	// An explicit empty list disables the bridge.
+	if catalog := a.toolsForRequest(ctx, principal, exposure.NewExposure(), nil, []string{}); hasBridge(catalog) {
+		t.Fatal("empty allowlist kept the bridge")
+	}
+	// No provider means no bridge regardless of the allowlist.
+	a.mcpProvider = nil
+	if catalog := a.toolsForRequest(ctx, principal, exposure.NewExposure(), nil, nil); hasBridge(catalog) {
+		t.Fatal("bridge advertised without a provider")
 	}
 }
 
@@ -101,7 +134,7 @@ func TestTerminalHintInjectedOnlyWithProcessManage(t *testing.T) {
 		chat := &fakeChatter{}
 		a, _ := newTestAgent(t, chat, nil, r)
 		_ = reg
-		return a.toolsForRequest(context.Background(), cronPrincipal(), exposure.NewExposure(), nil)
+		return a.toolsForRequest(context.Background(), cronPrincipal(), exposure.NewExposure(), nil, nil)
 	}
 	with := newCatalog(workspace.TerminalName, workspace.ProcessManageName)
 	for _, tool := range with.Tools {
