@@ -529,6 +529,15 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			executionStatus = "degraded"
 		}
 	}
+	if result.SteeredShared {
+		log.Debug("gateway.response.suppressed", "suppressed duplicate steered follow-up response",
+			config.F("request_id", req.RequestID),
+			config.F("chat_id", req.ChatID),
+			config.F("session_id", req.SessionKey),
+			config.F("profile", userID),
+		)
+		return Outcome{Action: decision.Action, Reason: "steered_shared"}
+	}
 	err = responder.SendAgentResponse(result.Response)
 	if err != nil {
 		log.Debug("gateway.send.failed", "failed to send agent response", config.F("request_id", req.RequestID), config.ErrorField(err))

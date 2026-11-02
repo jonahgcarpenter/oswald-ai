@@ -1295,3 +1295,53 @@ func TestBrokerSteerRejectsMediaAndStateless(t *testing.T) {
 		t.Fatalf("processor calls = %d, want 3 (media and stateless queue, never steer)", got)
 	}
 }
+
+func TestBrokerSteeredFanOutMarksSharedResponse(t *testing.T) {
+	var calls, drained atomic.Int32
+	hostStarted := make(chan struct{})
+	release := make(chan struct{})
+	processor := &steerDrainProcessor{hostStarted: hostStarted, release: release, calls: &calls, drained: &drained}
+	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	hostCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "host", Principal: principal, SessionKey: "lane-a", Prompt: "start long task", ResponseChan: hostCh}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hostStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host never started")
+	}
+	steerCh := make(chan Result, 1)
+	if err := b.Submit(&Request{RequestID: "steer-1", Principal: principal, SessionKey: "lane-a", Prompt: "correction", ResponseChan: steerCh}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case res := <-hostCh:
+		if res.Err != nil || res.Response == nil {
+			t.Fatalf("host result = %+v", res)
+		}
+		if res.SteeredShared {
+			t.Fatalf("host result must not be marked shared: %+v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("host timed out")
+	}
+	select {
+	case res := <-steerCh:
+		if res.Err != nil || res.Response == nil {
+			t.Fatalf("steer result = %+v", res)
+		}
+		if !res.SteeredShared {
+			t.Fatalf("consumed steer result must be marked shared: %+v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("steer timed out")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("processor calls = %d, want 1 (no dead call, no second turn)", got)
+	}
+}

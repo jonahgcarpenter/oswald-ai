@@ -295,6 +295,102 @@ func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
 	}
 }
 
+// steerSuppressProcessor blocks the host turn until released, then drains the
+// steer inbox so the follow-up is consumed into the shared host response.
+type steerSuppressProcessor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *steerSuppressProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if req.Steer != nil {
+		req.Steer.Drain()
+	}
+	return &agent.Response{Response: "host-ok", SourceTurnID: 42}, nil
+}
+
+// enqueueCountingCompaction counts delivery enqueues across responders.
+type enqueueCountingCompaction struct {
+	enqueued chan struct{}
+}
+
+func (c *enqueueCountingCompaction) Enqueue(context.Context, string, memory.DeliverySource) error {
+	c.enqueued <- struct{}{}
+	return nil
+}
+
+func (c *enqueueCountingCompaction) MarkDeliveryFailed(context.Context, string, int64) error {
+	return nil
+}
+
+func TestExecuteSuppressesSteeredSharedSend(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &steerSuppressProcessor{started: make(chan struct{}, 2), release: make(chan struct{})}
+	b := broker.NewBroker(processor, 2, log)
+	b.Start()
+	defer b.Shutdown()
+	compaction := &enqueueCountingCompaction{enqueued: make(chan struct{}, 2)}
+	deps := Dependencies{Broker: b, Log: log, Compaction: compaction}
+	principal := testPrincipal("user")
+	hostResponder := &fakeResponder{}
+	steerResponder := &fakeResponder{}
+	hostDone := make(chan Outcome, 1)
+	go func() {
+		hostDone <- Execute(Request{RequestID: "host", Principal: principal, ChatID: "chat", SessionKey: "steer-session", IsDirect: true, Text: "start long task"}, deps, hostResponder)
+	}()
+	select {
+	case <-processor.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host turn never started")
+	}
+	steerDone := make(chan Outcome, 1)
+	go func() {
+		steerDone <- Execute(Request{RequestID: "steer", Principal: principal, ChatID: "chat", SessionKey: "steer-session", IsDirect: true, Text: "correction"}, deps, steerResponder)
+	}()
+	// Let the steered follow-up attach to the running host turn before release.
+	time.Sleep(100 * time.Millisecond)
+	close(processor.release)
+	var hostOutcome, steerOutcome Outcome
+	select {
+	case hostOutcome = <-hostDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host execute timed out")
+	}
+	select {
+	case steerOutcome = <-steerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("steered execute timed out")
+	}
+	if hostOutcome.Err != nil || hostResponder.agent == nil || hostResponder.agent.Response != "host-ok" {
+		t.Fatalf("host outcome=%+v responder=%+v", hostOutcome, hostResponder.agent)
+	}
+	if steerOutcome.Err != nil || steerOutcome.Reason != "steered_shared" {
+		t.Fatalf("steered outcome=%+v, want reason steered_shared", steerOutcome)
+	}
+	if steerResponder.agent != nil {
+		t.Fatalf("steered follow-up sent duplicate response: %+v", steerResponder.agent)
+	}
+	select {
+	case <-compaction.enqueued:
+	default:
+		t.Fatal("host turn did not enqueue compaction")
+	}
+	select {
+	case <-compaction.enqueued:
+		t.Fatal("steered follow-up enqueued duplicate compaction")
+	default:
+	}
+}
+
 func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
