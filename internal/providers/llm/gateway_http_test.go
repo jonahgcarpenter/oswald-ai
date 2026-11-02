@@ -589,9 +589,13 @@ func TestGatewayClientNilCallbackStreamCancellation(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Chat error=%v, want cancellation", err)
 			}
+			// The server goroutine can lag behind the client under load: the
+			// client needs no further server progress after Flush to cancel
+			// and return, so wait for the established signal instead of
+			// asserting it instantly.
 			select {
 			case <-established:
-			default:
+			case <-time.After(5 * time.Second):
 				t.Fatal("stream was not established")
 			}
 			select {
