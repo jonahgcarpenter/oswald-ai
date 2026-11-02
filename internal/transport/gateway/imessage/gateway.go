@@ -47,7 +47,6 @@ func (g *Gateway) Start(b *broker.Broker) error {
 		return err
 	}
 	g.ensureWebhookRegistered(log)
-	g.clearStaleTypingIndicators(log)
 	log.Debug("gateway.listen", "imessage gateway listener starting", config.F("port", g.Port))
 	listenAddr := listener.Addr().String()
 	if host, _, splitErr := net.SplitHostPort(listenAddr); splitErr == nil {
@@ -114,6 +113,16 @@ type Gateway struct {
 	coalesceBatches     map[string]*coalesceBatch
 	coalesceQuiet       time.Duration
 	coalesceMaxHold     time.Duration
+	// typingMu guards typingActive and typingTimers. typingActive holds
+	// chats with a live indicator and no terminal send yet; typingTimers
+	// holds the single pending backup-stop timer per chat. Both are
+	// drained deliberately on shutdown; there is no startup sweep.
+	typingMu     sync.Mutex
+	typingActive map[string]struct{}
+	typingTimers map[string]*time.Timer
+	// typingBackupAfter overrides the precautionary backup stop delay
+	// (default 2.5s). Tests set it per gateway.
+	typingBackupAfter time.Duration
 }
 
 func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {

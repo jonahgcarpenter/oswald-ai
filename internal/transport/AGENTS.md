@@ -58,12 +58,16 @@ round-trip verbatim with `finish_reason: tool_calls` for the external app to run
 Discord streams status and previews under its 2,000-unit limit while a final inventory reconciles
 streamed output; all final answers share one FIFO outbound worker (20 entries / 80 MiB, five-minute
 admission, 15s attempts, 1–30s exponential retry with numeric Retry-After able to exceed the cap).
-iMessage sends typing/read indicators and a final-only response with plain-send fallback; the
-webhook route is operator-configurable and registration degrades to WARN, never a startup failure.
+iMessage posts typing/read indicators on admission and sends a final-only response with
+plain-send fallback; the webhook route is operator-configurable and registration degrades to
+WARN, never a startup failure. Terminal sends assume the server auto-clears typing and arm a
+single precautionary backup DELETE ~2.5s later (per chat, superseded by the next turn's POST);
+cancels and shutdown send deliberate DELETEs for in-flight chats instead. Steer and queue
+follow-ups only re assert typing and never stop it. There is no startup typing sweep.
 iMessage splits one user send into per-part webhooks (text, attachment, link preview), so rapid
 parts from one sender/chat coalesce into a single turn (1000ms quiet / 3000ms max hold, guid
-dedupe, creation-time ordering) before admission. Startup best-effort clears stale typing
-indicators via a bounded chat sweep.
+dedupe, creation-time ordering) before admission. Shutdown sends deliberate typing DELETEs
+for in-flight chats; nothing clears typing at startup.
 
 Media in: at most 4 images, 10 MiB each (JPEG/PNG/GIF/WebP/HEIC/HEIF), normalized to ≤2560 longest
 edge / 280 KiB JPEG/PNG. GIFs use the first frame or a ≤4-tile contact sheet; GIFV extracts up to

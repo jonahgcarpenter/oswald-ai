@@ -12,7 +12,6 @@ const (
 	defaultSendMethod    = "private-api"
 	capabilityAttempts   = 5
 	capabilityRetryDelay = 500 * time.Millisecond
-	typingAfterReadDelay = 150 * time.Millisecond
 	messageIndexTTL      = time.Hour
 	contactCacheTTL      = 6 * time.Hour
 )
