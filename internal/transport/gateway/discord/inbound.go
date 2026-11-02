@@ -36,6 +36,15 @@ func resolveMentions(text string, mentions []struct {
 	})
 }
 
+// parentInvokedBot reports whether a replied-to message itself invoked the
+// agent: a leading bot mention or command syntax on the raw parent text.
+func parentInvokedBot(trimmedParent, mention1, mention2 string) bool {
+	if strings.HasPrefix(trimmedParent, mention1) || strings.HasPrefix(trimmedParent, mention2) {
+		return true
+	}
+	return routing.IsCommandAttempt(trimmedParent)
+}
+
 // handleMessage processes an incoming Discord message.
 func (dg *Gateway) handleMessage(msg MessageCreate) {
 	dg.handleReceivedMessage(msg, config.NewRequestID(), time.Now())
@@ -57,6 +66,12 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		mentionsBot = true
 	}
 	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
+	// A group reply to the sender's own agent-invoking message counts as
+	// invocation, like a reply to the bot, so follow-ups steer without a
+	// second mention. The parent must have invoked the agent itself so
+	// ordinary self-quotes stay uninvoked.
+	isReplyToSelf := msg.ReferencedMessage != nil && !isReplyToBot &&
+		msg.ReferencedMessage.Author.ID == msg.Author.ID && parentInvokedBot(strings.TrimSpace(msg.ReferencedMessage.Content), mention1, mention2)
 	replyToID := ""
 	if msg.GuildID != "" {
 		replyToID = msg.ID
@@ -70,10 +85,11 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 	text = re.ReplaceAllString(text, ":$1:")
 	text = resolveMentions(text, msg.Mentions)
 	preflight := routing.Preflight(routing.PreflightInput{
-		IsGroup:      msg.GuildID != "",
-		IsMention:    mentionsBot,
-		IsReplyToBot: isReplyToBot,
-		Text:         text,
+		IsGroup:       msg.GuildID != "",
+		IsMention:     mentionsBot,
+		IsReplyToBot:  isReplyToBot,
+		IsReplyToSelf: isReplyToSelf,
+		Text:          text,
 	})
 	isCommandAttempt := routing.IsCommandAttempt(text)
 	if preflight.Action == routing.ActionIgnore {
@@ -83,6 +99,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 			config.F("is_group", msg.GuildID != ""),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", msg.ReferencedMessage != nil),
+			config.F("is_reply_to_self", isReplyToSelf),
 			config.F("is_command", isCommandAttempt),
 			config.F("reason", preflight.Reason),
 			config.F("message_chars", len(msg.Content)),
@@ -172,6 +189,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		IsGroup:           msg.GuildID != "",
 		IsMention:         mentionsBot,
 		IsReplyToBot:      isReplyToBot,
+		IsReplyToSelf:     isReplyToSelf,
 		Text:              text,
 		PublicUserText:    publicUserText,
 		PlatformMessageID: msg.ID,

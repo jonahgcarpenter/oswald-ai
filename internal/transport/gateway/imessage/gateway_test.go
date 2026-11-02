@@ -594,6 +594,61 @@ func TestIMessageReplyToBotIncludesReplyContext(t *testing.T) {
 	}
 }
 
+func TestIMessageReplyToSelfInvokingParentAdmitsGroupFollowUp(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+	g.rememberInboundMessage(webhookMessage{
+		GUID:   "parent-1",
+		Text:   "@Oswald what tine is it",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	}, "imessage:chat;+;group:+15551234567", "+15551234567", "Alice")
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:        "msg-2",
+		Text:        "time*",
+		ReplyToGUID: "parent-1",
+		Handle:      messageHandle{Address: "+15551234567"},
+		Chats:       []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+
+	primary := primaryIMessageRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
+	}
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
+	if !strings.Contains(prompt, "time*") {
+		t.Fatalf("unexpected prompt %q", prompt)
+	}
+}
+
+func TestIMessageReplyToSelfPlainParentStaysIgnored(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+	g.rememberInboundMessage(webhookMessage{
+		GUID:   "parent-1",
+		Text:   "see you at 7",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	}, "imessage:chat;+;group:+15551234567", "+15551234567", "Alice")
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:        "msg-2",
+		Text:        "actually 8",
+		ReplyToGUID: "parent-1",
+		Handle:      messageHandle{Address: "+15551234567"},
+		Chats:       []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+
+	if len(primaryIMessageRequests(chat.requests)) != 0 {
+		t.Fatalf("expected no LLM request, got %d", len(primaryIMessageRequests(chat.requests)))
+	}
+}
+
 func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	g, b, _ := newIMessageTestGateway(t, bb.server.URL)

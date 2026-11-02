@@ -540,6 +540,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if steerInbox == nil || request.Stateless {
 			return 0
 		}
+		// Steered media that would overflow the per-request image bound is
+		// left pending: entries still pending when the host finishes
+		// auto-run as the next turn, so overflow degrades to queuing.
+		if steerImagesOverflow(steerInbox.Pending(), len(userImages)) {
+			return 0
+		}
 		steers := steerInbox.Drain()
 		if len(steers) == 0 {
 			return 0
@@ -547,14 +553,20 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		added := 0
 		for _, st := range steers {
 			text := strings.TrimSpace(st.Text)
-			if text == "" {
+			steerCtxImages := a.cacheSteerImages(ctx, senderID, reqLog, st.Images)
+			if text == "" && len(st.Images) == 0 {
 				continue
 			}
-			messages = append(messages, llm.ChatMessage{Role: "user", Content: text})
+			content := strings.TrimSpace(promptWithAttachedImages(text, steerCtxImages))
+			if content == "" && len(st.Images) > 0 {
+				content = fmt.Sprintf("[User sent %d steered image(s)]", len(st.Images))
+			}
+			messages = append(messages, llm.ChatMessage{Role: "user", Content: content, Images: st.Images})
+			memContent := strings.TrimSpace(sessionMemoryUserContent(text, steerCtxImages))
 			if strings.TrimSpace(userMemoryContent) == "" {
-				userMemoryContent = text
-			} else {
-				userMemoryContent = userMemoryContent + "\n\n" + text
+				userMemoryContent = memContent
+			} else if memContent != "" {
+				userMemoryContent = userMemoryContent + "\n\n" + memContent
 			}
 			added++
 		}

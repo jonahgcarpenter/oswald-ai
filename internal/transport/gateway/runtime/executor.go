@@ -61,6 +61,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		IsGroup:            req.IsGroup,
 		IsMention:          req.IsMention,
 		IsReplyToBot:       req.IsReplyToBot,
+		IsReplyToSelf:      req.IsReplyToSelf,
 		IsCommandAttempt:   commands.IsAttempt(req.Text),
 		Text:               req.Text,
 		CurrentImages:      req.Images,
