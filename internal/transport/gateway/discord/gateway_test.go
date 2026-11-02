@@ -867,6 +867,63 @@ func TestDiscordReplyToBotIncludesReplyContext(t *testing.T) {
 	}
 }
 
+func TestDiscordReplyToSelfInvokingParentAdmitsGroupFollowUp(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)
+	defer b.Shutdown()
+	defer rest.server.Close()
+
+	msg := discordMessage("msg-2", "channel-1", "guild-1", "123", "Alice", "time*")
+	msg.ReferencedMessage = &struct {
+		ID          string       `json:"id"`
+		Content     string       `json:"content"`
+		Attachments []Attachment `json:"attachments,omitempty"`
+		Embeds      []Embed      `json:"embeds,omitempty"`
+		Author      struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+		} `json:"author"`
+	}{ID: "parent-1", Content: "<@bot-1> what tine is it"}
+	msg.ReferencedMessage.Author.ID = "123"
+	msg.ReferencedMessage.Author.Username = "Alice"
+	dg.handleMessage(msg)
+
+	primary := primaryDiscordRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
+	}
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
+	if !strings.Contains(prompt, "time*") {
+		t.Fatalf("unexpected prompt %q", prompt)
+	}
+}
+
+func TestDiscordReplyToSelfPlainParentStaysIgnored(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)
+	defer b.Shutdown()
+	defer rest.server.Close()
+
+	msg := discordMessage("msg-2", "channel-1", "guild-1", "123", "Alice", "actually 8")
+	msg.ReferencedMessage = &struct {
+		ID          string       `json:"id"`
+		Content     string       `json:"content"`
+		Attachments []Attachment `json:"attachments,omitempty"`
+		Embeds      []Embed      `json:"embeds,omitempty"`
+		Author      struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+		} `json:"author"`
+	}{ID: "parent-1", Content: "see you at 7"}
+	msg.ReferencedMessage.Author.ID = "123"
+	msg.ReferencedMessage.Author.Username = "Alice"
+	dg.handleMessage(msg)
+
+	if len(primaryDiscordRequests(chat.requests)) != 0 {
+		t.Fatalf("expected no LLM request, got %d", len(primaryDiscordRequests(chat.requests)))
+	}
+}
+
 func TestDiscordGroupPublicTextPreservesRawMentionsEmojiAndImageURL(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	defer rest.server.Close()

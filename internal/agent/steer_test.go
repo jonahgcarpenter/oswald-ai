@@ -23,7 +23,7 @@ func TestSteerInjectedAfterToolResultCreatesSecondCall(t *testing.T) {
 	a, _ := newTestAgent(t, chat, nil, nil)
 	reg := a.registry
 	if err := registerTestTool(t, reg, testToolSpec{Name: "test.clock", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
-		inbox.Add("correction: use blue", "steer-1")
+		inbox.Add("correction: use blue", "steer-1", nil)
 		return productiveResult("clock: noon"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestSteerForcesSecondCallWhenModelDone(t *testing.T) {
 	}}
 	chat.onChat = func(req llm.ChatRequest) {
 		if len(chat.requests) == 1 {
-			inbox.Add("wait, use blue instead", "steer-1")
+			inbox.Add("wait, use blue instead", "steer-1", nil)
 		}
 	}
 	a, _ := newTestAgent(t, chat, nil, nil)
@@ -73,7 +73,7 @@ func TestSteerForcesSecondCallWhenModelDone(t *testing.T) {
 
 func TestSteerEmptyDoesNotCreateDeadCall(t *testing.T) {
 	inbox := NewSteerInbox()
-	inbox.Add("   ", "steer-empty")
+	inbox.Add("   ", "steer-empty", nil)
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final"}},
 	}}
@@ -95,7 +95,7 @@ func TestSteerPersistedInSingleTurn(t *testing.T) {
 	}}
 	chat.onChat = func(req llm.ChatRequest) {
 		if len(chat.requests) == 1 {
-			inbox.Add("follow-up detail", "steer-1")
+			inbox.Add("follow-up detail", "steer-1", nil)
 		}
 	}
 	a, store := newTestAgent(t, chat, nil, nil)
@@ -109,5 +109,68 @@ func TestSteerPersistedInSingleTurn(t *testing.T) {
 	}
 	if !strings.Contains(turns[0].UserText, "original") || !strings.Contains(turns[0].UserText, "follow-up detail") {
 		t.Fatalf("persisted turn missing steer: %q", turns[0].UserText)
+	}
+}
+
+func TestSteerImagesRideNextModelCall(t *testing.T) {
+	inbox := NewSteerInbox()
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "first answer"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "revised answer"}},
+	}}
+	chat.onChat = func(req llm.ChatRequest) {
+		if len(chat.requests) == 1 {
+			inbox.Add("see the red wire", "steer-1", []llm.InputImage{testInputImage(t, 8, 8)})
+		}
+	}
+	a, _ := newTestAgent(t, chat, nil, nil)
+	resp, err := a.Process(context.Background(), Request{RequestID: "host", Principal: steerTestPrincipal(), SessionKey: "session", Prompt: "question", Steer: inbox})
+	if err != nil || resp == nil || resp.Response != "revised answer" {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	if got := len(chat.requests); got != 2 {
+		t.Fatalf("model calls = %d, want 2 (image steer forces exactly one more)", got)
+	}
+	found := false
+	for _, message := range chat.requests[1].Messages {
+		if message.Role != "user" || !strings.Contains(message.Content, "see the red wire") {
+			continue
+		}
+		found = true
+		if len(message.Images) != 1 || strings.TrimSpace(message.Images[0].Data) == "" {
+			t.Fatalf("steered user message missing image bytes: %+v", message)
+		}
+	}
+	if !found {
+		t.Fatalf("second call missing image steer: %+v", chat.requests[1].Messages)
+	}
+}
+
+func TestSteerImagesOverflowDefersToNextTurn(t *testing.T) {
+	inbox := NewSteerInbox()
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "first answer"}},
+	}}
+	chat.onChat = func(req llm.ChatRequest) {
+		if len(chat.requests) == 1 {
+			inbox.Add("and this one", "steer-1", []llm.InputImage{testInputImage(t, 8, 8)})
+		}
+	}
+	a, _ := newTestAgent(t, chat, nil, nil)
+	hostImages := []llm.InputImage{
+		testInputImage(t, 8, 8),
+		testInputImage(t, 8, 8),
+		testInputImage(t, 8, 8),
+		testInputImage(t, 8, 8),
+	}
+	resp, err := a.Process(context.Background(), Request{RequestID: "host", Principal: steerTestPrincipal(), SessionKey: "session", Prompt: "question", Images: hostImages, Steer: inbox})
+	if err != nil || resp == nil || resp.Response != "first answer" {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	if got := len(chat.requests); got != 1 {
+		t.Fatalf("model calls = %d, want 1 (overflowing media steer waits for next turn)", got)
+	}
+	if got := inbox.PendingCount(); got != 1 {
+		t.Fatalf("pending steers = %d, want 1 left for the next turn", got)
 	}
 }

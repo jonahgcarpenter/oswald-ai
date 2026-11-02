@@ -21,9 +21,13 @@ const (
 
 // Input is the gateway-neutral representation of an inbound user message.
 type Input struct {
-	IsGroup            bool
-	IsMention          bool
-	IsReplyToBot       bool
+	IsGroup      bool
+	IsMention    bool
+	IsReplyToBot bool
+	// IsReplyToSelf marks a group reply to the sender's own message that
+	// invoked the agent. It admits the follow-up like a reply to the bot
+	// so corrections steer into the running turn.
+	IsReplyToSelf      bool
 	IsCommandAttempt   bool
 	Text               string
 	CurrentImages      []llm.InputImage
@@ -34,10 +38,11 @@ type Input struct {
 
 // PreflightInput is the cheap gateway-neutral subset needed for early ignores.
 type PreflightInput struct {
-	IsGroup      bool
-	IsMention    bool
-	IsReplyToBot bool
-	Text         string
+	IsGroup       bool
+	IsMention     bool
+	IsReplyToBot  bool
+	IsReplyToSelf bool
+	Text          string
 }
 
 // ReplyContext is the gateway-neutral representation of a replied-to message.

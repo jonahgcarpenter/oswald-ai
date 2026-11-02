@@ -20,29 +20,32 @@ func TestDecideIgnoresUninvokedGroupMessage(t *testing.T) {
 
 func TestCommandRoutingRequiresMentionOnlyInGroups(t *testing.T) {
 	tests := []struct {
-		name         string
-		isGroup      bool
-		isMention    bool
-		isReplyToBot bool
-		wantAction   Action
+		name          string
+		isGroup       bool
+		isMention     bool
+		isReplyToBot  bool
+		isReplyToSelf bool
+		wantAction    Action
 	}{
 		{name: "direct", wantAction: ActionCommand},
 		{name: "mentioned group", isGroup: true, isMention: true, wantAction: ActionCommand},
 		{name: "unmentioned group", isGroup: true, wantAction: ActionIgnore},
 		{name: "unmentioned group reply", isGroup: true, isReplyToBot: true, wantAction: ActionCommand},
 		{name: "mentioned group reply", isGroup: true, isMention: true, isReplyToBot: true, wantAction: ActionCommand},
+		{name: "unmentioned group self reply", isGroup: true, isReplyToSelf: true, wantAction: ActionCommand},
+		{name: "mentioned group self reply", isGroup: true, isMention: true, isReplyToSelf: true, wantAction: ActionCommand},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			decision := Decide(Input{
-				IsGroup: test.isGroup, IsMention: test.isMention, IsReplyToBot: test.isReplyToBot,
+				IsGroup: test.isGroup, IsMention: test.isMention, IsReplyToBot: test.isReplyToBot, IsReplyToSelf: test.isReplyToSelf,
 				IsCommandAttempt: true, Text: " /connect ",
 			})
 			if decision.Action != test.wantAction {
 				t.Fatalf("action = %q, want %q", decision.Action, test.wantAction)
 			}
 			preflight := Preflight(PreflightInput{
-				IsGroup: test.isGroup, IsMention: test.isMention, IsReplyToBot: test.isReplyToBot, Text: " /connect ",
+				IsGroup: test.isGroup, IsMention: test.isMention, IsReplyToBot: test.isReplyToBot, IsReplyToSelf: test.isReplyToSelf, Text: " /connect ",
 			})
 			if test.wantAction == ActionIgnore && preflight.Action != ActionIgnore {
 				t.Fatalf("preflight action = %q, want ignore", preflight.Action)
@@ -54,6 +57,20 @@ func TestCommandRoutingRequiresMentionOnlyInGroups(t *testing.T) {
 				t.Fatalf("prompt = %q, want /connect", decision.Prompt)
 			}
 		})
+	}
+}
+
+func TestDecideAdmitsGroupReplyToSelf(t *testing.T) {
+	decision := Decide(Input{IsGroup: true, IsReplyToSelf: true, Text: "time*"})
+	if decision.Action != ActionLLM {
+		t.Fatalf("expected llm, got %q", decision.Action)
+	}
+	if preflight := Preflight(PreflightInput{IsGroup: true, IsReplyToSelf: true, Text: "time*"}); preflight.Action == ActionIgnore {
+		t.Fatalf("preflight unexpectedly ignored self reply: %+v", preflight)
+	}
+	plain := Decide(Input{IsGroup: true, Text: "time*"})
+	if plain.Action != ActionIgnore || plain.Reason != "group_message_without_invocation" {
+		t.Fatalf("expected bare group follow-up to stay ignored: %+v", plain)
 	}
 }
 

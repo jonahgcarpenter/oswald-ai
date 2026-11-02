@@ -51,6 +51,9 @@ type Request struct {
 	IsGroup      bool
 	IsMention    bool
 	IsReplyToBot bool
+	// IsReplyToSelf marks a group reply to the sender's own agent-invoking
+	// message. It admits the follow-up like a reply to the bot.
+	IsReplyToSelf bool
 
 	// PublicUserText is the exact inbound transport text, captured before any
 	// mention, emoji, URL, reply, or attachment transformations. Empty stays empty.

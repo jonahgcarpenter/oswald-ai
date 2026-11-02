@@ -1,11 +1,17 @@
 package agent
 
-import "sync"
+import (
+	"sync"
 
-// Steer is one follow-up text steered into a running turn.
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+)
+
+// Steer is one follow-up steered into a running turn. Images ride the next
+// model call as bytes; documents already ride inside the prompt text note.
 type Steer struct {
 	Text      string
 	RequestID string
+	Images    []llm.InputImage
 }
 
 // SteerInbox holds follow-ups steered into a running turn. The broker adds
@@ -22,12 +28,12 @@ type SteerInbox struct {
 func NewSteerInbox() *SteerInbox { return &SteerInbox{} }
 
 // Add appends one follow-up to the pending set.
-func (s *SteerInbox) Add(text, requestID string) {
+func (s *SteerInbox) Add(text, requestID string, images []llm.InputImage) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	s.pending = append(s.pending, Steer{Text: text, RequestID: requestID})
+	s.pending = append(s.pending, Steer{Text: text, RequestID: requestID, Images: images})
 	s.mu.Unlock()
 }
 

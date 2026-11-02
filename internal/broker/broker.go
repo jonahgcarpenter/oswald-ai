@@ -323,7 +323,7 @@ func (b *Broker) Submit(req *Request) error {
 // return: shutdown and queue-full rejections return ErrShuttingDown and
 // ErrQueueFull so gateways mark them rejected instead of completed.
 func (b *Broker) trySteer(req *Request) (bool, error) {
-	if req.ForceQueue || req.Stateless || len(req.Images) != 0 || len(req.Documents) != 0 {
+	if req.ForceQueue || req.Stateless {
 		return false, nil
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
@@ -366,7 +366,7 @@ func (b *Broker) trySteer(req *Request) (bool, error) {
 		head.steerEntries = make(map[string]*steerEntry)
 	}
 	queuedAt := time.Now()
-	head.steerInbox.Add(strings.TrimSpace(req.Prompt), req.RequestID)
+	head.steerInbox.Add(strings.TrimSpace(req.Prompt), req.RequestID, req.Images)
 	head.steerEntries[req.RequestID] = &steerEntry{req: req, queuedAt: queuedAt}
 	head.steerOrder = append(head.steerOrder, req.RequestID)
 	b.steerCount++
