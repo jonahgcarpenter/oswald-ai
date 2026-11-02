@@ -340,6 +340,11 @@ func applyCronUpdate(runner *cron.Runner, job *cron.Job, args map[string]interfa
 				} else {
 					job.NextRunAt = nil
 				}
+			} else if runAt, err := time.Parse(time.RFC3339, strings.TrimSpace(sched.RunAt)); err == nil && runAt.After(now) {
+				// One-shots keep their recorded instant so the ticker's
+				// ClaimDue sees them; a null next_run_at is skipped.
+				at := runAt.UTC().Format(time.RFC3339)
+				job.NextRunAt = &at
 			} else {
 				job.NextRunAt = nil
 			}
