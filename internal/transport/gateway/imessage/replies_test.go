@@ -215,6 +215,16 @@ func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
 			if name == "warm bot root intervening human" {
 				g.rememberBotMessage("root", "unused", root.Chats[0].GUID, "imessage:self", "cached bot root")
 			}
+			// Verified authorship: a bot predecessor only admits when the
+			// outbound cache proves the bot sent that GUID. Warm the cache
+			// for admitted cases so the SQL selection is still exercised.
+			if want {
+				predecessorGUID := "bot"
+				if name == "bot root only" {
+					predecessorGUID = "root"
+				}
+				g.rememberBotMessage(predecessorGUID, "unused", root.Chats[0].GUID, "imessage:self", "cached bot")
+			}
 			g.processIncomingMessage(threadIncoming())
 			requests := model.primaryRequests()
 			if (len(requests) == 1) != want {
@@ -292,6 +302,13 @@ func TestVerifiedGroupThreadOutcomes(t *testing.T) {
 			bb.mu.Unlock()
 			g, b, model := newIMessageTestGateway(t, bb.server.URL)
 			defer b.Shutdown()
+			if tc.bot {
+				predecessorGUID := "prior"
+				if tc.rootOnly {
+					predecessorGUID = "root"
+				}
+				g.rememberBotMessage(predecessorGUID, "unused", "private-chat;+;group", "imessage:self", "cached bot")
+			}
 			msg := threadIncoming()
 			msg.Text = tc.text
 			g.processIncomingMessage(msg)
@@ -387,6 +404,9 @@ func TestThreadIgnoresSelectedBubbleAssociation(t *testing.T) {
 				g, b, model := newIMessageTestGateway(t, bb.server.URL)
 				defer b.Shutdown()
 				g.Log = log
+				if admitted {
+					g.rememberBotMessage(prior.GUID, "unused", root.Chats[0].GUID, "imessage:self", prior.Text)
+				}
 				msg := threadIncoming()
 				msg.GUID, msg.ThreadOriginatorGUID = anchor.GUID, root.GUID
 				if mode == "webhook association" {
@@ -657,8 +677,11 @@ func TestDirectReplyCacheAndRESTScope(t *testing.T) {
 			bb.mu.Unlock()
 			g, b, model := newIMessageTestGateway(t, bb.server.URL)
 			defer b.Shutdown()
-			if mode == "cache" || mode == "wrong cache chat" {
-				chat := bot.Chats[0].GUID
+			// Verified authorship: direct bot replies only admit with
+			// outbound-cache proof. Warm the cache for admitted modes so
+			// the REST scope checks below still exercise admission.
+			if mode == "cache" || mode == "query without delivery receipts" || mode == "get" || mode == "second matching chat" || mode == "wrong cache chat" {
+				chat := "private-chat;+;group"
 				if mode == "wrong cache chat" {
 					chat = "wrong"
 				}
@@ -838,7 +861,8 @@ func TestThreadPredecessorExactPartSQL(t *testing.T) {
 			}
 			server := httptest.NewServer(sqliteReplyLookup(t, []messageLookupData{root, bot, other, anchor}, dates))
 			defer server.Close()
-			g := &Gateway{BlueBubblesURL: server.URL, Log: config.NewLogger(config.LevelError)}
+			g := &Gateway{BlueBubblesURL: server.URL, Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+			g.rememberBotMessage(want.GUID, "unused", "private-chat;+;group", "imessage:self", want.Text)
 			result, found := g.resolveReply(context.Background(), msg, true, "req-parts")
 			if !found || !result.IsPredecessor || result.Text != want.Text || result.IsFromBot != want.IsFromMe || result.ChatGUID != msg.primaryChat().GUID {
 				t.Fatalf("predecessor=%+v found=%v want=%s bot=%v", result, found, want.GUID, want.IsFromMe)
@@ -976,6 +1000,9 @@ func TestThreadReplyImageEnrichmentOnlyAfterAdmission(t *testing.T) {
 			bb.mu.Unlock()
 			g, b, model := newIMessageTestGateway(t, bb.server.URL)
 			defer b.Shutdown()
+			if botPredecessor {
+				g.rememberBotMessage(preceding.GUID, "unused", root.Chats[0].GUID, "imessage:self", "cached bot")
+			}
 			var encoded bytes.Buffer
 			if err := png.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
 				t.Fatal(err)
@@ -1023,6 +1050,7 @@ func TestThreadContinuationToleratesOmittedPart(t *testing.T) {
 	bb.mu.Unlock()
 	g, b, model := newIMessageTestGateway(t, bb.server.URL)
 	defer b.Shutdown()
+	g.rememberBotMessage(bot.GUID, "unused", root.Chats[0].GUID, "imessage:self", bot.Text)
 	msg := threadIncoming()
 	msg.ThreadOriginatorPart = ""
 	g.processIncomingMessage(msg)
@@ -1049,6 +1077,7 @@ func TestUnmentionedGroupCommandReplyingToBotExecutes(t *testing.T) {
 	bb.mu.Unlock()
 	g, b, model := newIMessageTestGateway(t, bb.server.URL)
 	defer b.Shutdown()
+	g.rememberBotMessage(bot.GUID, "unused", root.Chats[0].GUID, "imessage:self", bot.Text)
 	msg := threadIncoming()
 	msg.Text = "/help"
 	g.processIncomingMessage(msg)
