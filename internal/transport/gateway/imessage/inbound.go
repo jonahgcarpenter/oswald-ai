@@ -72,6 +72,14 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		replyLookupAttempted = true
 		resolvedReply, replyFound = g.resolveReply(ctx, msg, allowPredecessor, requestID)
 		currentIsReplyToBot = replyFound && resolvedReply.IsFromBot
+		// Live-turn steer: the reply target (thread root for threaded
+		// messages, else the explicit target) matches a platform message ID
+		// the broker currently holds for this chat. Only admitted messages
+		// enter that set, so an ignored image can never be steered, and no
+		// extra BlueBubbles lookup is needed on this path.
+		if !currentIsReplyToBot && g.Broker != nil && g.Broker.IsInflight(chat.GUID, replyGUID) {
+			currentIsReplyToBot = true
+		}
 	}
 	// A group reply to the sender's own agent-invoking message counts as
 	// invocation, like a reply to the bot, so follow-ups steer without a
