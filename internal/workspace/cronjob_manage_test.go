@@ -32,9 +32,12 @@ func oneshotJob(state string) *cron.Job {
 // ticker's ClaimDue would skip the job and it would never fire.
 func TestApplyCronUpdateOneshotKeepsNextRunAt(t *testing.T) {
 	job := oneshotJob(cron.StateScheduled)
+	// Compute the instant relative to now: ParseSchedule rejects past
+	// one-shots, so a hardcoded date would rot into a failure.
+	future := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 
 	err := applyCronUpdate(nil, job, map[string]interface{}{
-		"schedule": "2026-11-03T00:15:00Z",
+		"schedule": future,
 	})
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
@@ -42,11 +45,11 @@ func TestApplyCronUpdateOneshotKeepsNextRunAt(t *testing.T) {
 	if job.NextRunAt == nil {
 		t.Fatal("expected NextRunAt to be set for an updated one-shot, got nil (job would never fire)")
 	}
-	if got := *job.NextRunAt; got != "2026-11-03T00:15:00Z" {
-		t.Fatalf("expected NextRunAt 2026-11-03T00:15:00Z, got %s", got)
+	if got := *job.NextRunAt; got != future {
+		t.Fatalf("expected NextRunAt %s, got %s", future, got)
 	}
-	if got := job.Schedule.RunAt; got != "2026-11-03T00:15:00Z" {
-		t.Fatalf("expected Schedule.RunAt 2026-11-03T00:15:00Z, got %s", got)
+	if got := job.Schedule.RunAt; got != future {
+		t.Fatalf("expected Schedule.RunAt %s, got %s", future, got)
 	}
 }
 
@@ -78,9 +81,10 @@ func TestApplyCronUpdateOneshotInPhrase(t *testing.T) {
 func TestApplyCronUpdateOneshotPausedStaysNull(t *testing.T) {
 	job := oneshotJob(cron.StatePaused)
 	job.NextRunAt = nil
+	future := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 
 	err := applyCronUpdate(nil, job, map[string]interface{}{
-		"schedule": "2026-11-03T00:15:00Z",
+		"schedule": future,
 	})
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
