@@ -133,6 +133,14 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	if !threaded {
 		result, found = g.replyContextFromMessage(data, chatGUID), true
 		directCount = 1
+		// BlueBubbles isFromMe is true for every message sent from the
+		// operator's own Apple ID, so it cannot distinguish a bot send from
+		// an operator-device send. Require outbound-cache proof for direct
+		// bot authorship; live turns are admitted via the broker in-flight
+		// set in inbound instead.
+		if result.IsFromBot && !g.isCachedBotMessage(data.GUID, chatGUID) {
+			result.IsFromBot = false
+		}
 		if !result.IsFromBot {
 			reasonCode = "not_eligible_bot"
 		}
@@ -223,6 +231,13 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	result, found = g.replyContextFromMessage(p, chatGUID), true
 	result.IsPredecessor = true
 	predecessorCount = 1
+	// Same authorship rule as the direct path: a self-authored predecessor
+	// (isFromMe) is only a bot predecessor when the outbound cache proves
+	// the bot sent that GUID. Otherwise a user's own image or text in the
+	// thread would falsely invoke the agent.
+	if result.IsFromBot && !g.isCachedBotMessage(p.GUID, chatGUID) {
+		result.IsFromBot = false
+	}
 	if !result.IsFromBot {
 		reasonCode = "not_eligible_bot"
 	} else {
@@ -407,6 +422,18 @@ func (g *Gateway) lookupMessage(messageGUID string) (messageContext, bool) {
 	g.pruneMessageIndexLocked()
 	ctx, ok := g.messageIndex[messageGUID]
 	return ctx, ok
+}
+
+// isCachedBotMessage reports whether the outbound cache proves the bot sent
+// the given GUID in this chat. BlueBubbles isFromMe cannot prove authorship
+// on its own, so thread and direct admission require this check for past
+// turns (live turns use the broker in-flight set instead).
+func (g *Gateway) isCachedBotMessage(messageGUID, chatGUID string) bool {
+	if messageGUID == "" || chatGUID == "" {
+		return false
+	}
+	cached, ok := g.lookupMessage(messageGUID)
+	return ok && cached.ChatGUID == chatGUID && cached.IsFromBot
 }
 
 // pruneMessageIndexLocked removes expired entries from the in-memory message index.

@@ -43,6 +43,16 @@ type LaneKey struct {
 	UserExclusive   bool
 }
 
+// inflightKey identifies one admitted turn by the chat and the transport
+// message that invoked it. The platform message ID rides every gateway
+// request but is otherwise only logged and persisted; the broker indexes it
+// here so group-thread replies can prove they steer a live turn instead of
+// trusting BlueBubbles isFromMe authorship.
+type inflightKey struct {
+	chatID            string
+	platformMessageID string
+}
+
 // Request carries a single user request from a gateway into the broker.
 type Request struct {
 	Usage       *requestctx.UsageCollector
@@ -232,6 +242,7 @@ type Broker struct {
 	mu              sync.Mutex
 	lanes           map[LaneKey][]*work
 	userFences      map[string]*userFence
+	inflight        map[inflightKey]int
 	outstanding     int
 	steerCount      int
 	accepting       bool
@@ -272,10 +283,65 @@ func NewBroker(aiAgent Processor, workerCount int, log *config.Logger) *Broker {
 		log:             log,
 		lanes:           make(map[LaneKey][]*work),
 		userFences:      make(map[string]*userFence),
+		inflight:        make(map[inflightKey]int),
 		accepting:       true,
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 	}
+}
+
+// IsInflight reports whether the broker currently holds an admitted turn for
+// the given chat that was invoked by the given platform message ID. Empty
+// IDs never match. Gateways use this to admit threaded follow-ups as steers
+// of a live turn without trusting transport authorship flags.
+func (b *Broker) IsInflight(chatID, platformMessageID string) bool {
+	chatID = strings.TrimSpace(chatID)
+	platformMessageID = strings.TrimSpace(platformMessageID)
+	if chatID == "" || platformMessageID == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.inflight[inflightKey{chatID: chatID, platformMessageID: platformMessageID}] > 0
+}
+
+// trackInflightLocked registers one admitted request. Callers must hold b.mu
+// and only call after the work has been accepted into a lane.
+func (b *Broker) trackInflightLocked(req *Request) {
+	if req == nil {
+		return
+	}
+	chatID := strings.TrimSpace(req.ChatID)
+	platformMessageID := strings.TrimSpace(req.PlatformMessageID)
+	if chatID == "" || platformMessageID == "" {
+		return
+	}
+	if b.inflight == nil {
+		b.inflight = make(map[inflightKey]int)
+	}
+	b.inflight[inflightKey{chatID: chatID, platformMessageID: platformMessageID}]++
+}
+
+// untrackInflightLocked releases one admitted request. Callers must hold b.mu.
+func (b *Broker) untrackInflightLocked(req *Request) {
+	if req == nil || len(b.inflight) == 0 {
+		return
+	}
+	chatID := strings.TrimSpace(req.ChatID)
+	platformMessageID := strings.TrimSpace(req.PlatformMessageID)
+	if chatID == "" || platformMessageID == "" {
+		return
+	}
+	key := inflightKey{chatID: chatID, platformMessageID: platformMessageID}
+	count, ok := b.inflight[key]
+	if !ok {
+		return
+	}
+	if count <= 1 {
+		delete(b.inflight, key)
+		return
+	}
+	b.inflight[key] = count - 1
 }
 
 // Start launches the worker pool once.
@@ -705,6 +771,7 @@ func (b *Broker) cancelAgentWork(matches func(*work) bool, failSteers bool) Canc
 			}
 			w.state = workCanceled
 			w.cancel(ErrAgentWorkCanceled)
+			b.untrackInflightLocked(w.request)
 			canceled = append(canceled, w)
 			if failSteers && w.steerInbox != nil && len(w.steerEntries) > 0 {
 				for id, entry := range w.steerEntries {
@@ -813,6 +880,7 @@ func (b *Broker) enqueue(w *work) error {
 		w.queuedAt = time.Now()
 	}
 	b.outstanding++
+	b.trackInflightLocked(w.request)
 	b.workWG.Add(1)
 	isHead := len(lane) == 0
 	if isHead {
@@ -895,6 +963,7 @@ func (b *Broker) rejectPendingWork() {
 	b.lanes = make(map[LaneKey][]*work)
 	b.outstanding = 0
 	b.steerCount = 0
+	b.inflight = make(map[inflightKey]int)
 	b.mu.Unlock()
 	for _, w := range pending {
 		b.cancelFenceReservations(w)
@@ -958,6 +1027,7 @@ func (b *Broker) complete(completed *work) {
 		lane = lane[1:]
 	}
 	b.outstanding--
+	b.untrackInflightLocked(completed.request)
 	var next *work
 	if len(lane) == 0 {
 		delete(b.lanes, completed.key)
