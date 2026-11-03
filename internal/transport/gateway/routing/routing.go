@@ -15,13 +15,13 @@ func Decide(input Input) Decision {
 	reply := input.Reply
 
 	if input.IsCommandAttempt {
-		if input.IsGroup && !input.IsMention && !input.IsReplyToBot {
+		if input.IsGroup && !input.IsMention && !input.IsReplyToBot && !input.IsReplyToSelf {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{Action: ActionCommand, Prompt: text, Reason: "command"}
 	}
 
-	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsCommandAttempt) {
+	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsReplyToSelf, input.IsCommandAttempt) {
 		return Decision{Action: ActionIgnore, Reason: "group_message_without_invocation"}
 	}
 
@@ -40,13 +40,13 @@ func Decide(input Input) Decision {
 func Preflight(input PreflightInput) Decision {
 	isCommandAttempt := IsCommandAttempt(input.Text)
 	if isCommandAttempt {
-		if input.IsGroup && !input.IsMention && !input.IsReplyToBot {
+		if input.IsGroup && !input.IsMention && !input.IsReplyToBot && !input.IsReplyToSelf {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{}
 	}
 
-	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, isCommandAttempt) {
+	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsReplyToSelf, isCommandAttempt) {
 		return Decision{Action: ActionIgnore, Reason: "group_message_without_invocation"}
 	}
 	return Decision{}
@@ -58,8 +58,8 @@ func IsCommandAttempt(text string) bool {
 }
 
 // ShouldIgnoreUninvokedGroup reports whether a group message lacks any gateway-normalized invocation.
-func ShouldIgnoreUninvokedGroup(isGroup, isMention, isReplyToBot, isCommand bool) bool {
-	return isGroup && !isMention && !isReplyToBot && !isCommand
+func ShouldIgnoreUninvokedGroup(isGroup, isMention, isReplyToBot, isReplyToSelf, isCommand bool) bool {
+	return isGroup && !isMention && !isReplyToBot && !isReplyToSelf && !isCommand
 }
 
 // BuildPrompt builds the exact current-turn text sent to the LLM.

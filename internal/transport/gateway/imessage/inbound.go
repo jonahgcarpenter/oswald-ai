@@ -81,11 +81,18 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 			currentIsReplyToBot = true
 		}
 	}
+	// A group reply to the sender's own agent-invoking message counts as
+	// invocation, like a reply to the bot, so follow-ups steer without a
+	// second mention. The parent must have invoked the agent itself so
+	// ordinary self-quotes stay uninvoked.
+	currentIsReplyToSelf := replyFound && !resolvedReply.IsFromBot &&
+		resolvedReply.SenderID == principal.ExternalID && parentInvokedBot(g, strings.TrimSpace(resolvedReply.Text))
 	preflight := routing.Preflight(routing.PreflightInput{
-		IsGroup:      isGroup,
-		IsMention:    mentionsBot,
-		IsReplyToBot: currentIsReplyToBot,
-		Text:         textWithoutMention,
+		IsGroup:       isGroup,
+		IsMention:     mentionsBot,
+		IsReplyToBot:  currentIsReplyToBot,
+		IsReplyToSelf: currentIsReplyToSelf,
+		Text:          textWithoutMention,
 	})
 	if preflight.Action == routing.ActionIgnore {
 		g.logIgnoredMessage(preflight.Reason, "new-message", msg,
@@ -98,6 +105,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 			config.F("reply_lookup_attempted", replyLookupAttempted),
 			config.F("reply_found", replyFound),
 			config.F("reply_is_bot", currentIsReplyToBot),
+			config.F("is_reply_to_self", currentIsReplyToSelf),
 			config.F("allow_predecessor", allowPredecessor),
 			config.F("is_command", currentIsCommandAttempt),
 			config.F("message_chars", len(msg.Text)),
@@ -227,6 +235,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		IsGroup:           isGroup,
 		IsMention:         mentionsBot,
 		IsReplyToBot:      currentIsReplyToBot,
+		IsReplyToSelf:     currentIsReplyToSelf,
 		Text:              textWithoutMention,
 		EscalationNotify:  askNotify,
 		ClarifyAsk:        clarifyAsk,
@@ -326,4 +335,13 @@ func (g *Gateway) leadingMention(trimmed string) int {
 		}
 	}
 	return end
+}
+
+// parentInvokedBot reports whether a replied-to message itself invoked the
+// agent: a leading mention or command syntax on the raw parent text.
+func parentInvokedBot(g *Gateway, trimmedParent string) bool {
+	if g.leadingMention(trimmedParent) >= 0 {
+		return true
+	}
+	return routing.IsCommandAttempt(trimmedParent)
 }

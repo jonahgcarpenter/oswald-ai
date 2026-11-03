@@ -118,9 +118,13 @@ type Result struct {
 	ExecutionComplete bool
 	QueueWaitMS       int64
 	AgentDurationMS   int64
-	Response          *agent.Response
-	Principal         identity.Principal
-	Err               error
+	// SteeredShared marks a consumed steer fanned out with the host response.
+	// The host turn already delivers this response, so the steered transport
+	// must suppress its own send to avoid duplicate delivery.
+	SteeredShared bool
+	Response      *agent.Response
+	Principal     identity.Principal
+	Err           error
 }
 
 type steerEntry struct {
@@ -385,7 +389,7 @@ func (b *Broker) Submit(req *Request) error {
 // return: shutdown and queue-full rejections return ErrShuttingDown and
 // ErrQueueFull so gateways mark them rejected instead of completed.
 func (b *Broker) trySteer(req *Request) (bool, error) {
-	if req.ForceQueue || req.Stateless || len(req.Images) != 0 || len(req.Documents) != 0 {
+	if req.ForceQueue || req.Stateless {
 		return false, nil
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
@@ -428,7 +432,7 @@ func (b *Broker) trySteer(req *Request) (bool, error) {
 		head.steerEntries = make(map[string]*steerEntry)
 	}
 	queuedAt := time.Now()
-	head.steerInbox.Add(strings.TrimSpace(req.Prompt), req.RequestID)
+	head.steerInbox.Add(strings.TrimSpace(req.Prompt), req.RequestID, req.Images)
 	head.steerEntries[req.RequestID] = &steerEntry{req: req, queuedAt: queuedAt}
 	head.steerOrder = append(head.steerOrder, req.RequestID)
 	b.steerCount++
@@ -653,7 +657,7 @@ func (b *Broker) settleSteers(host *work, resp *agent.Response, hostErr error) {
 			config.F("request_id", entry.req.RequestID),
 			config.F("gateway", entry.req.Principal.Gateway),
 			config.F("chat_id", entry.req.ChatID))
-		deliverResult(entry.req.ResponseChan, Result{Response: resp, Principal: entry.req.Principal, QueueWaitMS: 0, AgentDurationMS: duration, ExecutionComplete: true})
+		deliverResult(entry.req.ResponseChan, Result{Response: resp, Principal: entry.req.Principal, QueueWaitMS: 0, AgentDurationMS: duration, ExecutionComplete: true, SteeredShared: true})
 	}
 	requeue := func(id string) {
 		b.mu.Lock()
