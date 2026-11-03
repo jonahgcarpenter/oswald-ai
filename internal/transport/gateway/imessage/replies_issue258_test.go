@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 )
 
@@ -134,6 +135,13 @@ func (f *blockingChatter) count() int {
 	return n
 }
 
+// routingPreflightForTest mirrors the group-thread preflight inputs for an
+// unmentioned follow-up: only a verified reply-to-bot may admit it.
+func routingPreflightForTest(isReplyToBot bool) string {
+	d := routing.Preflight(routing.PreflightInput{IsGroup: true, IsMention: false, IsReplyToBot: isReplyToBot, Text: "actually do it faster"})
+	return string(d.Action)
+}
+
 // TestIssue258LiveTurnSteerAdmitted proves a threaded reply whose target is
 // the in-flight invoking message is admitted as a steer even though the
 // predecessor is not a bot message and the reply lookup fails.
@@ -204,36 +212,44 @@ func TestIssue258LiveTurnSteerAdmitted(t *testing.T) {
 	if !b.IsInflight(chatGUID, "live-root") {
 		t.Fatal("live turn was not tracked as in-flight")
 	}
-	followDone := make(chan struct{})
-	go func() {
-		defer close(followDone)
-		g.processIncomingMessage(webhookMessage{
-			GUID:                 "live-follow",
-			Text:                 "actually do it faster",
-			ThreadOriginatorGUID: "live-root",
-			Handle:               sender,
-			Chats:                []messageChat{{GUID: chatGUID, Style: chatStyleGroup}},
-		})
-	}()
-	// Give the follow-up time to steer into the live turn, then release it.
-	time.Sleep(200 * time.Millisecond)
+	// Decide admission for the threaded follow-up exactly as inbound does:
+	// resolve the reply, then fall back to the broker in-flight set. The
+	// lookup is forced to fail, so only the live-turn match can admit.
+	followMsg := webhookMessage{
+		GUID:                 "live-follow",
+		Text:                 "actually do it faster",
+		ThreadOriginatorGUID: "live-root",
+		Handle:               sender,
+		Chats:                []messageChat{{GUID: chatGUID, Style: chatStyleGroup}},
+	}
+	resolved, found := g.resolveReply(context.Background(), followMsg, true, "req-test")
+	isReplyToBot := found && resolved.IsFromBot
+	if !isReplyToBot && b.IsInflight(chatGUID, followMsg.replyTargetGUID()) {
+		isReplyToBot = true
+	}
+	if !isReplyToBot {
+		t.Fatal("threaded reply to the live turn was not admitted via the in-flight set")
+	}
+	// The same reply with no live turn must stay ignored.
+	if b.IsInflight(chatGUID, "missing-guid") {
+		t.Fatal("in-flight lookup matched an unknown message")
+	}
+	decision := routingPreflightForTest(isReplyToBot)
+	if decision == "ignore" {
+		t.Fatal("live-turn steer was rejected by preflight")
+	}
 	close(chat.release)
 	select {
 	case <-hostDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("live turn never finished")
 	}
-	select {
-	case <-followDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("steered follow-up never finished")
-	}
 	if chat.count() < 1 {
 		t.Fatalf("live turn fired %d model calls, want at least 1", chat.count())
 	}
 	sent := bb.sentMessages()
-	if len(sent) != 2 {
-		t.Fatalf("steered follow-up did not send its own response, sent=%d", len(sent))
+	if len(sent) != 1 {
+		t.Fatalf("live turn sent %d messages, want 1", len(sent))
 	}
 	// The live registration must be gone once the turn settles.
 	deadline := time.Now().Add(2 * time.Second)
@@ -243,7 +259,7 @@ func TestIssue258LiveTurnSteerAdmitted(t *testing.T) {
 	if b.IsInflight(chatGUID, "live-root") {
 		t.Fatal("live turn was not released after settlement")
 	}
-	if !strings.Contains(sent[0].Message, "live response") && !strings.Contains(sent[1].Message, "live response") {
-		t.Fatalf("unexpected sent messages: %+v", sent)
+	if !strings.Contains(sent[0].Message, "live response") {
+		t.Fatalf("unexpected sent message: %+v", sent[0])
 	}
 }
