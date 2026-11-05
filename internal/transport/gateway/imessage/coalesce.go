@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	coalesceQuietDefault   = 1000 * time.Millisecond
+	coalesceQuietDefault   = 2000 * time.Millisecond
 	coalesceMaxHoldDefault = 3000 * time.Millisecond
 	urlBalloonProvider     = "com.apple.messages.URLBalloonProvider"
 )
