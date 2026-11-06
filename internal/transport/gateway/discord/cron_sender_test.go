@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
@@ -177,4 +178,34 @@ func toString(v interface{}) string {
 		return s
 	}
 	return ""
+}
+
+// TestCronSenderDeliverMentionKeepsOneNativeMentionMessage pins the Discord
+// mention shape: the native snowflake mention plus the job header stay in a
+// single message ahead of the body, so the tap survives with full context.
+func TestCronSenderDeliverMentionKeepsOneNativeMentionMessage(t *testing.T) {
+	var mu sync.Mutex
+	var contents []string
+	dg := &Gateway{Log: config.NewLogger(config.LevelError)}
+	dg.HTTPClient = &http.Client{Transport: cronRoundTripper(func(r *http.Request) (*http.Response, error) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		mu.Lock()
+		contents = append(contents, toString(payload["content"]))
+		mu.Unlock()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"m1"}`))}, nil
+	})}
+	sender := dg.CronSender()
+
+	mention := cron.Mention{Address: "123456789", Header: "pick"}
+	if err := sender.DeliverMention(context.Background(), "alice", "discord:chan9:123456789", mention, "pick body", nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(contents) != 1 || contents[0] != "<@123456789> - pick\npick body" {
+		t.Fatalf("contents = %v", contents)
+	}
 }

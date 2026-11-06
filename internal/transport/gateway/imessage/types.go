@@ -72,6 +72,21 @@ type sendTextResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// multipartPart is one segment of a multipart send. A part carrying both
+// text and a mention renders one message with a tappable mention run; the
+// server scopes the run to the part, so one part means one message.
+type multipartPart struct {
+	PartIndex int    `json:"partIndex"`
+	Text      string `json:"text,omitempty"`
+	Mention   string `json:"mention,omitempty"`
+}
+
+type sendMultipartRequest struct {
+	ChatGUID string          `json:"chatGuid"`
+	TempGUID string          `json:"tempGuid,omitempty"`
+	Parts    []multipartPart `json:"parts"`
+}
+
 type messageLookupResponse struct {
 	Data  messageLookupData `json:"data"`
 	Error *struct {
