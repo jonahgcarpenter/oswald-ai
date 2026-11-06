@@ -1334,8 +1334,8 @@ func TestProcessInjectsSessionContextBlock(t *testing.T) {
 	_, err := agent.Process(context.Background(), Request{
 		RequestID:   "req-1",
 		Principal:   identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "discord", Assurance: identity.AssuranceDiscordGateway},
-		DisplayName: "fragsap",
-		ChatLabel:   `"DM with fragsap"`,
+		DisplayName: "testuser",
+		ChatLabel:   `"DM with testuser"`,
 		SessionKey:  "discord:dm:123",
 		Prompt:      "question",
 	})
@@ -1343,7 +1343,7 @@ func TestProcessInjectsSessionContextBlock(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 	system := primaryRequests(chat.requests)[0].Messages[0].Content
-	if !strings.Contains(system, "## Current Session Context") || !strings.Contains(system, `**Source:** Discord ("DM with fragsap")`) || !strings.Contains(system, `**User:** "fragsap"`) {
+	if !strings.Contains(system, "## Current Session Context") || !strings.Contains(system, `**Source:** Discord ("DM with testuser")`) || !strings.Contains(system, `**User:** "testuser"`) {
 		t.Fatalf("system prompt missing session context block:\n%s", system)
 	}
 	contextAt := strings.Index(system, "## Current Session Context")
@@ -1383,7 +1383,7 @@ func TestProcessWritesSessionRowAttributes(t *testing.T) {
 	_, err := agent.Process(context.Background(), Request{
 		RequestID:        "req-1",
 		Principal:        identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "discord", Assurance: identity.AssuranceDiscordGateway},
-		DisplayName:      "fragsap",
+		DisplayName:      "testuser",
 		SessionKey:       "discord:dm:123",
 		IsDirect:         true,
 		ChatID:           "channel-1",
@@ -1408,7 +1408,7 @@ func TestProcessWritesSessionRowAttributes(t *testing.T) {
 	if model.String != "test-model" || billing.String != "https://models.example/v1" {
 		t.Fatalf("model/billing mismatch: %q %q", model.String, billing.String)
 	}
-	if chatID.String != "channel-1" || chatType.String != "dm" || platformUserID.String != "user-1" || platformDisplayName.String != "fragsap" {
+	if chatID.String != "channel-1" || chatType.String != "dm" || platformUserID.String != "user-1" || platformDisplayName.String != "testuser" {
 		t.Fatalf("chat identity mismatch: %q %q %q %q", chatID.String, chatType.String, platformUserID.String, platformDisplayName.String)
 	}
 	if transportProfile.String != "default" {
@@ -1420,7 +1420,7 @@ func TestProcessWritesSessionRowAttributes(t *testing.T) {
 	if err := fixture.sql.QueryRow(`SELECT COUNT(*) FROM system_prompts WHERE hash=?`, promptHash.String).Scan(&promptRows); err != nil || promptRows != 1 {
 		t.Fatalf("prompt rows=%d err=%v", promptRows, err)
 	}
-	for key, want := range map[string]string{"platform": "discord", "chat_id": "channel-1", "chat_name": "general", "chat_type": "dm", "user_id": "user-1", "user_name": "fragsap", "profile": "user-1"} {
+	for key, want := range map[string]string{"platform": "discord", "chat_id": "channel-1", "chat_name": "general", "chat_type": "dm", "user_id": "user-1", "user_name": "testuser", "profile": "user-1"} {
 		if !strings.Contains(origin, `"`+key+`":"`+want+`"`) {
 			t.Fatalf("origin missing %s=%q: %s", key, want, origin)
 		}

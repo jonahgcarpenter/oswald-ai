@@ -66,7 +66,7 @@ func TestInfoOperationalMetadataCompleteness(t *testing.T) {
 
 func TestDisplayLabelsKeepNamesWithoutIdentifierRedaction(t *testing.T) {
 	for key, value := range map[string]any{
-		"user_id":  "Jonah Carpenter",
+		"user_id":  "Alice Person",
 		"bot_name": "Oswald",
 	} {
 		logger := NewLogger(LevelInfo)

@@ -39,9 +39,9 @@ platforms:
       webhook_port: 8090
       webhook_path: /bluebubbles-webhook
       allowed_users:
-        - "+16623344454"
+        - "+15550002222"
       banned_users:
-        - "16628876635"
+        - "15550003333"
       require_mention: false
       mention_pattern:
         - '@?Oswald\b[,:\-]?'
@@ -94,10 +94,10 @@ func TestPlatformAdmissionAndMentionConfiguration(t *testing.T) {
 	if cfg.BlueBubblesWebhookPath != "/bluebubbles-webhook" {
 		t.Fatalf("webhook_path = %q", cfg.BlueBubblesWebhookPath)
 	}
-	if len(cfg.BlueBubblesPolicy.Banned) != 1 || cfg.BlueBubblesPolicy.Banned[0] != "+16628876635" {
+	if len(cfg.BlueBubblesPolicy.Banned) != 1 || cfg.BlueBubblesPolicy.Banned[0] != "+15550003333" {
 		t.Fatalf("banned identity not normalized: %+v", cfg.BlueBubblesPolicy)
 	}
-	if !cfg.BlueBubblesPolicy.Allows("+16623344454") || cfg.BlueBubblesPolicy.Allows("+16628876635") {
+	if !cfg.BlueBubblesPolicy.Allows("+15550002222") || cfg.BlueBubblesPolicy.Allows("+15550003333") {
 		t.Fatalf("bluebubbles admission semantics wrong: %+v", cfg.BlueBubblesPolicy)
 	}
 	if len(cfg.BlueBubblesMentionPatterns) != 1 || !cfg.BlueBubblesMentionPatterns[0].MatchString("@Oswald, hi") {

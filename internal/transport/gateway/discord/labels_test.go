@@ -24,13 +24,13 @@ func TestDiscordChatLabelDMAndGroup(t *testing.T) {
 
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, HTTPClient: server.Client(), Log: log, labelNames: map[string]labelNameCacheEntry{}}
 
-	if got := dg.chatLabel(discordMessage("m1", "c-dm", "", "123", "fragsap", "hi"), log); got != `"DM with fragsap"` {
+	if got := dg.chatLabel(discordMessage("m1", "c-dm", "", "123", "testuser", "hi"), log); got != `"DM with testuser"` {
 		t.Fatalf("dm label = %q", got)
 	}
-	if got := dg.chatLabel(discordMessage("m2", "c1", "g1", "123", "fragsap", "hi"), log); got != `group channel "general" on server "Candied Island"` {
+	if got := dg.chatLabel(discordMessage("m2", "c1", "g1", "123", "testuser", "hi"), log); got != `group channel "general" on server "Candied Island"` {
 		t.Fatalf("group label = %q", got)
 	}
-	if got := dg.chatLabel(discordMessage("m3", "missing", "missing", "123", "fragsap", "hi"), log); got != `"group channel"` {
+	if got := dg.chatLabel(discordMessage("m3", "missing", "missing", "123", "testuser", "hi"), log); got != `"group channel"` {
 		t.Fatalf("fallback label = %q", got)
 	}
 }

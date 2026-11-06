@@ -82,7 +82,7 @@ type Request struct {
 	Principal   identity.Principal
 	DisplayName string
 	// ChatLabel names the transport conversation for the session-context block
-	// (for example `"DM with fragsap"`). It is untrusted metadata and empty for
+	// (for example `"DM with testuser"`). It is untrusted metadata and empty for
 	// stateless requests.
 	ChatLabel  string
 	SessionKey string
