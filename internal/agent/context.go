@@ -291,15 +291,30 @@ func renderFileMemory(userContent, memoryContent string) string {
 		if section.content == "" {
 			continue
 		}
-		count := utf8.RuneCountInString(section.content)
+		content := normalizeMemoryEntries(section.content)
+		if content == "" {
+			continue
+		}
+		count := utf8.RuneCountInString(content)
 		shown := fmt.Sprintf("%d", count)
 		if count >= 1000 {
 			shown = fmt.Sprintf("%d,%03d", count/1000, count%1000)
 		}
 		blocks = append(blocks, fmt.Sprintf("%s\n%s [%d%% — %s/%s chars]\n%s\n%s",
-			divider, section.title, count*100/section.limit, shown, section.label, divider, section.content))
+			divider, section.title, count*100/section.limit, shown, section.label, divider, content))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+// normalizeMemoryEntries trims surrounding blank lines around §-separated
+// entries so files written before whitespace normalization still render in
+// canonical form. Display-only; the file itself is repaired on its next Apply.
+func normalizeMemoryEntries(content string) string {
+	entries := strings.Split(content, "\n§\n")
+	for i, entry := range entries {
+		entries[i] = strings.TrimSpace(entry)
+	}
+	return strings.Join(entries, "\n§\n")
 }
 
 // PromptContext is a role-correct model context assembled within an input

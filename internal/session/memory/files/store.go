@@ -91,10 +91,11 @@ func (s *Store) Apply(ctx context.Context, userID, target string, ops []Operatio
 				if op.OldText != "" {
 					return errors.New("add cannot specify old_text")
 				}
-				if err := validEntry(op.Content); err != nil {
+				content := strings.TrimSpace(op.Content)
+				if err := validEntry(content); err != nil {
 					return err
 				}
-				entries = append(entries, op.Content)
+				entries = append(entries, content)
 			case "replace", "remove":
 				if !utf8.ValidString(op.OldText) || strings.TrimSpace(op.OldText) == "" {
 					return errors.New("old_text must be nonempty UTF-8")
@@ -112,10 +113,11 @@ func (s *Store) Apply(ctx context.Context, userID, target string, ops []Operatio
 					return errors.New("old_text not found")
 				}
 				if op.Action == "replace" {
-					if err := validEntry(op.Content); err != nil {
+					content := strings.TrimSpace(op.Content)
+					if err := validEntry(content); err != nil {
 						return err
 					}
-					entries[index] = op.Content
+					entries[index] = content
 				} else {
 					if op.Content != "" {
 						return errors.New("remove cannot specify content")
@@ -201,8 +203,9 @@ func split(content string) ([]string, error) {
 		return nil, nil
 	}
 	entries := strings.Split(content, "\n§\n")
-	for _, entry := range entries {
-		if err := validEntry(entry); err != nil {
+	for i, entry := range entries {
+		entries[i] = strings.TrimSpace(entry)
+		if err := validEntry(entries[i]); err != nil {
 			return nil, err
 		}
 	}
