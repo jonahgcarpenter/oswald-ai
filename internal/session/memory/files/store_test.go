@@ -405,3 +405,39 @@ func TestDeleteReleasesFirstLockWhenSecondLockWaitIsCanceled(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestApplyTrimsSurroundingWhitespace(t *testing.T) {
+	store := NewStore(t.TempDir())
+	ctx := context.Background()
+	_, err := store.Apply(ctx, "one", "user", []Operation{{Action: "add", Content: "first synthetic entry.\n"}, {Action: "add", Content: "\nsecond synthetic entry.  "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, _, err := store.Read(ctx, "one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user != "first synthetic entry.\n§\nsecond synthetic entry." {
+		t.Fatalf("untrimmed result: %q", user)
+	}
+}
+
+func TestApplyRepairsLegacyBlankLinesAroundSeparator(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "one", "memories")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "USER.md"), []byte("first synthetic entry.;\n\n§\nsecond synthetic entry."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(root)
+	ctx := context.Background()
+	result, err := store.Apply(ctx, "one", "user", []Operation{{Action: "add", Content: "Likes coffee"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result, "\n\n§\n") || strings.Contains(result, "\n§\n\n") {
+		t.Fatalf("legacy blank lines not repaired: %q", result)
+	}
+}

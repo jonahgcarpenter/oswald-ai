@@ -184,6 +184,19 @@ func TestRenderFileMemoryExactBlocksAndCharacterCounts(t *testing.T) {
 	}
 }
 
+func TestRenderFileMemoryNormalizesLegacyBlankLines(t *testing.T) {
+	const divider = "══════════════════════════════════════════════"
+	user := "first synthetic entry.;\n\n§\nsecond synthetic entry."
+	got := renderFileMemory(user, "")
+	if strings.Contains(got, "\n\n§\n") || strings.Contains(got, "\n§\n\n") {
+		t.Fatalf("legacy blank lines rendered: %q", got)
+	}
+	want := divider + "\nUSER PROFILE (who the user is) [3% — 49/1,375 chars]\n" + divider + "\nfirst synthetic entry.;\n§\nsecond synthetic entry."
+	if got != want {
+		t.Fatalf("normalized render differs: %q want %q", got, want)
+	}
+}
+
 func TestAssemblePromptContextPlacesSummaryBeforeRoleCorrectTail(t *testing.T) {
 	summary := "# Summary\nAtlas was selected.\n\n## Open tasks\n- Ship Atlas"
 	turns := []memory.SessionTurn{{ID: 12, UserText: "new user", AssistantText: "new assistant"}, {ID: 11, UserText: "older user", AssistantText: "older assistant"}}
