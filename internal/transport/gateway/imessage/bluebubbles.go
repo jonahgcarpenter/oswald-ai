@@ -221,6 +221,40 @@ func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex
 	return result.Data.GUID, nil
 }
 
+// sendMultipart posts a multipart message to BlueBubbles and returns the
+// created message GUID. Single-part mention messages stay one bubble with a
+// tappable run; the address is a transport-native handle.
+func (g *Gateway) sendMultipart(chatGUID string, parts []multipartPart, scoped ...*config.Logger) (string, error) {
+	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/multipart", g.BlueBubblesPassword)
+	if err != nil {
+		return "", fmt.Errorf("parse BlueBubbles URL: %w", err)
+	}
+	payload := sendMultipartRequest{ChatGUID: chatGUID, TempGUID: newTempGUID(), Parts: parts}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal BlueBubbles multipart send payload: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build BlueBubbles multipart request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("send BlueBubbles multipart request: %w", err)
+	}
+	defer resp.Body.Close()
+	var result sendTextResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode BlueBubbles multipart response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		g.log(scoped...).Debug("gateway.send.provider_failed", "BlueBubbles multipart send failed", config.F("http_status", resp.StatusCode), config.F("has_provider_error", result.Error != nil), config.F("status", "error"))
+		return "", fmt.Errorf("BlueBubbles multipart send failed with status %d", resp.StatusCode)
+	}
+	return result.Data.GUID, nil
+}
+
 // buildBlueBubblesEndpoint constructs an authenticated BlueBubbles REST endpoint.
 func buildBlueBubblesEndpoint(baseURL, path, password string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))

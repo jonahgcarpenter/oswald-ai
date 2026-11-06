@@ -38,10 +38,26 @@ type AgentResult struct {
 // AgentFunc executes one scheduled agent turn and waits for its result.
 type AgentFunc func(ctx context.Context, call AgentCall) (AgentResult, error)
 
-// Sender delivers finished job output to a conversation.
+// Sender delivers finished job output to a conversation. DeliverMention
+// carries a groupchat mention (address plus header line); senders that tap
+// natively may fold it into one message, others bubble the header and thread
+// the body under it. DMs never mention and always use Deliver.
 type Sender interface {
 	Deliver(ctx context.Context, profile, sessionKey, text string, attachments []media.OutputAttachment) error
+	DeliverMention(ctx context.Context, profile, sessionKey string, mention Mention, text string, attachments []media.OutputAttachment) error
 }
+
+// Mention is a groupchat tap: the transport-native address plus the job
+// label. Senders qualify the label per transport (Discord prefixes the native
+// mention, iMessage prefixes the profile in its bubble); DMs never mention.
+type Mention struct {
+	Address string
+	Header  string
+}
+
+// HasRecipient reports whether the mention names a user. DMs and unset
+// targets carry none.
+func (m Mention) HasRecipient() bool { return strings.TrimSpace(m.Address) != "" }
 
 // NewGenerationFunc opens a fresh session generation for a job fire.
 type NewGenerationFunc func(ctx context.Context, profile, sessionKey string) error
@@ -251,7 +267,7 @@ func (d *Dispatcher) deliver(job *Job, ex *Execution, text string, attachments [
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := sender.Deliver(ctx, d.Profile, sessionKey, mention+wrapDelivery(job, text), attachments); err != nil {
+	if err := deliverMentioned(ctx, sender, d.Profile, sessionKey, mention, wrapDelivery(job, text), attachments); err != nil {
 		ex.Delivered = false
 		ex.DeliveryError = err.Error()
 		ex.Status = "delivery_failed"
@@ -260,38 +276,43 @@ func (d *Dispatcher) deliver(job *Job, ex *Execution, text string, attachments [
 	ex.Delivered = true
 }
 
+// deliverMentioned routes through the mention path for named groupchat
+// targets and the plain path otherwise (DMs never mention).
+func deliverMentioned(ctx context.Context, sender Sender, profile, sessionKey string, mention Mention, text string, attachments []media.OutputAttachment) error {
+	if mention.HasRecipient() {
+		return sender.DeliverMention(ctx, profile, sessionKey, mention, text, attachments)
+	}
+	return sender.Deliver(ctx, profile, sessionKey, text, attachments)
+}
+
 // resolveTarget maps a job's deliver target onto a live sender, the
-// transport session key, and the groupchat mention prefix (empty for DMs).
-func (d *Dispatcher) resolveTarget(job *Job) (Sender, string, string, error) {
+// transport session key, and the groupchat mention (empty for DMs).
+func (d *Dispatcher) resolveTarget(job *Job) (Sender, string, Mention, error) {
 	if job == nil {
-		return nil, "", "", errors.New("cron job is unavailable")
+		return nil, "", Mention{}, errors.New("cron job is unavailable")
 	}
 	platform, err := normalizePlatform(job.Deliver.Platform)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", Mention{}, err
 	}
 	chatID := strings.TrimSpace(job.Deliver.ChatID)
 	userID := strings.TrimSpace(job.Deliver.UserID)
 	if chatID == "" {
-		return nil, "", "", errors.New("deliver chat_id is required")
+		return nil, "", Mention{}, errors.New("deliver chat_id is required")
 	}
 	sender, ok := d.Senders[platform]
 	if !ok || sender == nil {
-		return nil, "", "", errors.New("no live sender for deliver platform " + platform)
+		return nil, "", Mention{}, errors.New("no live sender for deliver platform " + platform)
 	}
 	// A chat addressed at the user themselves (or the dm marker) routes as
 	// a DM and never mentions.
 	if userID != "" && (strings.EqualFold(chatID, "dm") || chatID == userID) {
-		return sender, platform + ":dm:" + userID, "", nil
+		return sender, platform + ":dm:" + userID, Mention{}, nil
 	}
 	sessionKey := platform + ":" + chatID + ":" + userID
-	mention := ""
+	var mention Mention
 	if userID != "" {
-		if platform == DeliverDiscord {
-			mention = "<@" + userID + "> "
-		} else {
-			mention = "@" + userID + " "
-		}
+		mention = Mention{Address: userID, Header: displayName(job)}
 	}
 	return sender, sessionKey, mention, nil
 }
@@ -318,7 +339,7 @@ func (d *Dispatcher) alertAutoPause(job *Job) {
 		displayName(&updated), updated.FailureStreak, strings.TrimSpace(updated.LastError))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	_ = sender.Deliver(ctx, d.Profile, sessionKey, mention+text, nil)
+	_ = deliverMentioned(ctx, sender, d.Profile, sessionKey, mention, text, nil)
 }
 
 // sortedSenderNames lists the registered cron sender gateways in stable

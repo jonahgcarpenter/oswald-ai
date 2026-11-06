@@ -561,6 +561,37 @@ func TestDispatchDMSkipsMention(t *testing.T) {
 	}
 }
 
+func TestDeliverMentionCarriesJobLabel(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	sent := make(map[string]string)
+	mentioned := make(map[string]Mention)
+	d := &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Agent: func(ctx context.Context, call AgentCall) (AgentResult, error) {
+			return AgentResult{Text: "pick body"}, nil
+		},
+		Senders:       map[string]Sender{"discord": stubSender{sent: sent, mentioned: mentioned}},
+		NewGeneration: func(ctx context.Context, profile, session string) error { return nil },
+	}
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "in 1s", now)
+	mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Name: "pick", Deliver: testDeliver()})
+	time.Sleep(1100 * time.Millisecond)
+	due := store.ClaimDue(time.Now().UTC())
+	ex, _, err := d.RunOne(context.Background(), due[0], time.Minute)
+	if err != nil || !ex.Delivered {
+		t.Fatalf("dispatch = %+v %v", ex, err)
+	}
+	got, ok := mentioned["discord:chan1:123456789"]
+	if !ok || got.Address != "123456789" || got.Header != "pick" {
+		t.Fatalf("mention = %+v (all: %+v)", got, mentioned)
+	}
+	if sent, ok := sent["discord:chan1:123456789"]; !ok || sent != "<@123456789> - pick\npick body" {
+		t.Fatalf("sent = %q", sent)
+	}
+}
+
 func TestDispatchSilentSuppresses(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)
@@ -663,6 +694,7 @@ func TestRunOneClaimContention(t *testing.T) {
 type stubSender struct {
 	sent      map[string]string
 	sentFiles map[string][]media.OutputAttachment
+	mentioned map[string]Mention
 	fail      error
 }
 
@@ -671,6 +703,20 @@ func (s stubSender) Deliver(_ context.Context, _, sessionKey, text string, attac
 		return s.fail
 	}
 	s.sent[sessionKey] = text
+	if s.sentFiles != nil && len(attachments) > 0 {
+		s.sentFiles[sessionKey] = append(s.sentFiles[sessionKey], attachments...)
+	}
+	return nil
+}
+
+func (s stubSender) DeliverMention(_ context.Context, _, sessionKey string, mention Mention, text string, attachments []media.OutputAttachment) error {
+	if s.fail != nil {
+		return s.fail
+	}
+	if s.mentioned != nil {
+		s.mentioned[sessionKey] = mention
+	}
+	s.sent[sessionKey] = "<@" + strings.TrimSpace(mention.Address) + "> - " + strings.TrimSpace(mention.Header) + "\n" + text
 	if s.sentFiles != nil && len(attachments) > 0 {
 		s.sentFiles[sessionKey] = append(s.sentFiles[sessionKey], attachments...)
 	}

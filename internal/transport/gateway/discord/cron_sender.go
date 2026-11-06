@@ -73,33 +73,9 @@ func (s cronSender) Deliver(ctx context.Context, _, sessionKey, text string, att
 	if s.gateway == nil {
 		return errors.New("discord gateway is unavailable")
 	}
-	key := strings.TrimSpace(sessionKey)
-	parts := strings.SplitN(key, ":", 3)
-	var dmUser string
-	channel := ""
-	if len(parts) == 3 && parts[0] == "discord" && parts[1] != "" {
-		if parts[1] == "dm" {
-			dmUser = strings.TrimSpace(parts[2])
-		} else {
-			channel = parts[1]
-		}
-	}
-	if dmUser != "" {
-		if remembered, ok := lookupCronChannel(key); ok {
-			channel = remembered
-		} else {
-			resolved, err := s.gateway.ensureDMChannel(dmUser)
-			if err != nil {
-				return fmt.Errorf("no live channel binding for origin session %s: %w", key, err)
-			}
-			channel = resolved
-		}
-	} else if channel == "" {
-		var ok bool
-		channel, ok = lookupCronChannel(key)
-		if !ok {
-			return errors.New("no live channel binding for origin session " + key)
-		}
+	channel, err := s.resolveChannel(sessionKey)
+	if err != nil {
+		return err
 	}
 	if strings.TrimSpace(text) != "" || len(attachments) == 0 {
 		for _, chunk := range chunkDiscordText(text) {
@@ -121,6 +97,77 @@ func (s cronSender) Deliver(ctx context.Context, _, sessionKey, text string, att
 		return err
 	}
 	return nil
+}
+
+// DeliverMention sends one message: the native mention, the job label, then
+// the body on a new line. The mention taps natively with scoped highlight,
+// so no thread is needed.
+func (s cronSender) DeliverMention(ctx context.Context, _ string, sessionKey string, mention cron.Mention, text string, attachments []media.OutputAttachment) error {
+	if s.gateway == nil {
+		return errors.New("discord gateway is unavailable")
+	}
+	channel, err := s.resolveChannel(sessionKey)
+	if err != nil {
+		return err
+	}
+	prefix := "<@" + strings.TrimSpace(mention.Address) + ">"
+	if strings.TrimSpace(mention.Header) != "" {
+		prefix += " - " + strings.TrimSpace(mention.Header)
+	}
+	content := prefix + "\n" + strings.TrimSpace(text)
+	if strings.TrimSpace(content) != "" || len(attachments) == 0 {
+		for _, chunk := range chunkDiscordText(content) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if _, err := s.gateway.sendMessage(channel, chunk, ""); err != nil {
+				return err
+			}
+		}
+	}
+	if len(attachments) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := s.gateway.sendCommandAttachment(channel, commands.Result{Attachments: attachments}, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
+// resolveChannel maps an origin session key to its Discord channel, falling
+// back to the Discord API for DMs with no remembered inbound traffic.
+func (s cronSender) resolveChannel(sessionKey string) (string, error) {
+	key := strings.TrimSpace(sessionKey)
+	parts := strings.SplitN(key, ":", 3)
+	var dmUser string
+	channel := ""
+	if len(parts) == 3 && parts[0] == "discord" && parts[1] != "" {
+		if parts[1] == "dm" {
+			dmUser = strings.TrimSpace(parts[2])
+		} else {
+			channel = parts[1]
+		}
+	}
+	if dmUser != "" {
+		if remembered, ok := lookupCronChannel(key); ok {
+			return remembered, nil
+		}
+		resolved, err := s.gateway.ensureDMChannel(dmUser)
+		if err != nil {
+			return "", fmt.Errorf("no live channel binding for origin session %s: %w", key, err)
+		}
+		return resolved, nil
+	}
+	if channel != "" {
+		return channel, nil
+	}
+	if remembered, ok := lookupCronChannel(key); ok {
+		return remembered, nil
+	}
+	return "", errors.New("no live channel binding for origin session " + key)
 }
 
 func chunkDiscordText(text string) []string {

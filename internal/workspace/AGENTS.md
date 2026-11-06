@@ -98,7 +98,7 @@ store close.
 under per-profile `scripts/` with stdout injection, delivery targets the concrete `deliver` object
 (defaulting to the creating chat). Storage is UTC; event-anchored times resolve arithmetically in
 UTC with no zone involved, wall-clock times verify through `TZ=<zone> date` (clarify first only
-when the zone is neither stated nor recalled), and every displayed instant carries its zone.
+when the zone is neither stated nor recalled), and every displayed instant carries its zone. Groupchat mentions tap: Discord sends one `<@user> - <name>` message with the body on the next line, iMessage sends a tappable `<profile> - <name>` bubble with the result threaded underneath; DMs never mention.
 
 ## Tests
 

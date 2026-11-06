@@ -35,7 +35,7 @@ func CronjobManageDefinition() llm.ToolDefinition {
 			"no_agent":         {Type: "boolean", Description: "Script is the job; stdout verbatim, empty sends nothing", Default: false},
 			"deliver_platform": {Type: "string", Description: "Delivery platform: discord (native @-mentions) or imessage (name prefix only, no notify-tap). Omit with deliver_chat_id to default to the creating chat"},
 			"deliver_chat_id":  {Type: "string", Description: "Delivery channel/chat. Omit with deliver_platform to default to the creating chat"},
-			"deliver_user_id":  {Type: "string", Description: "Transport-native user ID for groupchat mention (Discord numeric snowflake, iMessage handle); ignored in DMs. Never a display name"},
+			"deliver_user_id":  {Type: "string", Description: "Transport-native user ID for groupchat mention (Discord numeric snowflake, iMessage handle); ignored in DMs. Never a display name. Discord sends one '<@user> - <job name>' message with the body on the next line; iMessage sends a tappable '<profile> - <job name>' mention bubble with the result threaded underneath."},
 			"enabled_toolsets": {Type: "array", Description: "Builtin toolset allowlist from core,terminal,code_execution,cronjob ([] = zero builtins)", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"mcp_servers":      {Type: "array", Description: "MCP server allowlist by exact config name (omit = all profile servers; [] = no MCP; bridge tools appear only when servers are reachable)", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"repeat_times":     {Type: "integer", Description: "Run N times then auto-complete (omit = forever for recurring, once for one-shots; 0 = forever)", Minimum: float64Ptr(0)},
