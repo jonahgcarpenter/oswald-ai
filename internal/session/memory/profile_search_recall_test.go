@@ -191,7 +191,7 @@ func TestBrowseDistinctLineagesAndResetHistoryRemainsSearchable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	records, err := s.RecentSessionsExcluding(ctx, s.profile, live, 2)
+	records, err := s.RecentSessionsExcluding(ctx, s.profile, live, 2, "", "")
 	if err != nil || len(records) != 2 {
 		t.Fatalf("browse was starved by pending/live lineage: %+v err=%v", records, err)
 	}

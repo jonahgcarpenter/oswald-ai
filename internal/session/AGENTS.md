@@ -40,7 +40,11 @@ exchanges per maintenance pass, 15-minute pending timeout, passive WAL checkpoin
 
 Search is a disposable in-memory FTS5 projection over eligible rows — no new persisted index. The
 live session and its forks are excluded from discovery and browse; older lineage generations stay
-recallable, deduped to one entry per lineage root.
+recallable, deduped to one entry per lineage root. In a group turn the owner's projection widens
+to their DMs plus the live group (other groups excluded) while each peer projection is constrained
+to that group prefix; group reads merge every member slice chronologically with per-message
+`profile`/`sender`/`scope` attribution, omitting the live slice already in context. Peer DMs and
+non-member groups fail closed without revealing which sessions exist elsewhere.
 
 ## Soul and files (why two mechanisms)
 

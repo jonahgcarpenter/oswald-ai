@@ -10,20 +10,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 const (
-	defaultLimit  = 3
-	maxLimit      = 10
-	defaultWindow = 5
-	minWindow     = 1
-	maxWindow     = 20
-	maxExclude    = 20
-	readHead      = 20
-	readTail      = 10
+	discoveryDefaultLimit = 5
+	browseDefaultLimit    = 3
+	maxLimit              = 10
+	defaultWindow         = 5
+	minWindow             = 1
+	maxWindow             = 20
+	maxExclude            = 20
+	readHead              = 20
+	readTail              = 10
 )
 
 type discoveryArgs struct {
@@ -40,11 +41,13 @@ type discoveryArgs struct {
 
 // NewHandler returns the model-facing session_search handler. Each call is
 // classified into exactly one of discover, scroll, read, or browse. Peers maps
-// profile names to their stores and enables group-scoped cross-profile reads:
-// discovery fans out to peer profiles whose sessions share the live group
-// conversation, and read/scroll resolve an explicit profile argument for
-// @session:<profile>/<id> links. The map is read at request time, so a shared
-// map populated during startup is safe to pass before it is complete.
+// profile names to their stores and enables group-scoped cross-profile reads
+// without a profile argument: discovery fans out to peer profiles whose
+// sessions share the live group conversation, and a bare session_id reading a
+// group conversation merges every member slice chronologically with per-message
+// profile/sender attribution. DMs stay owner-only. The map is read at request
+// time, so a shared map populated during startup is safe to pass before it is
+// complete.
 func NewHandler(store *memory.ProfileStore, peerMaps ...map[string]*memory.ProfileStore) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	peers := map[string]*memory.ProfileStore{}
 	for _, m := range peerMaps {
@@ -78,26 +81,16 @@ func NewHandler(store *memory.ProfileStore, peerMaps ...map[string]*memory.Profi
 			return governance.Result{}, fmt.Errorf("session_search: resolve live session: %w", err)
 		}
 		sessionID, hasSession := stringArg(args, "session_id")
-		profile, hasProfile := stringArg(args, "profile")
 		anchor, hasAnchor := intArg(args, "around_message_id")
 		_, hasQuery := stringArg(args, "query")
-		if hasProfile && !hasSession {
-			return governance.Result{}, errors.New("session_search: profile requires session_id")
-		}
-		if hasProfile && hasQuery {
-			return governance.Result{}, errors.New("session_search: use either query or session_id with profile, not both")
-		}
 		if hasSession && hasAnchor {
-			return scroll(ctx, ownerStore, peers, owner, liveSessionID, profile, sessionID, anchor, intArgDefault(args, "window", defaultWindow))
+			return scroll(ctx, ownerStore, peers, owner, liveSessionID, sessionID, anchor, intArgDefault(args, "window", defaultWindow))
 		}
 		if hasSession {
 			if hasQuery {
 				return governance.Result{}, errors.New("session_search: use either query or session_id, not both")
 			}
-			return read(ctx, ownerStore, peers, owner, liveSessionID, profile, sessionID)
-		}
-		if hasProfile {
-			return governance.Result{}, errors.New("session_search: profile requires session_id")
+			return read(ctx, ownerStore, peers, owner, liveSessionID, sessionID)
 		}
 		if hasAnchor {
 			return governance.Result{}, errors.New("session_search: around_message_id requires session_id")
@@ -110,7 +103,7 @@ func NewHandler(store *memory.ProfileStore, peerMaps ...map[string]*memory.Profi
 			parsed.LiveSessionID = liveSessionID
 			return discover(ctx, ownerStore, peers, owner, parsed)
 		}
-		return browse(ctx, ownerStore, owner, liveSessionID, intArgDefault(args, "limit", defaultLimit))
+		return browse(ctx, ownerStore, owner, liveSessionID, intArgDefault(args, "limit", browseDefaultLimit))
 	}
 }
 
@@ -127,7 +120,7 @@ func liveSession(ctx context.Context, store *memory.ProfileStore, owner string) 
 func rejectUnknownFields(args map[string]interface{}) error {
 	for key := range args {
 		switch key {
-		case "query", "sort", "detail", "after", "before", "session_id", "role_filter", "profile":
+		case "query", "sort", "detail", "after", "before", "session_id", "role_filter":
 			if _, ok := args[key].(string); !ok {
 				return fmt.Errorf("session_search: %s must be a string", key)
 			}
@@ -146,9 +139,6 @@ func rejectUnknownFields(args map[string]interface{}) error {
 	if value, ok := stringArg(args, "session_id"); ok && strings.TrimSpace(value) == "" {
 		return errors.New("session_search: session_id must not be blank")
 	}
-	if value, ok := stringArg(args, "profile"); ok && strings.TrimSpace(value) == "" {
-		return errors.New("session_search: profile must not be blank")
-	}
 	if raw, exists := stringArg(args, "role_filter"); exists {
 		for _, role := range strings.Split(raw, ",") {
 			switch strings.TrimSpace(role) {
@@ -162,13 +152,13 @@ func rejectUnknownFields(args map[string]interface{}) error {
 }
 
 func parseDiscovery(args map[string]interface{}) (discoveryArgs, error) {
-	parsed := discoveryArgs{Limit: defaultLimit, Sort: "", Detail: "adaptive"}
+	parsed := discoveryArgs{Limit: discoveryDefaultLimit, Sort: "", Detail: "adaptive"}
 	parsed.Query, _ = stringArg(args, "query")
 	parsed.Query = strings.TrimSpace(parsed.Query)
 	if parsed.Query == "" {
 		return parsed, errors.New("session_search: query must not be blank")
 	}
-	parsed.Limit = intArgDefault(args, "limit", defaultLimit)
+	parsed.Limit = intArgDefault(args, "limit", discoveryDefaultLimit)
 	if parsed.Limit < 1 {
 		parsed.Limit = 1
 	}
@@ -287,22 +277,24 @@ func relativeDuration(value string) (time.Duration, bool) {
 
 func discover(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner string, parsed discoveryArgs) (governance.Result, error) {
 	hits := []discoverHit{}
-	own, err := ownerStore.DiscoverySessions(ctx, owner, memory.SearchFilter{Query: parsed.Query, Limit: parsed.Limit, Sort: parsed.Sort, After: parsed.After, Before: parsed.Before, Exclude: parsed.Exclude, Roles: parsed.Roles, LiveSessionID: parsed.LiveSessionID})
+	scopeSource, scopeGroup, inGroup := liveGroupScope(ctx, ownerStore, owner, parsed.LiveSessionID)
+	ownFilter := memory.SearchFilter{Query: parsed.Query, Limit: parsed.Limit, Sort: parsed.Sort, After: parsed.After, Before: parsed.Before, Exclude: parsed.Exclude, Roles: parsed.Roles, LiveSessionID: parsed.LiveSessionID}
+	if inGroup {
+		// Owner in a group turn sees their own DMs plus the live group.
+		ownFilter.GroupSource, ownFilter.GroupID, ownFilter.AllowDMs = scopeSource, scopeGroup, true
+	}
+	own, err := ownerStore.DiscoverySessions(ctx, owner, ownFilter)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}
 	for _, session := range own {
 		hits = append(hits, discoverHit{Profile: owner, Store: ownerStore, Session: session})
 	}
-	if scopeSource, scopeGroup, ok := liveGroupScope(ctx, ownerStore, owner, parsed.LiveSessionID); ok {
-		names := make([]string, 0, len(peers))
-		for name := range peers {
-			if name != owner {
-				names = append(names, name)
+	if inGroup {
+		for _, name := range orderedPeers(peers, owner) {
+			if name == owner {
+				continue
 			}
-		}
-		sort.Strings(names)
-		for _, name := range names {
 			peer := peers[name]
 			if peer == nil || peer.Profile() != name {
 				continue
@@ -326,22 +318,24 @@ func discover(ctx context.Context, ownerStore *memory.ProfileStore, peers map[st
 	return governance.Result{Content: response, Outcome: outcomeFor(len(hits))}, nil
 }
 
-// resolveTarget selects the store owning one read or scroll. An explicit
-// profile must name a known peer; otherwise the owner's store applies. The
-// returned profile is the validated target owner for envelope links.
-func resolveTarget(ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, profile string) (*memory.ProfileStore, string, error) {
-	target := strings.TrimSpace(profile)
-	if target == "" {
-		return ownerStore, owner, nil
+// orderedPeers lists known peer profiles with the owner first, then the rest
+// in sorted order. The owner-first order makes bare session_id resolution
+// prefer the caller's own slice when an id exists in several stores.
+func orderedPeers(peers map[string]*memory.ProfileStore, owner string) []string {
+	names := make([]string, 0, len(peers)+1)
+	seen := map[string]bool{}
+	if _, ok := peers[owner]; ok {
+		names = append(names, owner)
+		seen[owner] = true
 	}
-	if target == owner {
-		return ownerStore, owner, nil
+	rest := make([]string, 0, len(peers))
+	for name := range peers {
+		if name != owner && !seen[name] {
+			rest = append(rest, name)
+		}
 	}
-	peer := peers[target]
-	if peer == nil || peer.Profile() != target {
-		return nil, "", errors.New("session_search: unknown profile")
-	}
-	return peer, target, nil
+	sort.Strings(rest)
+	return append(names, rest...)
 }
 
 // liveGroupScope derives the group conversation (source plus channel/chat id)
@@ -372,38 +366,80 @@ func liveGroupScope(ctx context.Context, ownerStore *memory.ProfileStore, owner,
 	return source, group, true
 }
 
-// checkGroupMembership verifies a target session lives in the live group
-// conversation. DM keys and other groups fail closed without revealing which
-// sessions exist elsewhere.
-func checkGroupMembership(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, liveSessionID string, targetStore *memory.ProfileStore, target, sessionID string) error {
-	if target == owner {
-		return nil
-	}
-	scopeSource, scopeGroup, ok := liveGroupScope(ctx, ownerStore, owner, liveSessionID)
-	if !ok {
-		return errors.New("session_search: cross-profile read rejected: live conversation is not a group chat")
-	}
-	key, _, err := targetStore.SessionKeyFor(ctx, target, sessionID)
-	if err != nil {
-		return errors.New("session_search: session not found in this group")
-	}
-	source, group, parsed := memory.ParseGroupSessionKey(key)
-	if !parsed || source != scopeSource || group != scopeGroup {
-		return errors.New("session_search: session not found in this group")
-	}
-	return nil
+// sessionAnchor is one store holding a copy of a bare session_id. Group
+// conversations keep one session row per sender, so a group id resolves in
+// every member profile while a DM id resolves only in its owner.
+type sessionAnchor struct {
+	Store     *memory.ProfileStore
+	Profile   string
+	SessionID string
+	Key       string
 }
 
-func scroll(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, liveSessionID, profile, sessionID string, anchor int64, window int) (governance.Result, error) {
-	targetStore, target, err := resolveTarget(ownerStore, peers, owner, profile)
-	if err != nil {
-		return governance.Result{}, err
+// findSessionStores resolves a bare session_id across the owner and peer
+// stores, owner first. Ids are opaque to the model; the group anchor below
+// decides which matches may be read.
+func findSessionStores(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, sessionID string) []sessionAnchor {
+	stores := map[string]*memory.ProfileStore{}
+	for _, name := range orderedPeers(peers, owner) {
+		if peers[name] != nil && peers[name].Profile() == name {
+			stores[name] = peers[name]
+		}
 	}
-	if err := checkGroupMembership(ctx, ownerStore, peers, owner, liveSessionID, targetStore, target, sessionID); err != nil {
-		return governance.Result{}, err
+	if ownerStore != nil && ownerStore.Profile() == owner {
+		stores[owner] = ownerStore
 	}
-	if target == owner && liveSessionID != "" {
-		shared, err := targetStore.SharesLineage(ctx, target, liveSessionID, sessionID)
+	var matches []sessionAnchor
+	for _, name := range orderedPeers(stores, owner) {
+		store := stores[name]
+		if store == nil {
+			continue
+		}
+		key, _, err := store.SessionKeyFor(ctx, name, sessionID)
+		if err != nil || strings.TrimSpace(key) == "" {
+			continue
+		}
+		resolved := sessionID
+		if id, err := resolveStoreSession(ctx, store, name, sessionID); err == nil && id != "" {
+			resolved = id
+		}
+		matches = append(matches, sessionAnchor{Store: store, Profile: name, SessionID: resolved, Key: key})
+	}
+	return matches
+}
+
+// checkGroupRead verifies a group anchor belongs to the live group
+// conversation. DM keys and other groups fail closed without revealing which
+// sessions exist elsewhere.
+func checkGroupRead(ctx context.Context, ownerStore *memory.ProfileStore, owner, liveSessionID, key string) (source, group string, err error) {
+	source, group, parsed := memory.ParseGroupSessionKey(key)
+	if !parsed {
+		return "", "", errors.New("session_search: session not found in this group")
+	}
+	scopeSource, scopeGroup, ok := liveGroupScope(ctx, ownerStore, owner, liveSessionID)
+	if !ok || scopeSource != source || scopeGroup != group {
+		return "", "", errors.New("session_search: session not found in this group")
+	}
+	return source, group, nil
+}
+
+func scroll(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, liveSessionID, sessionID string, anchor int64, window int) (governance.Result, error) {
+	matches := findSessionStores(ctx, ownerStore, peers, owner, sessionID)
+	if len(matches) == 0 {
+		return governance.Result{}, errors.New("session_search: session not found")
+	}
+	target := matches[0]
+	if source, group, ok := parseGroupKey(target.Key); ok {
+		if _, _, err := checkGroupRead(ctx, ownerStore, owner, liveSessionID, target.Key); err != nil {
+			return governance.Result{}, err
+		}
+		return scrollGroup(ctx, ownerStore, peers, owner, liveSessionID, sessionID, source, group, target, anchor, window)
+	}
+	if target.Profile != owner {
+		return governance.Result{}, errors.New("session_search: session not found in this group")
+	}
+	if liveSessionID != "" {
+		shared, err := target.Store.SharesLineage(ctx, target.Profile, liveSessionID, target.SessionID)
 		if err != nil {
 			return governance.Result{}, fmt.Errorf("session_search: resolve session lineage: %w", err)
 		}
@@ -411,27 +447,38 @@ func scroll(ctx context.Context, ownerStore *memory.ProfileStore, peers map[stri
 			return governance.Result{}, errors.New("session_search: scroll rejected: anchor lives in the current session lineage (already in your active context)")
 		}
 	}
-	before, anchorMessage, after, err := targetStore.SessionWindow(ctx, target, sessionID, anchor, window)
+	before, anchorMessage, after, err := target.Store.SessionWindow(ctx, target.Profile, target.SessionID, anchor, window)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}
-	response, err := buildScroll(ctx, targetStore, target, target, sessionID, anchor, max(minWindow, min(window, maxWindow)), before, anchorMessage, after)
+	summary, err := target.Store.SessionSummaryFor(ctx, target.Profile, target.SessionID)
+	if err != nil {
+		return governance.Result{}, err
+	}
+	response, err := buildScroll(ctx, target.Store, target.Profile, target.Profile, senderOf(summary), scopeOf(summary), target.SessionID, anchor, max(minWindow, min(window, maxWindow)), before, anchorMessage, after)
 	if err != nil {
 		return governance.Result{}, err
 	}
 	return governance.Result{Content: response, Outcome: governance.OutcomeProductive}, nil
 }
 
-func read(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, liveSessionID, profile, sessionID string) (governance.Result, error) {
-	targetStore, target, err := resolveTarget(ownerStore, peers, owner, profile)
-	if err != nil {
-		return governance.Result{}, err
+func read(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string]*memory.ProfileStore, owner, liveSessionID, sessionID string) (governance.Result, error) {
+	matches := findSessionStores(ctx, ownerStore, peers, owner, sessionID)
+	if len(matches) == 0 {
+		return governance.Result{}, errors.New("session_search: session not found")
 	}
-	if err := checkGroupMembership(ctx, ownerStore, peers, owner, liveSessionID, targetStore, target, sessionID); err != nil {
-		return governance.Result{}, err
+	target := matches[0]
+	if source, group, ok := parseGroupKey(target.Key); ok {
+		if _, _, err := checkGroupRead(ctx, ownerStore, owner, liveSessionID, target.Key); err != nil {
+			return governance.Result{}, err
+		}
+		return readGroup(ctx, ownerStore, peers, owner, liveSessionID, sessionID, source, group)
 	}
-	if target == owner && liveSessionID != "" {
-		shared, err := targetStore.SharesLineage(ctx, target, liveSessionID, sessionID)
+	if target.Profile != owner {
+		return governance.Result{}, errors.New("session_search: session not found in this group")
+	}
+	if liveSessionID != "" {
+		shared, err := target.Store.SharesLineage(ctx, target.Profile, liveSessionID, target.SessionID)
 		if err != nil {
 			return governance.Result{}, fmt.Errorf("session_search: resolve session lineage: %w", err)
 		}
@@ -439,29 +486,39 @@ func read(ctx context.Context, ownerStore *memory.ProfileStore, peers map[string
 			return governance.Result{}, errors.New("session_search: read rejected: session is the current lineage (already in your active context)")
 		}
 	}
-	first, last, count, err := targetStore.SessionTranscript(ctx, target, sessionID, readHead, readTail)
+	first, last, count, err := target.Store.SessionTranscript(ctx, target.Profile, target.SessionID, readHead, readTail)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}
-	summary, err := targetStore.SessionSummaryFor(ctx, target, sessionID)
+	summary, err := target.Store.SessionSummaryFor(ctx, target.Profile, target.SessionID)
 	if err != nil {
 		return governance.Result{}, err
 	}
-	response, err := buildRead(target, summary, sessionID, count, first, last)
+	response, err := buildRead(target.Profile, senderOf(summary), scopeOf(summary), summary, target.SessionID, count, first, last)
 	if err != nil {
 		return governance.Result{}, err
 	}
 	return governance.Result{Content: response, Outcome: outcomeFor(count)}, nil
 }
 
-func browse(ctx context.Context, store *memory.ProfileStore, owner, liveSessionID string, limit int) (governance.Result, error) {
+// parseGroupKey splits a stored session key into its group coordinates.
+func parseGroupKey(key string) (source, group string, ok bool) {
+	return memory.ParseGroupSessionKey(key)
+}
+
+func browse(ctx context.Context, ownerStore *memory.ProfileStore, owner, liveSessionID string, limit int) (governance.Result, error) {
 	if limit < 1 {
-		limit = defaultLimit
+		limit = browseDefaultLimit
 	}
 	if limit > maxLimit {
 		limit = maxLimit
 	}
-	records, err := store.RecentSessionsExcluding(ctx, owner, liveSessionID, limit)
+	scopeSource, scopeGroup, inGroup := liveGroupScope(ctx, ownerStore, owner, liveSessionID)
+	var groupSource, groupID string
+	if inGroup {
+		groupSource, groupID = scopeSource, scopeGroup
+	}
+	records, err := ownerStore.RecentSessionsExcluding(ctx, owner, liveSessionID, limit, groupSource, groupID)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}

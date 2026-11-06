@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
 
 func newSearchFixture(t *testing.T) (*memory.ProfileStore, context.Context) {
@@ -105,6 +105,43 @@ func TestScrollReadBrowseShapes(t *testing.T) {
 	browse := run(t, store, ctx, map[string]interface{}{})
 	if browse["mode"] != "browse" || browse["count"].(float64) < 1 {
 		t.Fatalf("browse failed: %+v", browse)
+	}
+}
+
+func TestDMReadCarriesAttribution(t *testing.T) {
+	store, ctx := newSearchFixture(t)
+	generation := resolveGeneration(t, store)
+	deliver(t, store, generation, "discord:dm:123", "hello dm", "answer")
+	id := sessionIDForKey(t, store, "discord:dm:123")
+
+	result, err := NewHandler(store)(ctx, map[string]interface{}{"session_id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read struct {
+		Profile  string `json:"profile"`
+		Messages []struct {
+			Profile string `json:"profile"`
+			Sender  string `json:"sender"`
+			Scope   string `json:"scope"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &read); err != nil {
+		t.Fatal(err)
+	}
+	if read.Profile != "alice" || len(read.Messages) == 0 {
+		t.Fatalf("dm read missing profile envelope: %s", result.Content)
+	}
+	for _, message := range read.Messages {
+		if message.Profile != "alice" || message.Sender == "" || message.Scope != "dm" {
+			t.Fatalf("dm message missing attribution: %+v", message)
+		}
+	}
+
+	discovered := run(t, store, ctx, map[string]interface{}{"query": "hello"})
+	top := discovered["results"].([]interface{})[0].(map[string]interface{})
+	if top["profile"] != "alice" || top["scope"] != "dm" {
+		t.Fatalf("discovery missing attribution: %+v", top)
 	}
 }
 
