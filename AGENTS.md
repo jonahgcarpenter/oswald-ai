@@ -67,7 +67,9 @@ overrides a different installed toolchain.
 
 Tests use synthetic principals, temporary approved-schema databases/files, fake model
 clients/transports, local HTTP handlers, explicit clocks, and joined goroutines. They must not need
-secrets or live services. The release workflow runs tagged tests before publishing its container; it
+secrets or live services. All fixture data must be obviously synthetic (555 numbers,
+example.com, Alice Person/testuser-style names) — never real handles, numbers, chat names,
+or profile details. The release workflow runs tagged tests before publishing its container; it
 does not enforce every race/vet/formatting check on PRs.
 
 ## Project Structure

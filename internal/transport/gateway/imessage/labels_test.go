@@ -13,7 +13,7 @@ func TestIMessageChatLabelDMAndGroup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/chat/chat-group":
-			_, _ = w.Write([]byte(`{"data":{"displayName":"Family Weekend"}}`))
+			_, _ = w.Write([]byte(`{"data":{"displayName":"Synthetic Group"}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -25,7 +25,7 @@ func TestIMessageChatLabelDMAndGroup(t *testing.T) {
 	if got := g.chatLabel(messageChat{GUID: "chat-direct", Style: chatStyleDirect}, "Alice Person", false, log); got != `"DM with Alice Person"` {
 		t.Fatalf("dm label = %q", got)
 	}
-	if got := g.chatLabel(messageChat{GUID: "chat-group", Style: chatStyleGroup}, "Alice Person", true, log); got != `group chat "Family Weekend"` {
+	if got := g.chatLabel(messageChat{GUID: "chat-group", Style: chatStyleGroup}, "Alice Person", true, log); got != `group chat "Synthetic Group"` {
 		t.Fatalf("group label = %q", got)
 	}
 	if got := g.chatLabel(messageChat{GUID: "missing", Style: chatStyleGroup}, "Alice Person", true, log); got != `"group chat"` {
