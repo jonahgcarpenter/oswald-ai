@@ -341,6 +341,33 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	}
 }
 
+func TestCronjobManageZonedTimestamps(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	store := cron.NewStore(root)
+	ctx := requestctx.WithMetadata(testContext("req-cron-tz"), requestctx.Metadata{RequestID: "req-cron-tz", SessionID: "discord:chan1:987654321"})
+	manage := NewCronjobManageHandler(ws, store)
+	// Far-future one-shot: asserts the zoned next_run_at rendering (the Nov
+	// 2026 wall-clock regression) without depending on the test clock.
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "2027-06-01T00:15:00Z", "prompt": "hi"})
+	if err != nil {
+		t.Fatalf("create = %v", err)
+	}
+	if !strings.Contains(created.Content, "next_run_at: 2027-06-01T00:15:00Z (") || !strings.Contains(created.Content, "UTC") {
+		t.Fatalf("create missing zoned next_run_at: %q", created.Content)
+	}
+	listed, err := manage(ctx, map[string]interface{}{"action": "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed.Content, "next=2027-06-01T00:15:00Z (") || !strings.Contains(listed.Content, "UTC") {
+		t.Fatalf("list missing zoned next: %q", listed.Content)
+	}
+}
+
 func TestCronjobManageNameAndDeliver(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
 )
 
 const (
@@ -44,6 +45,7 @@ type discoverResultJSON struct {
 	Scope          string        `json:"scope,omitempty"`
 	Group          string        `json:"group,omitempty"`
 	When           string        `json:"when"`
+	Opened         string        `json:"opened,omitempty"`
 	Source         string        `json:"source"`
 	Model          string        `json:"model,omitempty"`
 	Title          string        `json:"title,omitempty"`
@@ -147,12 +149,11 @@ func sessionLink(profile, id string) string { return "@session:" + profile + "/"
 // discoverLink uses the owner profile; session ids are opaque to the model.
 func discoverLink(profile, id string) string { return sessionLink(profile, id) }
 
-// formatWhen renders a message time as a human-readable UTC label.
+// formatWhen renders an instant for model consumption in the install's local
+// zone with an explicit suffix. Storage stays UTC; the suffix keeps the
+// label from reading as another zone's wall clock.
 func formatWhen(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format("January 2, 2006 at 03:04 PM")
+	return output.FormatModelTime(t)
 }
 
 func toEpoch(t time.Time) float64 {
@@ -189,7 +190,7 @@ func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner stri
 	hydrate := top || parsed.Detail == "full"
 	result := discoverResultJSON{
 		SessionID: session.SessionID, Profile: owner, Sender: session.Sender, Scope: session.Scope, Group: session.ChatName,
-		When: formatWhen(session.StartedAt), Source: session.Source,
+		When: formatWhen(session.StartedAt), Opened: formatWhen(session.StartedAt), Source: session.Source,
 		Model: session.Model, Title: session.Title, MatchedRole: session.MatchedRole,
 		MatchMessageID: session.MatchMessageID, Snippet: session.Snippet,
 		Detail: "compact", Link: discoverLink(owner, session.SessionID),
@@ -198,6 +199,11 @@ func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner stri
 	before, anchor, after, err := store.SessionWindow(ctx, owner, session.SessionID, session.MatchMessageID, defaultWindow)
 	if err != nil {
 		return result, err
+	}
+	// Headline the match instant, not the session's opening: sliding-TTL
+	// sessions stay alive for days, so started_at misstates recency.
+	if anchor != nil {
+		result.When = formatWhen(anchor.Timestamp)
 	}
 	if !hydrate {
 		if anchor != nil {

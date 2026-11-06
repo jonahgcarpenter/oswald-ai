@@ -96,7 +96,9 @@ store close.
 `cronjob_manage` owns schedules end to end (`create|list|update|pause|resume|remove|run`), rejects
 `model/provider/base_url` overrides, and runs with zero-tool `enabled_toolsets:[]`. Scripts resolve
 under per-profile `scripts/` with stdout injection, delivery targets the concrete `deliver` object
-(defaulting to the creating chat), and UTC schedules are converted by the model before scheduling.
+(defaulting to the creating chat). Storage is UTC; event-anchored times resolve arithmetically in
+UTC with no zone involved, wall-clock times verify through `TZ=<zone> date` (clarify first only
+when the zone is neither stated nor recalled), and every displayed instant carries its zone.
 
 ## Tests
 

@@ -44,7 +44,9 @@ recallable, deduped to one entry per lineage root. In a group turn the owner's p
 to their DMs plus the live group (other groups excluded) while each peer projection is constrained
 to that group prefix; group reads merge every member slice chronologically with per-message
 `profile`/`sender`/`scope` attribution, omitting the live slice already in context. Peer DMs and
-non-member groups fail closed without revealing which sessions exist elsewhere.
+non-member groups fail closed without revealing which sessions exist elsewhere. Model-facing times
+render in the install's zone with an explicit suffix (UTC storage never changes); discovery
+headlines use the match instant with the session opening kept secondary.
 
 ## Soul and files (why two mechanisms)
 

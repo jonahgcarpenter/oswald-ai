@@ -17,17 +17,18 @@ import (
 
 // CronjobManageDefinition returns the scheduler contract. Model/provider
 // overrides are intentionally absent: job identity is user-owned and the
-// agent must not set it. Schedules are UTC wall-clock: the model converts
-// local intent before scheduling.
+// agent must not set it. Schedules are stored as UTC wall-clock instants;
+// the model resolves event-anchored times arithmetically in UTC and verifies
+// wall-clock conversions with the terminal before scheduling.
 func CronjobManageDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        CronjobManageName,
-		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m); stored times are UTC. If the request names a wall-clock time without an explicit zone, confirm the user's location/timezone first — ask, don't guess. Durations need no confirmation. Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script (a bare name under the profile scripts/ directory) for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing). Jobs run agent turns on a schedule and deliver results to the concrete deliver target. Operate by job_id or unique name; ambiguous names error instead of guessing.",
+		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m); stored times are UTC. When the request ties to a real-world instant (kickoff, tipoff, market open), resolve that instant in UTC and offset arithmetically — no timezone involved. For a named wall-clock time, use the stated zone, or the recalled zone when the user named none before; when the zone is neither stated nor recalled, ask via the clarify tool first — ask, don't guess. Before create/update with a wall-clock-derived schedule, verify with the terminal (TZ=<zone> date -d '<local time>' '+%Y-%m-%dT%H:%M:%SZ') and use its output verbatim; never hand-add offsets. After create/update, convert next_run_at back (TZ=<zone> date -d '<utc>') and confirm the local time to the user. Durations need no confirmation. Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script (a bare name under the profile scripts/ directory) for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing). Jobs run agent turns on a schedule and deliver results to the concrete deliver target. Operate by job_id or unique name; ambiguous names error instead of guessing.",
 		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
 			"action":           {Type: "string", Description: "create|list|update|pause|resume|remove|run"},
 			"job_id":           {Type: "string", Description: "Job ID or unique name for update/pause/resume/remove/run"},
 			"name":             {Type: "string", Description: "Human job name for create/update"},
-			"schedule":         {Type: "string", Description: "30m, every 2h, every monday 9am, 0 9 * * *, RFC3339 one-shot, or in 30m. Wall-clock forms are stored as UTC — confirm the zone with the user when unstated; in-phrases and durations need no zone"},
+			"schedule":         {Type: "string", Description: "30m, every 2h, every monday 9am, 0 9 * * *, RFC3339 one-shot, or in 30m. Wall-clock forms are stored as UTC — event-anchored times need no zone (offset in UTC); a stated or recalled zone needs no question, only terminal verification; ask via clarify only when the zone is neither stated nor recalled; in-phrases and durations need no zone"},
 			"prompt":           {Type: "string", Description: "Self-contained prompt; the final response is delivered and cannot ask questions. Omit when no_agent is true"},
 			"skills":           {Type: "array", Description: "Skill names available to the run", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"script":           {Type: "string", Description: "Script name under the profile scripts/ directory; stdout is injected (no_agent=true runs it as the job)"},
@@ -96,7 +97,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 				if job.NextRunAt != nil && strings.TrimSpace(*job.NextRunAt) != "" {
 					next = strings.TrimSpace(*job.NextRunAt)
 				}
-				fmt.Fprintf(&sb, "%s %s %s state=%s next=%s mcp=%s status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule.Display), job.State, next, mcpDisplay(job.MCPServers), job.LastStatus)
+				fmt.Fprintf(&sb, "%s %s %s state=%s next=%s mcp=%s status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule.Display), job.State, outputpkg.FormatModelTimestamp(next), mcpDisplay(job.MCPServers), job.LastStatus)
 			}
 			return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
 		case "create":
@@ -117,7 +118,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 			if job.NextRunAt != nil {
 				next = *job.NextRunAt
 			}
-			return governance.Result{Content: fmt.Sprintf("job_id: %s\nnext_run_at: %s", job.ID, next), Outcome: governance.OutcomeProductive}, nil
+			return governance.Result{Content: fmt.Sprintf("job_id: %s\nnext_run_at: %s", job.ID, outputpkg.FormatModelTimestamp(next)), Outcome: governance.OutcomeProductive}, nil
 		case "update":
 			id, _ := stringArg(args, "job_id")
 			updated, err := store.Mutate(strings.TrimSpace(id), func(job *cron.Job) error {
@@ -130,7 +131,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 			if updated.NextRunAt != nil {
 				next = *updated.NextRunAt
 			}
-			return governance.Result{Content: fmt.Sprintf("job_id: %s\nnext_run_at: %s", updated.ID, next), Outcome: governance.OutcomeProductive}, nil
+			return governance.Result{Content: fmt.Sprintf("job_id: %s\nnext_run_at: %s", updated.ID, outputpkg.FormatModelTimestamp(next)), Outcome: governance.OutcomeProductive}, nil
 		case "pause":
 			id, _ := stringArg(args, "job_id")
 			reason, _ := stringArg(args, "paused_reason")

@@ -145,6 +145,38 @@ func TestDMReadCarriesAttribution(t *testing.T) {
 	}
 }
 
+func TestDiscoverWhenUsesMatchInstant(t *testing.T) {
+	store, ctx := newSearchFixture(t)
+	generation := resolveGeneration(t, store)
+	deliver(t, store, generation, "discord:dm:123", "zoned needle here", "answer")
+	id := sessionIDForKey(t, store, "discord:dm:123")
+
+	discovered := run(t, store, ctx, map[string]interface{}{"query": "needle"})
+	top := discovered["results"].([]interface{})[0].(map[string]interface{})
+	matchID := int64(top["match_message_id"].(float64))
+
+	summary, err := store.SessionSummaryFor(ctx, "alice", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Slide the session opening 72h back: the headline must follow the
+	// match, keeping the opening only as a secondary label.
+	summary.StartedAt = time.Now().Add(-72 * time.Hour).UTC()
+	summary.MatchMessageID = matchID
+	summary.MatchedRole = "user"
+	summary.Snippet = "needle"
+	result, err := hydrateDiscover(ctx, store, "alice", discoveryArgs{Query: "needle", Limit: 3, Detail: "full"}, *summary, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.When, "UTC") || !strings.Contains(result.Opened, "UTC") {
+		t.Fatalf("timestamps missing zone: when=%q opened=%q", result.When, result.Opened)
+	}
+	if result.When == result.Opened {
+		t.Fatalf("headline follows session start instead of match: %q", result.When)
+	}
+}
+
 func TestUnknownArgumentAndForeignProfileRejected(t *testing.T) {
 	store, ctx := newSearchFixture(t)
 	if _, err := NewHandler(store)(ctx, map[string]interface{}{"bogus": "x"}); err == nil {
