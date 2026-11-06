@@ -409,7 +409,7 @@ func normalizeImageGenerateArgs(args map[string]interface{}) interface{} {
 // identical reads collapse, while distinct queries remain distinct.
 func normalizeSessionSearchArgs(args map[string]interface{}) interface{} {
 	normalized := map[string]interface{}{}
-	for _, key := range []string{"query", "session_id", "profile", "sort", "detail", "after", "before", "role_filter"} {
+	for _, key := range []string{"query", "session_id", "sort", "detail", "after", "before", "role_filter"} {
 		if value, ok := args[key].(string); ok {
 			normalized[key] = strings.Join(strings.Fields(value), " ")
 		}

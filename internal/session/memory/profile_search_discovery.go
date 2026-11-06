@@ -108,8 +108,15 @@ LEFT JOIN state_meta v ON m.role='assistant' AND v.key=('oswald:v1:turn:'||m.ses
 WHERE ` + searchEligible + ` AND s.source IN ('discord','imessage')`
 	args := []any{owner}
 	if filter.GroupSource != "" && filter.GroupID != "" {
-		query += ` AND s.session_key LIKE ? ESCAPE '\'`
-		args = append(args, escapeLikePrefix(filter.GroupSource)+":"+escapeLikePrefix(filter.GroupID)+":%")
+		if filter.AllowDMs {
+			// Owner in a group turn: their own DMs plus the live group.
+			// Other groups stay excluded.
+			query += ` AND (s.session_key LIKE '%:dm:%' ESCAPE '\' OR s.session_key LIKE ? ESCAPE '\')`
+			args = append(args, escapeLikePrefix(filter.GroupSource)+":"+escapeLikePrefix(filter.GroupID)+":%")
+		} else {
+			query += ` AND s.session_key LIKE ? ESCAPE '\'`
+			args = append(args, escapeLikePrefix(filter.GroupSource)+":"+escapeLikePrefix(filter.GroupID)+":%")
+		}
 	}
 	if filter.After != nil {
 		query += " AND s.started_at>=?"

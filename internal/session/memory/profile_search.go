@@ -9,6 +9,10 @@ import (
 )
 
 // SearchSession is one deduplicated session lineage returned by discovery.
+// Sender names the human owner of the slice (session display name, falling
+// back to the session key sender segment). Scope is "dm" for direct
+// conversations or "group:<chat>" for group conversations. ChatName is the
+// untrusted plain conversation name from the session origin.
 type SearchSession struct {
 	SessionID      string
 	Source         string
@@ -20,6 +24,9 @@ type SearchSession struct {
 	MatchMessageID int64
 	MatchedRole    string
 	Snippet        string
+	Sender         string
+	Scope          string
+	ChatName       string
 }
 
 // SearchMessage is one stored message rendered in a window or transcript.
@@ -35,6 +42,7 @@ type SearchMessage struct {
 }
 
 // SessionSummaryRecord describes one stored session for browse results.
+// Sender, Scope, and ChatName carry the same attribution as SearchSession.
 type SessionSummaryRecord struct {
 	SessionID    string
 	Source       string
@@ -44,6 +52,9 @@ type SessionSummaryRecord struct {
 	LastActive   time.Time
 	MessageCount int
 	Preview      string
+	Sender       string
+	Scope        string
+	ChatName     string
 }
 
 const (
@@ -75,6 +86,10 @@ type SearchFilter struct {
 	// together; when empty, no group constraint applies.
 	GroupSource string
 	GroupID     string
+	// AllowDMs widens a group constraint to also match direct conversations.
+	// The owner in a group turn sees their own DMs plus the live group;
+	// peer stores always use the group-only form.
+	AllowDMs bool
 }
 
 // ParseGroupSessionKey splits a group conversation session key of the form
@@ -184,6 +199,27 @@ func (s *ProfileStore) lineageSubtree(ctx context.Context, owner, live string) (
 	return subtree, nil
 }
 
+// HidesLive reports whether id is the live session or descended from it.
+// Older generations predate the live conversation and stay visible; only the
+// live slice and its forks hide, since that slice is already in context.
+func (s *ProfileStore) HidesLive(ctx context.Context, owner, live, id string) (bool, error) {
+	if owner != s.profile {
+		return false, errors.New("invalid profile search scope")
+	}
+	if strings.TrimSpace(live) == "" {
+		return false, nil
+	}
+	subtree, err := s.lineageSubtree(ctx, owner, live)
+	if err != nil {
+		return false, err
+	}
+	resolved, err := s.resolveSearchSession(ctx, owner, id)
+	if err != nil || resolved == "" {
+		return false, err
+	}
+	return subtree[resolved], nil
+}
+
 // excludedLineage expands inspected session ids into their full lineage roots.
 func (s *ProfileStore) excludedLineage(ctx context.Context, owner string, ids []string) (map[string]bool, error) {
 	excluded := map[string]bool{}
@@ -240,8 +276,8 @@ func (s *ProfileStore) lineageRoot(ctx context.Context, owner, id string) (strin
 func (s *ProfileStore) sessionSummary(ctx context.Context, owner, id string) (*SearchSession, error) {
 	var summary SearchSession
 	var started, last sql.NullFloat64
-	var title, model sql.NullString
-	err := s.db.SQL().QueryRowContext(ctx, `SELECT s.id,s.source,COALESCE(s.model,''),COALESCE(s.title,''),s.started_at,COALESCE(s.last_activity_at,s.started_at),(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id) FROM sessions s WHERE s.id=? AND s.profile_name=?`, id, owner).Scan(&summary.SessionID, &summary.Source, &model, &title, &started, &last, &summary.MessageCount)
+	var title, model, displayName, sessionKey, chatName sql.NullString
+	err := s.db.SQL().QueryRowContext(ctx, `SELECT s.id,s.source,COALESCE(s.model,''),COALESCE(s.title,''),s.started_at,COALESCE(s.last_activity_at,s.started_at),(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id),COALESCE(s.display_name,''),COALESCE(s.session_key,''),COALESCE(json_extract(s.origin_json,'$.chat_name'),'') FROM sessions s WHERE s.id=? AND s.profile_name=?`, id, owner).Scan(&summary.SessionID, &summary.Source, &model, &title, &started, &last, &summary.MessageCount, &displayName, &sessionKey, &chatName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -252,7 +288,33 @@ func (s *ProfileStore) sessionSummary(ctx context.Context, owner, id string) (*S
 	summary.Title = title.String
 	summary.StartedAt = secondsToTime(started.Float64)
 	summary.LastActive = secondsToTime(last.Float64)
+	summary.Sender, summary.Scope = senderScope(displayName.String, sessionKey.String)
+	summary.ChatName = chatName.String
 	return &summary, nil
+}
+
+// senderScope derives model-facing attribution from a session row. Sender
+// prefers the stored sender display name and falls back to the session key
+// sender segment. Scope is "dm" for direct conversations, "group:<chat>" for
+// group conversations, and "" when the key carries no conversation shape.
+func senderScope(displayName, sessionKey string) (sender, scope string) {
+	if source, group, ok := ParseGroupSessionKey(sessionKey); ok {
+		scope = "group:" + source + ":" + group
+		sender = strings.TrimSpace(displayName)
+		if sender == "" {
+			parts := strings.Split(sessionKey, ":")
+			sender = parts[len(parts)-1]
+		}
+		return sender, scope
+	}
+	sender = strings.TrimSpace(displayName)
+	if sender != "" {
+		return sender, "dm"
+	}
+	if parts := strings.Split(sessionKey, ":"); len(parts) == 3 && parts[1] == "dm" && parts[2] != "" {
+		return parts[2], "dm"
+	}
+	return "", "dm"
 }
 
 // SessionWindow returns an anchored slice of stored messages around anchorID.
@@ -435,10 +497,10 @@ func (s *ProfileStore) transcriptChunk(ctx context.Context, owner, sessionID str
 
 // RecentSessions returns the most recently active stored sessions.
 func (s *ProfileStore) RecentSessions(ctx context.Context, owner string, limit int) ([]SessionSummaryRecord, error) {
-	return s.recentSessions(ctx, owner, "", limit)
+	return s.recentSessions(ctx, owner, "", limit, "", "")
 }
 
-func (s *ProfileStore) recentSessions(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
+func (s *ProfileStore) recentSessions(ctx context.Context, owner, liveSessionID string, limit int, groupSource, groupID string) ([]SessionSummaryRecord, error) {
 	if owner != s.profile {
 		return nil, errors.New("invalid profile search scope")
 	}
@@ -455,14 +517,24 @@ func (s *ProfileStore) recentSessions(ctx context.Context, owner, liveSessionID 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.SQL().QueryContext(ctx, `
+	query := `
 SELECT s.id, s.source, COALESCE(s.model,''), COALESCE(s.title,''),
        s.started_at, COALESCE(s.last_activity_at, s.started_at), (SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id),
-       COALESCE((SELECT m.content FROM messages m WHERE m.session_id=s.id ORDER BY m.id LIMIT 1),'')
+       COALESCE((SELECT m.content FROM messages m WHERE m.session_id=s.id ORDER BY m.id LIMIT 1),''),
+       COALESCE(s.display_name,''), COALESCE(s.session_key,''), COALESCE(json_extract(s.origin_json,'$.chat_name'),'')
 FROM sessions s
 WHERE s.profile_name=? AND s.source IN ('discord','imessage')
-AND EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id)
-ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC,s.id`, owner)
+AND EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id)`
+	args := []any{owner}
+	if groupSource != "" && groupID != "" {
+		// Group turn: the owner's DMs plus the live group. Peer DMs and
+		// other groups never surface here; peers are fanned out separately.
+		query += ` AND (s.session_key LIKE '%:dm:%' ESCAPE '\' OR s.session_key LIKE ? ESCAPE '\')`
+		args = append(args, escapeLikePrefix(groupSource)+":"+escapeLikePrefix(groupID)+":%")
+	}
+	query += `
+ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC,s.id`
+	rows, err := s.db.SQL().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -471,12 +543,15 @@ ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC,s.id`, owner)
 	for rows.Next() {
 		var record SessionSummaryRecord
 		var started, last float64
-		if err := rows.Scan(&record.SessionID, &record.Source, &record.Model, &record.Title, &started, &last, &record.MessageCount, &record.Preview); err != nil {
+		var displayName, sessionKey, chatName string
+		if err := rows.Scan(&record.SessionID, &record.Source, &record.Model, &record.Title, &started, &last, &record.MessageCount, &record.Preview, &displayName, &sessionKey, &chatName); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		record.StartedAt = secondsToTime(started)
 		record.LastActive = secondsToTime(last)
+		record.Sender, record.Scope = senderScope(displayName, sessionKey)
+		record.ChatName = chatName
 		root := roots[record.SessionID]
 		if root == "" || seen[root] || subtree[record.SessionID] {
 			continue
@@ -590,7 +665,91 @@ func (s *ProfileStore) SharesLineage(ctx context.Context, owner, left, right str
 
 // RecentSessionsExcluding returns recent stored sessions with the live
 // conversation and its forks omitted. Lineage mates dedupe to one entry per
-// lineage root.
-func (s *ProfileStore) RecentSessionsExcluding(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
-	return s.recentSessions(ctx, owner, liveSessionID, limit)
+// lineage root. When groupSource and groupID name the live group conversation,
+// the owner's scope narrows to their DMs plus that group.
+func (s *ProfileStore) RecentSessionsExcluding(ctx context.Context, owner, liveSessionID string, limit int, groupSource, groupID string) ([]SessionSummaryRecord, error) {
+	return s.recentSessions(ctx, owner, liveSessionID, limit, groupSource, groupID)
+}
+
+// GroupMember is one stored session row participating in a group
+// conversation. Sessions stay per-sender; the group view merges them.
+type GroupMember struct {
+	SessionID string
+	Sender    string
+	Scope     string
+	ChatName  string
+}
+
+// GroupMemberSessions lists stored sessions in one group conversation that
+// hold messages, oldest first. Empty sessions are omitted: they carry no
+// shared knowledge.
+func (s *ProfileStore) GroupMemberSessions(ctx context.Context, owner, source, groupID string) ([]GroupMember, error) {
+	if owner != s.profile {
+		return nil, errors.New("invalid profile search scope")
+	}
+	if source != "discord" && source != "imessage" {
+		return nil, errors.New("invalid group scope")
+	}
+	if strings.TrimSpace(groupID) == "" || groupID == "dm" {
+		return nil, errors.New("invalid group scope")
+	}
+	rows, err := s.db.SQL().QueryContext(ctx, `SELECT s.id,COALESCE(s.display_name,''),COALESCE(s.session_key,''),COALESCE(json_extract(s.origin_json,'$.chat_name'),'') FROM sessions s WHERE s.profile_name=? AND s.session_key LIKE ? ESCAPE '\' AND EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id) ORDER BY COALESCE(s.last_activity_at,s.started_at),s.id`, owner, escapeLikePrefix(source)+":"+escapeLikePrefix(groupID)+":%")
+	if err != nil {
+		return nil, err
+	}
+	var members []GroupMember
+	for rows.Next() {
+		var member GroupMember
+		var displayName, sessionKey string
+		if err := rows.Scan(&member.SessionID, &displayName, &sessionKey, &member.ChatName); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		member.Sender, member.Scope = senderScope(displayName, sessionKey)
+		members = append(members, member)
+	}
+	iterationErr := rows.Err()
+	rows.Close()
+	if iterationErr != nil {
+		return nil, iterationErr
+	}
+	return members, nil
+}
+
+// maxGroupMergeMessages bounds one member slice of a merged group view.
+const maxGroupMergeMessages = 2000
+
+// SessionAllMessages returns every stored message of one session in id order,
+// capped at maxGroupMergeMessages. Group merging sorts member slices by
+// timestamp; the envelope budget truncates the rendered result.
+func (s *ProfileStore) SessionAllMessages(ctx context.Context, owner, sessionID string) ([]SearchMessage, error) {
+	if owner != s.profile {
+		return nil, errors.New("invalid profile search scope")
+	}
+	id, err := s.resolveSearchSession(ctx, owner, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, errors.New("session not found in this profile")
+	}
+	rows, err := s.db.SQL().QueryContext(ctx, `SELECT `+searchMessageColumns+searchMessageJoin+`WHERE m.session_id=? AND `+searchEligible+` ORDER BY m.id ASC LIMIT ?`, id, owner, maxGroupMergeMessages)
+	if err != nil {
+		return nil, err
+	}
+	var messages []SearchMessage
+	for rows.Next() {
+		message, err := scanSearchMessage(rows.Scan)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	iterationErr := rows.Err()
+	rows.Close()
+	if iterationErr != nil {
+		return nil, iterationErr
+	}
+	return messages, nil
 }

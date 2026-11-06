@@ -11,7 +11,7 @@ const Name = "session_search"
 func Definition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        Name,
-		Description: "Recall past conversations: search or read old Oswald sessions (FTS5), or scroll inside one. Four shapes, picked by args: `query` = discovery (top-N matching sessions, top result fully hydrated); `session_id` + `around_message_id` = scroll (window of messages around an anchor); `session_id` alone = read a whole session — how you resolve an `@session:<profile>/<id>` link (split on '/' into profile + id); no args = browse recent sessions. Results are actual DB messages, no LLM. Searches conversation history ONLY — when the user gave a direct source (URL, file, contact, live system), inspect that first; never conclude 'not found' from history alone. Use for questions about past conversations: 'what did we do about X', 'where did we leave Y'. When referring the user to a session, write its `link` value verbatim inline (it renders as a titled link).",
+		Description: "Recall past conversations: search or read old Oswald sessions (FTS5), or scroll inside one. Four shapes, picked by args: `query` = discovery (top-N matching sessions, top result fully hydrated); `session_id` + `around_message_id` = scroll (window of messages around an anchor); `session_id` alone = read a whole session — pass the id segment of an `@session:<profile>/<id>` link (the profile segment is not an argument); no args = browse recent sessions. Group conversations merge every member slice chronologically into one view with per-message profile/sender attribution — no profile argument needed. Your DMs stay private to you: in a group turn you see your DMs plus the live group, never other users' DMs or other groups. Results are actual DB messages, no LLM. Searches conversation history ONLY — when the user gave a direct source (URL, file, contact, live system), inspect that first; never conclude 'not found' from history alone. Use for questions about past conversations: 'what did we do about X', 'where did we leave Y'. When referring the user to a session, write its `link` value verbatim inline (it renders as a titled link).",
 		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
 			"query": {
 				Type:        "string",
@@ -19,8 +19,8 @@ func Definition() llm.ToolDefinition {
 			},
 			"limit": {
 				Type:        "integer",
-				Description: "Discovery shape only. Max sessions to return (default 3, max 10). Bump to 5–10 when the topic likely spans several sessions and you want to pick the right one to scroll into.",
-				Default:     3,
+				Description: "Discovery shape only. Max sessions to return (default 5, max 10). Bump to 5–10 when the topic likely spans several sessions and you want to pick the right one to scroll into.",
+				Default:     5,
 			},
 			"sort": {
 				Type:        "string",
@@ -48,11 +48,11 @@ func Definition() llm.ToolDefinition {
 			},
 			"session_id": {
 				Type:        "string",
-				Description: "Scroll shape. Session to read inside. Use the session_id returned from a prior discovery call. Must be paired with around_message_id.",
+				Description: "Read shape. Session to read inside: pass the id segment of an `@session:<profile>/<id>` link. A group id merges every member slice chronologically (per-message profile/sender attribution); a DM id reads your slice only. Pair with around_message_id to scroll.",
 			},
 			"around_message_id": {
 				Type:        "integer",
-				Description: "Scroll shape. Message id to center the window on — use match_message_id from a discovery result, or any id from a prior window.",
+				Description: "Scroll shape. Message id to center the window on — use match_message_id from a discovery result, or any id from a prior window. The anchor names a message in the addressed slice; group neighbors merge in by timestamp.",
 			},
 			"window": {
 				Type:        "integer",
@@ -62,10 +62,6 @@ func Definition() llm.ToolDefinition {
 			"role_filter": {
 				Type:        "string",
 				Description: "Optional. Comma-separated roles to include. Discovery defaults to 'user,assistant' (tool output is usually noise). Pass 'user,assistant,tool' to include tool output (debugging tool behaviour) or 'tool' to search tool output only.",
-			},
-			"profile": {
-				Type:        "string",
-				Description: "Optional. Read sessions from another Oswald profile's database (read-only). Use when resolving an `@session:<profile>/<id>` link: pass the profile segment here with session_id as the id segment. Omit to use the current profile.",
 			},
 		}},
 	}

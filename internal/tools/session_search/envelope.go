@@ -21,6 +21,9 @@ const (
 
 type messageJSON struct {
 	ID                   int64               `json:"id"`
+	Profile              string              `json:"profile,omitempty"`
+	Sender               string              `json:"sender,omitempty"`
+	Scope                string              `json:"scope,omitempty"`
 	Role                 string              `json:"role"`
 	Content              string              `json:"content"`
 	ToolName             string              `json:"tool_name,omitempty"`
@@ -37,6 +40,9 @@ type messageJSON struct {
 type discoverResultJSON struct {
 	SessionID      string        `json:"session_id"`
 	Profile        string        `json:"profile"`
+	Sender         string        `json:"sender,omitempty"`
+	Scope          string        `json:"scope,omitempty"`
+	Group          string        `json:"group,omitempty"`
 	When           string        `json:"when"`
 	Source         string        `json:"source"`
 	Model          string        `json:"model,omitempty"`
@@ -68,6 +74,9 @@ type discoverEnvelope struct {
 
 type browseResultJSON struct {
 	SessionID    string  `json:"session_id"`
+	Profile      string  `json:"profile,omitempty"`
+	Sender       string  `json:"sender,omitempty"`
+	Scope        string  `json:"scope,omitempty"`
 	Link         string  `json:"link"`
 	Title        string  `json:"title,omitempty"`
 	Source       string  `json:"source"`
@@ -85,11 +94,21 @@ type browseEnvelope struct {
 	Message string             `json:"message"`
 }
 
+type memberJSON struct {
+	Profile      string `json:"profile"`
+	Sender       string `json:"sender,omitempty"`
+	SessionID    string `json:"session_id"`
+	Link         string `json:"link"`
+	MessageCount int    `json:"message_count"`
+}
+
 type readEnvelope struct {
 	Success      bool            `json:"success"`
 	Mode         string          `json:"mode"`
 	SessionID    string          `json:"session_id"`
 	Profile      string          `json:"profile"`
+	Group        string          `json:"group,omitempty"`
+	Members      []memberJSON    `json:"members,omitempty"`
 	Link         string          `json:"link"`
 	SessionMeta  sessionMetaJSON `json:"session_meta"`
 	MessageCount int             `json:"message_count"`
@@ -110,6 +129,9 @@ type scrollEnvelope struct {
 	Mode            string        `json:"mode"`
 	SessionID       string        `json:"session_id"`
 	Profile         string        `json:"profile"`
+	Group           string        `json:"group,omitempty"`
+	Members         []memberJSON  `json:"members,omitempty"`
+	AnchorProfile   string        `json:"anchor_profile,omitempty"`
 	AroundMessageID int64         `json:"around_message_id"`
 	Window          int           `json:"window"`
 	MessagesBefore  int           `json:"messages_before"`
@@ -166,7 +188,8 @@ func buildDiscover(ctx context.Context, parsed discoveryArgs, hits []discoverHit
 func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner string, parsed discoveryArgs, session memory.SearchSession, top bool) (discoverResultJSON, error) {
 	hydrate := top || parsed.Detail == "full"
 	result := discoverResultJSON{
-		SessionID: session.SessionID, Profile: owner, When: formatWhen(session.StartedAt), Source: session.Source,
+		SessionID: session.SessionID, Profile: owner, Sender: session.Sender, Scope: session.Scope, Group: session.ChatName,
+		When: formatWhen(session.StartedAt), Source: session.Source,
 		Model: session.Model, Title: session.Title, MatchedRole: session.MatchedRole,
 		MatchMessageID: session.MatchMessageID, Snippet: session.Snippet,
 		Detail: "compact", Link: discoverLink(owner, session.SessionID),
@@ -178,26 +201,26 @@ func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner stri
 	}
 	if !hydrate {
 		if anchor != nil {
-			result.Messages = []messageJSON{toJSON(*anchor, true, messageContentRunes)}
+			result.Messages = []messageJSON{toJSON(*anchor, true, messageContentRunes, owner, session.Sender, session.Scope)}
 		}
 		result.MessagesBefore, result.MessagesAfter, err = windowRemainder(ctx, store, owner, session.SessionID, result.Messages)
 		return result, err
 	}
 	result.Detail = "full"
 	for _, message := range before {
-		result.Messages = append(result.Messages, toJSON(message, false, windowContentRunes))
+		result.Messages = append(result.Messages, toJSON(message, false, windowContentRunes, owner, session.Sender, session.Scope))
 	}
 	if anchor != nil {
-		result.Messages = append(result.Messages, toJSON(*anchor, true, windowContentRunes))
+		result.Messages = append(result.Messages, toJSON(*anchor, true, windowContentRunes, owner, session.Sender, session.Scope))
 	}
 	for _, message := range after {
-		result.Messages = append(result.Messages, toJSON(message, false, windowContentRunes))
+		result.Messages = append(result.Messages, toJSON(message, false, windowContentRunes, owner, session.Sender, session.Scope))
 	}
 	result.MessagesBefore, result.MessagesAfter, err = windowRemainder(ctx, store, owner, session.SessionID, result.Messages)
 	if err != nil {
 		return result, err
 	}
-	result.BookendStart, result.BookendEnd, err = bookends(ctx, store, owner, session.SessionID)
+	result.BookendStart, result.BookendEnd, err = bookends(ctx, store, owner, session.Sender, session.Scope, session.SessionID)
 	if err != nil {
 		return result, err
 	}
@@ -205,7 +228,7 @@ func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner stri
 }
 
 // bookends returns the first and last stored messages of a session.
-func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID string) ([]messageJSON, []messageJSON, error) {
+func bookends(ctx context.Context, store *memory.ProfileStore, owner, sender, scope, sessionID string) ([]messageJSON, []messageJSON, error) {
 	first, last, count, err := store.SessionTranscript(ctx, owner, sessionID, 3, 3)
 	if err != nil || count == 0 {
 		return nil, nil, err
@@ -216,25 +239,25 @@ func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID 
 	}
 	start := make([]messageJSON, 0, len(first))
 	for _, message := range first {
-		start = append(start, toJSON(message, false, bookendContentRunes))
+		start = append(start, toJSON(message, false, bookendContentRunes, owner, sender, scope))
 	}
 	end := make([]messageJSON, 0, len(last))
 	for _, message := range last {
-		end = append(end, toJSON(message, false, bookendContentRunes))
+		end = append(end, toJSON(message, false, bookendContentRunes, owner, sender, scope))
 	}
 	return start, end, nil
 }
 
-func buildScroll(ctx context.Context, store *memory.ProfileStore, owner, profile, sessionID string, anchor int64, window int, before []memory.SearchMessage, anchorMessage *memory.SearchMessage, after []memory.SearchMessage) (string, error) {
+func buildScroll(ctx context.Context, store *memory.ProfileStore, owner, profile, sender, scope, sessionID string, anchor int64, window int, before []memory.SearchMessage, anchorMessage *memory.SearchMessage, after []memory.SearchMessage) (string, error) {
 	envelope := scrollEnvelope{Success: true, Mode: "scroll", SessionID: sessionID, Profile: profile, AroundMessageID: anchor, Window: window, Messages: []messageJSON{}}
 	for _, message := range before {
-		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes))
+		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes, profile, sender, scope))
 	}
 	if anchorMessage != nil {
-		envelope.Messages = append(envelope.Messages, toJSON(*anchorMessage, true, windowContentRunes))
+		envelope.Messages = append(envelope.Messages, toJSON(*anchorMessage, true, windowContentRunes, profile, sender, scope))
 	}
 	for _, message := range after {
-		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes))
+		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes, profile, sender, scope))
 	}
 	var err error
 	envelope.MessagesBefore, envelope.MessagesAfter, err = windowRemainder(ctx, store, owner, sessionID, envelope.Messages)
@@ -251,7 +274,7 @@ func windowRemainder(ctx context.Context, store *memory.ProfileStore, owner, ses
 	return store.SessionWindowRemainder(ctx, owner, sessionID, messages[0].ID, messages[len(messages)-1].ID)
 }
 
-func buildRead(profile string, summary *memory.SearchSession, sessionID string, count int, first, last []memory.SearchMessage) (string, error) {
+func buildRead(profile, sender, scope string, summary *memory.SearchSession, sessionID string, count int, first, last []memory.SearchMessage) (string, error) {
 	meta := sessionMetaJSON{When: "", Source: "unknown"}
 	if summary != nil {
 		meta = sessionMetaJSON{When: formatWhen(summary.StartedAt), Source: summary.Source, Model: summary.Model, Title: summary.Title}
@@ -262,15 +285,44 @@ func buildRead(profile string, summary *memory.SearchSession, sessionID string, 
 		return marshalBounded(envelope)
 	}
 	for _, message := range first {
-		envelope.Messages = append(envelope.Messages, toJSON(message, false, messageContentRunes))
+		envelope.Messages = append(envelope.Messages, toJSON(message, false, messageContentRunes, profile, sender, scope))
 	}
 	if len(last) > 0 {
 		envelope.Truncated = true
 		envelope.Message = "Session is larger than the read window; showing first and last messages. Pass around_message_id (any id above) to scroll the middle."
 		for _, message := range last {
-			envelope.Messages = append(envelope.Messages, toJSON(message, false, messageContentRunes))
+			envelope.Messages = append(envelope.Messages, toJSON(message, false, messageContentRunes, profile, sender, scope))
 		}
 	}
+	return marshalBounded(envelope)
+}
+
+func buildGroupRead(sessionID, group string, members []memberJSON, summary *memory.SearchSession, total int, liveOmitted bool, messages []messageJSON) (string, error) {
+	meta := sessionMetaJSON{When: "", Source: "unknown"}
+	if summary != nil {
+		meta = sessionMetaJSON{When: formatWhen(summary.StartedAt), Source: summary.Source, Model: summary.Model, Title: summary.Title}
+	}
+	// The link stays a single member address so a follow-up scroll can name
+	// the anchor slice; the id segment is the bare session_id argument.
+	link := ""
+	if len(members) > 0 {
+		link = sessionLink(members[0].Profile, members[0].SessionID)
+	}
+	envelope := readEnvelope{Success: true, Mode: "read", SessionID: sessionID, Profile: "group", Group: group, Members: members, Link: link, SessionMeta: meta, MessageCount: total, Messages: messages}
+	if total == 0 {
+		envelope.Message = "No stored group messages found."
+		return marshalBounded(envelope)
+	}
+	envelope.Truncated = true
+	envelope.Message = "Merged group view (chronological across members); showing first and last messages. Pass around_message_id (any id above) with the same session_id to scroll the middle."
+	if liveOmitted {
+		envelope.Message += " The live slice is omitted (already in your active context)."
+	}
+	return marshalBounded(envelope)
+}
+
+func buildGroupScroll(sessionID, group string, members []memberJSON, anchorProfile string, anchor int64, window, before, after int, messages []messageJSON) (string, error) {
+	envelope := scrollEnvelope{Success: true, Mode: "scroll", SessionID: sessionID, Profile: "group", Group: group, Members: members, AnchorProfile: anchorProfile, AroundMessageID: anchor, Window: window, MessagesBefore: before, MessagesAfter: after, Messages: messages}
 	return marshalBounded(envelope)
 }
 
@@ -278,7 +330,8 @@ func buildBrowse(owner string, records []memory.SessionSummaryRecord) (string, e
 	envelope := browseEnvelope{Success: true, Mode: "browse", Count: len(records), Results: []browseResultJSON{}, Message: "Showing most recent sessions. Pass a query= to search, or session_id+around_message_id to scroll."}
 	for _, record := range records {
 		envelope.Results = append(envelope.Results, browseResultJSON{
-			SessionID: record.SessionID, Link: sessionLink(owner, record.SessionID), Title: record.Title,
+			SessionID: record.SessionID, Profile: owner, Sender: record.Sender, Scope: record.Scope,
+			Link: sessionLink(owner, record.SessionID), Title: record.Title,
 			Source: record.Source, StartedAt: toEpoch(record.StartedAt), LastActive: toEpoch(record.LastActive),
 			MessageCount: record.MessageCount, Preview: clamp(record.Preview, bookendContentRunes),
 		})
@@ -289,9 +342,9 @@ func buildBrowse(owner string, records []memory.SessionSummaryRecord) (string, e
 	return marshalBounded(envelope)
 }
 
-func toJSON(message memory.SearchMessage, anchor bool, limit int) messageJSON {
+func toJSON(message memory.SearchMessage, anchor bool, limit int, profile, sender, scope string) messageJSON {
 	content, truncated := clampRunes(message.Content, limit)
-	rendered := messageJSON{ID: message.ID, Role: message.Role, Content: content, ToolName: message.ToolName, ToolCalls: clampToolCalls(message.ToolCalls), ToolCallID: message.ToolCallID, Timestamp: toEpoch(message.Timestamp), Anchor: anchor}
+	rendered := messageJSON{ID: message.ID, Profile: profile, Sender: sender, Scope: scope, Role: message.Role, Content: content, ToolName: message.ToolName, ToolCalls: clampToolCalls(message.ToolCalls), ToolCallID: message.ToolCallID, Timestamp: toEpoch(message.Timestamp), Anchor: anchor}
 	if len(message.History.Batches) > 0 {
 		history, omitted := boundedSearchHistory(message.History, limit)
 		rendered.ToolHistory, rendered.ToolHistoryTruncated = &history, omitted

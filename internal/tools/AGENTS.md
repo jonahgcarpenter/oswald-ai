@@ -30,11 +30,15 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   memory edits). Unknown arguments rejected; authenticated principal required.
   Metadata-only history with hashed bodies: never searchable.
 - `session_search` — full searchable history with four inferred shapes: `query` (FTS5 discovery,
-  BM25-ranked, lineage-deduped), `session_id` + `around_message_id` scroll (1–20 each side),
+  BM25-ranked, lineage-deduped, default 5), `session_id` + `around_message_id` scroll (1–20 each side),
   `session_id` full read (first 20 / last 10 past 30 rows), no-args recent browse (default 3).
-  Reads are profile-scoped and delivery-agnostic except the live session and its forks; `link`
-  values are verbatim `@session:<owner>/<id>`. Envelopes stay within 14,000 runes via progressive
-  reduction that preserves navigation and marks truncation.
+  No `profile` argument: bare ids resolve owner-first across peer stores. In a group turn the
+  owner sees their DMs plus the live group while peer stores contribute that group only;
+  a group `session_id` merges every member slice chronologically (live slice omitted as
+  already in context) with per-message `profile`/`sender`/`scope` attribution, and `link`
+  values stay verbatim `@session:<profile>/<id>`. DMs and other groups fail closed as
+  `session not found in this group`. Envelopes stay within 14,000 runes via progressive
+  reduction that preserves navigation and attribution while marking truncation.
 - `web_search` — query ≤400 runes/50 words, ≤100 results requested (default 5), 16 KiB
   model envelope with tracking-stripped destinations.
 - `vision_analyze` — question ≤2,000 runes, optional 4-int region, cached-or-URL sources.
