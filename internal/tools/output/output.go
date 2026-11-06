@@ -1,11 +1,13 @@
-// Package output sanitizes model-visible command output: ANSI stripping
-// and fixed-shape secret redaction. It never logs; callers keep the
-// original only in truncated local buffers for debugging without payloads.
+// Package output sanitizes model-visible command output: ANSI stripping,
+// fixed-shape secret redaction, and install-local timestamp rendering. It
+// never logs; callers keep the original only in truncated local buffers for
+// debugging without payloads.
 package output
 
 import (
 	"regexp"
 	"strings"
+	"time"
 )
 
 var ansi = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
@@ -38,4 +40,31 @@ func RedactSecrets(s string) string {
 // Clean applies ANSI stripping then secret redaction.
 func Clean(s string) string {
 	return RedactSecrets(StripANSI(strings.TrimSpace(s)))
+}
+
+// FormatModelTime renders an instant for model consumption in the install's
+// local zone with an explicit zone suffix, so the label never reads as a
+// different zone's wall clock. The install's zone comes from the OS
+// (time.Local honors TZ); no zone is hardcoded here. In UTC installs the
+// suffix reads "UTC".
+func FormatModelTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(time.Local).Format("Monday, January 02, 2006 at 03:04 PM MST (UTC-07:00)")
+}
+
+// FormatModelTimestamp renders an RFC3339 UTC instant for model consumption,
+// appending the same instant in the install's local zone. next must parse as
+// RFC3339; unparseable input returns the trimmed input unchanged.
+func FormatModelTimestamp(next string) string {
+	trimmed := strings.TrimSpace(next)
+	if trimmed == "" || trimmed == "-" {
+		return trimmed
+	}
+	parsed, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return trimmed
+	}
+	return trimmed + " (" + FormatModelTime(parsed) + ")"
 }
