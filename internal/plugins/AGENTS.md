@@ -7,10 +7,21 @@ Applies on top of the root `AGENTS.md` (operator-state, persisted-contract, and 
 One `Manager` per profile (`scope_key` is the absolute profile root). Shared code,
 per-profile enable/config/storage — same island rule as `mcp_servers`:
 
-- `types.go` owns `Manifest`, hook names, `Registration`, `PluginContext`, typed errors.
+- `types.go` owns `Manifest` (including `manifest_version: 2`, `api_version: "1"`,
+  `requires_plugins`), hook names, `Registration`, `PluginContext`, typed errors.
 - `manifest.go` parses `plugin.yaml` (name 2–40 lc ASCII, `soul` reserved; version,
   entry, `requires_env`, `capabilities`, optional pinned `node_package@node_version`
-  exact x.y.z plus `node_bin`). Ranges, tags, URLs, and file specs fail closed.
+  exact x.y.z plus `node_bin`). Unknown keys, ranges, and contract mismatches fail
+  closed. Keys are canonical and exact: no bare-name aliases anywhere.
+- `discovery.go` scans bundled → user → opt-in project dirs; later wins on key
+  collision with impostor-dir rejection; `ResolveLoadOrder` topologically orders
+  `requires_plugins` (unknown/cycle fails closed).
+- `install.go` owns URL installs (`owner/repo`, https git, local paths; ssh refused)
+  with full-SHA pins, `--subdir`, `--force` backup to `plugins-backup/`, and
+  `.install-metadata.json` provenance (source/url/revision, never secrets).
+  `UpdateFromURL` refreshes managed git installs (pins need explicit `--ref`);
+  `RemoveInstall` deletes shared code after callers verify no other profile
+  references the key. Ranges, tags, URLs, and file specs fail closed.
 - `node.go` owns per-profile Node homes (`<profileRoot>/plugins/<name>/`): pinned
   `npm install` with bounded output and timeouts (`install-deps` is the consent
   gate), plus `NodeBinPath` absolute resolution. The terminal `PATH` stays fixed;

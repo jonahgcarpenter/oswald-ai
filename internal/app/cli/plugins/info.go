@@ -54,6 +54,18 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	if len(manifest.Capabilities) > 0 {
 		fmt.Fprintf(stdout, "capabilities: %s\n", strings.Join(manifest.Capabilities, ", "))
 	}
+	if len(manifest.RequiresPlugins) > 0 {
+		fmt.Fprintf(stdout, "requires: %s\n", strings.Join(manifest.RequiresPlugins, ", "))
+	}
+	if meta, err := plugins.ReadInstallMetadata(globalRootFor(profileRoot, profileName), key); err == nil {
+		provenance := meta.Source
+		if meta.Pinned && meta.Revision != "" {
+			provenance += " pinned@" + shortSHA(meta.Revision)
+		} else if meta.Revision != "" {
+			provenance += " at " + shortSHA(meta.Revision)
+		}
+		fmt.Fprintf(stdout, "installed_from: %s\n", provenance)
+	}
 	entry, hasEntry := profileCfg.PluginEntries[key]
 	if hasEntry {
 		fmt.Fprintf(stdout, "allow_tool_override: %v\n", entry.AllowToolOverride)

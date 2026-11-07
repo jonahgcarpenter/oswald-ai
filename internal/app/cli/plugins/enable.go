@@ -3,7 +3,6 @@ package plugins
 import (
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -18,7 +17,7 @@ func enableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}
-	profileCfg, profileName, profileRoot, err := resolveScope(root, flagProfile, true)
+	_, profileName, profileRoot, err := resolveScope(root, flagProfile, true)
 	if err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
@@ -28,27 +27,8 @@ func enableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", raw)
 		return exitError
 	}
-	enabled := append([]string(nil), profileCfg.PluginEnabled...)
-	seen := map[string]bool{}
-	for _, existing := range enabled {
-		seen[existing] = true
-	}
-	if !seen[name] {
-		enabled = append(enabled, name)
-	}
-	sort.Strings(enabled)
-	disabled := make([]string, 0, len(profileCfg.PluginDisabled))
-	for _, denied := range profileCfg.PluginDisabled {
-		if denied != name {
-			disabled = append(disabled, denied)
-		}
-	}
 	oldCfg, _ := config.Validate(mustAbs(root))
-	if err := config.SetConfigValue(mustAbs(root), profileName, []string{"plugins", "enabled"}, encodeStringList(enabled)); err != nil {
-		reportPluginsError(stderr, err)
-		return exitError
-	}
-	if err := config.SetConfigValue(mustAbs(root), profileName, []string{"plugins", "disabled"}, encodeStringList(disabled)); err != nil {
+	if err := setEnabledForProfile(mustAbs(root), profileName, name, true); err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
@@ -64,33 +44,13 @@ func disableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}
-	profileCfg, profileName, _, err := resolveScope(root, flagProfile, true)
+	_, profileName, _, err := resolveScope(root, flagProfile, true)
 	if err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	enabled := make([]string, 0, len(profileCfg.PluginEnabled))
-	for _, existing := range profileCfg.PluginEnabled {
-		if existing != name {
-			enabled = append(enabled, existing)
-		}
-	}
-	disabled := append([]string(nil), profileCfg.PluginDisabled...)
-	seen := map[string]bool{}
-	for _, denied := range disabled {
-		seen[denied] = true
-	}
-	if !seen[name] {
-		disabled = append(disabled, name)
-	}
-	sort.Strings(enabled)
-	sort.Strings(disabled)
 	oldCfg, _ := config.Validate(mustAbs(root))
-	if err := config.SetConfigValue(mustAbs(root), profileName, []string{"plugins", "enabled"}, encodeStringList(enabled)); err != nil {
-		reportPluginsError(stderr, err)
-		return exitError
-	}
-	if err := config.SetConfigValue(mustAbs(root), profileName, []string{"plugins", "disabled"}, encodeStringList(disabled)); err != nil {
+	if err := setEnabledForProfile(mustAbs(root), profileName, name, false); err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
