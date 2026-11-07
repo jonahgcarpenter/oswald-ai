@@ -52,28 +52,23 @@ func (m *Manager) LoadEnabledFromConfig(cfg *config.Config, globalRoot string) {
 	manifests := CollectManifests("", userDir, projectDir, projectEnabled)
 	winners := ResolveWinners(manifests)
 	m.Discover(winners)
-	for _, name := range cfg.PluginEnabled {
+	ordered, err := ResolveLoadOrder(winners, cfg.PluginEnabled)
+	if err != nil {
+		m.log.Warn("plugin.manager.order_failed", "plugin dependency order failed", config.F("profile", m.profile))
+		return
+	}
+	for _, key := range ordered {
 		// Disabled always wins; config validation already rejects both-lists,
 		// but runtime re-checks for defense in depth.
 		blocked := false
 		for _, denied := range cfg.PluginDisabled {
-			if denied == name {
+			if denied == key {
 				blocked = true
 				break
 			}
 		}
 		if blocked {
 			continue
-		}
-		key := name
-		if _, ok := m.plugins[key]; !ok {
-			// Legacy bare-name alias: match by manifest name.
-			for k, loaded := range m.plugins {
-				if loaded.Manifest.Name == name {
-					key = k
-					break
-				}
-			}
 		}
 		loaded, ok := m.plugins[key]
 		if !ok {

@@ -112,23 +112,13 @@ func (m *Manager) KnownNames() []string {
 	return out
 }
 
-// SetEnabled flips one known plugin. Unknown names fail closed.
+// SetEnabled flips one known plugin by canonical key. Unknown keys fail closed.
 func (m *Manager) SetEnabled(key string, enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	loaded, ok := m.plugins[key]
 	if !ok {
-		// Legacy bare-name alias: match by manifest name.
-		for k, cand := range m.plugins {
-			if cand.Manifest.Name == key {
-				loaded, ok = cand, true
-				key = k
-				break
-			}
-		}
-		if !ok {
-			return fmt.Errorf("unknown plugin %q", key)
-		}
+		return fmt.Errorf("unknown plugin %q", key)
 	}
 	loaded.Enabled = enabled
 	loaded.Error = ""
@@ -322,10 +312,10 @@ func (m *Manager) Unload(key string) {
 // StorageRoot returns the per-plugin dir, creating it owner-only on first use.
 // The tree stays workspace-protected like mcp/.
 func (m *Manager) StorageRoot(plugin string) (string, error) {
-	if plugin == "" || !pluginNameRE.MatchString(plugin) {
-		return "", fmt.Errorf("invalid plugin name")
+	if !ValidPluginKey(plugin) {
+		return "", fmt.Errorf("invalid plugin key")
 	}
-	root := filepath.Join(m.homePath, "plugins", plugin)
+	root := filepath.Join(m.homePath, "plugins", filepath.FromSlash(plugin))
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", fmt.Errorf("create plugin storage: %w", err)
 	}

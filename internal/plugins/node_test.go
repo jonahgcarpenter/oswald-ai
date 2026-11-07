@@ -7,24 +7,24 @@ import (
 )
 
 func TestValidateNodeDepsPins(t *testing.T) {
-	valid := &Manifest{Name: "demo", Source: "user", NodePackage: "prettier", NodeVersion: "3.1.0"}
+	valid := &Manifest{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "prettier", NodeVersion: "3.1.0"}
 	if err := ValidateManifest(valid); err != nil {
 		t.Fatalf("valid node deps rejected: %v", err)
 	}
 	if got := DefaultNodeBin(*valid); got != "prettier" {
 		t.Fatalf("bin = %q", got)
 	}
-	scoped := &Manifest{Name: "demo", Source: "user", NodePackage: "@scope/tool", NodeVersion: "1.2.3", NodeBin: "tool-bin"}
+	scoped := &Manifest{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "@scope/tool", NodeVersion: "1.2.3", NodeBin: "tool-bin"}
 	if err := ValidateManifest(scoped); err != nil {
 		t.Fatalf("scoped node deps rejected: %v", err)
 	}
 	for _, tc := range []Manifest{
-		{Name: "demo", Source: "user", NodePackage: "prettier"},
-		{Name: "demo", Source: "user", NodeVersion: "1.2.3"},
-		{Name: "demo", Source: "user", NodePackage: "prettier", NodeVersion: "^3.1.0"},
-		{Name: "demo", Source: "user", NodePackage: "prettier", NodeVersion: "latest"},
-		{Name: "demo", Source: "user", NodePackage: "PRETTIER", NodeVersion: "3.1.0"},
-		{Name: "demo", Source: "user", NodePackage: "prettier", NodeVersion: "3.1.0", NodeBin: "../escape"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "prettier"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodeVersion: "1.2.3"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "prettier", NodeVersion: "^3.1.0"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "prettier", NodeVersion: "latest"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "PRETTIER", NodeVersion: "3.1.0"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", NodePackage: "prettier", NodeVersion: "3.1.0", NodeBin: "../escape"},
 	} {
 		candidate := tc
 		if err := ValidateManifest(&candidate); err == nil {

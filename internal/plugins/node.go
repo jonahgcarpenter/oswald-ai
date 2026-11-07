@@ -20,22 +20,23 @@ const (
 )
 
 // NodeDir returns the per-profile plugin home owning its node_modules tree.
+// The plugin argument is a canonical key (flat or single-level category/key).
 func NodeDir(homePath, plugin string) (string, error) {
-	if plugin == "" || !pluginNameRE.MatchString(plugin) {
-		return "", fmt.Errorf("invalid plugin name")
+	if !ValidPluginKey(plugin) {
+		return "", fmt.Errorf("invalid plugin key")
 	}
 	if strings.TrimSpace(homePath) == "" {
 		return "", fmt.Errorf("plugin home is unavailable")
 	}
-	return filepath.Join(homePath, "plugins", plugin), nil
+	return filepath.Join(homePath, "plugins", filepath.FromSlash(plugin)), nil
 }
 
 // NodeBinPath resolves the absolute plugin-local binary without executing it.
 // The binary must already be installed under node_modules/.bin; the terminal
 // PATH is never mutated. Callers invoke the returned absolute path explicitly.
 func NodeBinPath(homePath, plugin, bin string) (string, error) {
-	if plugin == "" || !pluginNameRE.MatchString(plugin) {
-		return "", fmt.Errorf("invalid plugin name")
+	if !ValidPluginKey(plugin) {
+		return "", fmt.Errorf("invalid plugin key")
 	}
 	if strings.TrimSpace(bin) == "" || len(bin) > 64 || !npmBinRE.MatchString(bin) {
 		return "", fmt.Errorf("invalid plugin binary")

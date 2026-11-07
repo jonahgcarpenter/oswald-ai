@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,8 +43,9 @@ func ScanDirectory(path, source string) []Manifest {
 			}
 			m.Key = entry.Name()
 			if m.Name != "" && m.Key != m.Name {
-				// Flat user dir keyed by directory; manifest name stays canonical
-				// for enable matching via lookup aliases.
+				// Flat dir keyed by directory: a same-named directory is the
+				// documented way to override; a differently named directory
+				// gets its own key and never shadows the manifest name.
 				m.Key = entry.Name()
 			} else {
 				m.Key = m.Name
@@ -97,6 +99,51 @@ func CollectManifests(bundledDir, userDir, projectDir string, projectEnabled boo
 		out = append(out, ScanDirectory(projectDir, "project")...)
 	}
 	return out
+}
+
+// ResolveLoadOrder returns canonical keys in dependency order (dependencies
+// first) for the enabled subset. Unknown dependencies and cycles fail closed
+// with the offending key named.
+func ResolveLoadOrder(winners map[string]Manifest, enabled []string) ([]string, error) {
+	ordered := make([]string, 0, len(enabled))
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(key string) error
+	visit = func(key string) error {
+		if visited[key] {
+			return nil
+		}
+		if visiting[key] {
+			return fmt.Errorf("plugin dependency cycle at %q", key)
+		}
+		m, ok := winners[key]
+		if !ok {
+			return fmt.Errorf("unknown plugin %q", key)
+		}
+		visiting[key] = true
+		deps := append([]string(nil), m.RequiresPlugins...)
+		sort.Strings(deps)
+		for _, dep := range deps {
+			if _, ok := winners[dep]; !ok {
+				return fmt.Errorf("plugin %q requires unknown plugin %q", key, dep)
+			}
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		delete(visiting, key)
+		visited[key] = true
+		ordered = append(ordered, key)
+		return nil
+	}
+	keys := append([]string(nil), enabled...)
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := visit(key); err != nil {
+			return nil, err
+		}
+	}
+	return ordered, nil
 }
 
 // ResolveWinners applies last-writer-wins on key collision (project > user >

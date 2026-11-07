@@ -13,7 +13,7 @@ import (
 
 func writeManifest(t *testing.T, dir, name, source string) {
 	t.Helper()
-	body := "name: " + name + "\nversion: \"1.0\"\ndescription: synthetic test plugin\n"
+	body := "name: " + name + "\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n"
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -25,14 +25,63 @@ func writeManifest(t *testing.T, dir, name, source string) {
 
 func TestValidateManifestRejects(t *testing.T) {
 	for _, name := range []string{"", "A", "soul", "a", "has space", "UPPER"} {
-		m := &Manifest{Name: name, Source: "user"}
+		m := &Manifest{Name: name, Source: "user", ManifestVersion: 2, ApiVersion: "1"}
 		if err := ValidateManifest(m); err == nil {
 			t.Fatalf("expected reject for %q", name)
 		}
 	}
-	m := &Manifest{Name: "ok-name", Source: "user", Capabilities: []string{"nope"}}
+	m := &Manifest{Name: "ok-name", Source: "user", ManifestVersion: 2, ApiVersion: "1", Capabilities: []string{"nope"}}
 	if err := ValidateManifest(m); err == nil {
 		t.Fatal("expected unknown capability reject")
+	}
+	for _, tc := range []Manifest{
+		{Name: "demo", Source: "user", ApiVersion: "1"},
+		{Name: "demo", Source: "user", ManifestVersion: 2},
+		{Name: "demo", Source: "user", ManifestVersion: 1, ApiVersion: "1"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "2"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"demo"}},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"nope!"}},
+	} {
+		candidate := tc
+		if err := ValidateManifest(&candidate); err == nil {
+			t.Fatalf("expected contract reject for %+v", tc)
+		}
+	}
+}
+
+func TestResolveLoadOrderDependencies(t *testing.T) {
+	winners := map[string]Manifest{
+		"base":  {Name: "base", Key: "base", Source: "user", ManifestVersion: 2, ApiVersion: "1"},
+		"mid":   {Name: "mid", Key: "mid", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"base"}},
+		"top":   {Name: "top", Key: "top", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"mid"}},
+		"other": {Name: "other", Key: "other", Source: "user", ManifestVersion: 2, ApiVersion: "1"},
+	}
+	ordered, err := ResolveLoadOrder(winners, []string{"top", "other"})
+	if err != nil {
+		t.Fatalf("order: %v", err)
+	}
+	position := map[string]int{}
+	for i, key := range ordered {
+		position[key] = i
+	}
+	if !(position["base"] < position["mid"] && position["mid"] < position["top"]) {
+		t.Fatalf("bad order %v", ordered)
+	}
+	if _, err := ResolveLoadOrder(winners, []string{"ghost"}); err == nil {
+		t.Fatal("expected unknown reject")
+	}
+	cyclic := map[string]Manifest{
+		"a": {Name: "a", Key: "a", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"b"}},
+		"b": {Name: "b", Key: "b", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"a"}},
+	}
+	if _, err := ResolveLoadOrder(cyclic, []string{"a"}); err == nil {
+		t.Fatal("expected cycle reject")
+	}
+	missing := map[string]Manifest{
+		"a": {Name: "a", Key: "a", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"ghost"}},
+	}
+	if _, err := ResolveLoadOrder(missing, []string{"a"}); err == nil {
+		t.Fatal("expected missing dependency reject")
 	}
 }
 

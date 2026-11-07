@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
@@ -15,7 +14,7 @@ import (
 // versions are exact pins so repeats resolve identically.
 func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	name := strings.ToLower(strings.TrimSpace(raw))
-	if !config.ValidPluginName(name) {
+	if !plugins.ValidPluginKey(name) {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}
@@ -28,14 +27,6 @@ func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, 
 	key := name
 	manifest, ok := winners[key]
 	if !ok {
-		for k, cand := range winners {
-			if cand.Name == name {
-				key, manifest, ok = k, cand, true
-				break
-			}
-		}
-	}
-	if !ok {
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", raw)
 		return exitError
 	}
@@ -47,7 +38,7 @@ func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, 
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	bin, err := plugins.NodeBinPath(profileRoot, manifest.Name, plugins.DefaultNodeBin(manifest))
+	bin, err := plugins.NodeBinPath(profileRoot, key, plugins.DefaultNodeBin(manifest))
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -78,7 +69,7 @@ func binPathCmd(root, flagProfile string, rest []string, stdout, stderr io.Write
 		return exitUsage
 	}
 	name := strings.ToLower(strings.TrimSpace(names[0]))
-	if !config.ValidPluginName(name) {
+	if !plugins.ValidPluginKey(name) {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", names[0])
 		return exitUsage
 	}
@@ -91,26 +82,17 @@ func binPathCmd(root, flagProfile string, rest []string, stdout, stderr io.Write
 	key := name
 	manifest, ok := winners[key]
 	if !ok {
-		for k, cand := range winners {
-			if cand.Name == name {
-				key, manifest, ok = k, cand, true
-				break
-			}
-		}
-	}
-	if !ok {
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", names[0])
 		return exitError
 	}
 	if bin == "" {
 		bin = plugins.DefaultNodeBin(manifest)
 	}
-	resolved, err := plugins.NodeBinPath(profileRoot, manifest.Name, bin)
+	resolved, err := plugins.NodeBinPath(profileRoot, key, bin)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	_ = key
 	fmt.Fprintln(stdout, resolved)
 	return exitOK
 }

@@ -24,7 +24,7 @@ func TestRuntimeLoadEnabledRequiresEnv(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	body := "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nrequires_env: [SYNTH_PLUGIN_TOKEN]\n"
+	body := "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nrequires_env: [SYNTH_PLUGIN_TOKEN]\n"
 	if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}

@@ -31,7 +31,7 @@ func pluginsTestRoot(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(pluginsTestConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
-	writePluginManifest(t, filepath.Join(root, "plugins-available", "demo"), "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\n")
+	writePluginManifest(t, filepath.Join(root, "plugins-available", "demo"), "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n")
 	return root
 }
 

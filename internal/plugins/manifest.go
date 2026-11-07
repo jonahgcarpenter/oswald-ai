@@ -33,6 +33,9 @@ type manifestYAML struct {
 	NodePackage       string   `yaml:"node_package"`
 	NodeVersion       string   `yaml:"node_version"`
 	NodeBin           string   `yaml:"node_bin"`
+	ManifestVersion   int      `yaml:"manifest_version"`
+	ApiVersion        string   `yaml:"api_version"`
+	RequiresPlugins   []string `yaml:"requires_plugins"`
 }
 
 // ParseManifestFile reads and validates dir/plugin.yaml. dir names the plugin
@@ -62,8 +65,15 @@ func ParseManifestFile(dir, source string) (*Manifest, error) {
 		NodePackage:       strings.TrimSpace(raw.NodePackage),
 		NodeVersion:       strings.TrimSpace(raw.NodeVersion),
 		NodeBin:           strings.TrimSpace(raw.NodeBin),
+		ManifestVersion:   raw.ManifestVersion,
+		ApiVersion:        strings.TrimSpace(raw.ApiVersion),
 		Source:            source,
 		Path:              dir,
+	}
+	for _, dep := range raw.RequiresPlugins {
+		if trimmed := strings.TrimSpace(dep); trimmed != "" {
+			m.RequiresPlugins = append(m.RequiresPlugins, trimmed)
+		}
 	}
 	if err := ValidateManifest(m); err != nil {
 		return nil, err
@@ -72,8 +82,10 @@ func ParseManifestFile(dir, source string) (*Manifest, error) {
 	return m, nil
 }
 
-// ManifestKey derives the registry key. Subcategory dirs (platforms/foo)
-// qualify as platforms/foo; flat dirs key by manifest name.
+// ManifestKey derives the canonical registry key. Subcategory dirs
+// (platforms/foo) qualify as platforms/foo; flat dirs key by manifest name.
+// Keys are exact: no bare-name aliases exist, so enablement, config, and
+// storage all use this key verbatim.
 func ManifestKey(m *Manifest, dir string) string {
 	base := filepath.Base(filepath.Dir(dir))
 	if base != "" && base != "plugins" && base != "." && base != "/" {
@@ -96,13 +108,23 @@ func isCategoryDir(name string) bool {
 	}
 }
 
-// ManifestKeyForLookup returns the effective key for enable matching: the full
-// key plus the bare manifest name as a legacy alias.
-func ManifestKeyForLookup(m Manifest) []string {
-	if m.Key != "" && m.Key != m.Name {
-		return []string{m.Key, m.Name}
+// ManifestKeyForLookup is intentionally absent: keys are canonical and exact.
+// Enablement, config entries, storage, and dependency references all use the
+// ManifestKey verbatim with no bare-name aliases.
+
+// validPluginKey reports whether a canonical plugin key (flat name or
+// single-level category/name) is well-formed.
+func ValidPluginKey(key string) bool {
+	parts := strings.Split(key, "/")
+	if len(parts) < 1 || len(parts) > 2 {
+		return false
 	}
-	return []string{m.Name}
+	for _, part := range parts {
+		if !pluginNameRE.MatchString(part) || part == "soul" {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateManifest enforces naming, bounds, and capability vocabulary. It
@@ -135,6 +157,28 @@ func ValidateManifest(m *Manifest) error {
 		if !ValidCapabilities[cap] {
 			return fmt.Errorf("plugin %q declares unknown capability", m.Name)
 		}
+	}
+	if m.ManifestVersion != 2 {
+		return fmt.Errorf("plugin %q uses unsupported manifest_version (want 2)", m.Name)
+	}
+	if m.ApiVersion != "1" {
+		return fmt.Errorf("plugin %q uses unsupported api_version (want \"1\")", m.Name)
+	}
+	if len(m.RequiresPlugins) > 16 {
+		return fmt.Errorf("plugin %q lists too many required plugins", m.Name)
+	}
+	seen := map[string]bool{}
+	for _, dep := range m.RequiresPlugins {
+		if dep == m.Name || dep == m.Key {
+			return fmt.Errorf("plugin %q cannot require itself", m.Name)
+		}
+		if !ValidPluginKey(dep) {
+			return fmt.Errorf("plugin %q requires invalid plugin key", m.Name)
+		}
+		if seen[dep] {
+			return fmt.Errorf("plugin %q lists a duplicate required plugin", m.Name)
+		}
+		seen[dep] = true
 	}
 	if strings.TrimSpace(m.Source) == "" {
 		return fmt.Errorf("plugin %q has no source", m.Name)

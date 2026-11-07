@@ -7,13 +7,14 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
 // enableCmd opts in to a discovered plugin: adds to plugins.enabled and drops
 // any disabled entry so both-lists validation never trips.
 func enableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	name := strings.ToLower(strings.TrimSpace(raw))
-	if !config.ValidPluginName(name) {
+	if !plugins.ValidPluginKey(name) {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}
@@ -23,15 +24,7 @@ func enableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 	winners := discoverForList(globalRootFor(profileRoot, profileName))
-	matched := false
-	for key, manifest := range winners {
-		if key == name || manifest.Name == name {
-			name = key
-			matched = true
-			break
-		}
-	}
-	if !matched {
+	if _, ok := winners[name]; !ok {
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", raw)
 		return exitError
 	}
@@ -67,7 +60,7 @@ func enableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 // always wins at runtime.
 func disableCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	name := strings.ToLower(strings.TrimSpace(raw))
-	if !config.ValidPluginName(name) {
+	if !plugins.ValidPluginKey(name) {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}

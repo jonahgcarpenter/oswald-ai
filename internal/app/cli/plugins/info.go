@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
 // infoCmd shows one plugin's manifest and entry state. Settings values are
 // never printed; only key counts and capability names identify configuration.
 func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	name := strings.ToLower(strings.TrimSpace(raw))
-	if !config.ValidPluginName(name) {
+	if !plugins.ValidPluginKey(name) {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}
@@ -25,14 +25,6 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	winners := discoverForList(globalRootFor(profileRoot, profileName))
 	key := name
 	manifest, ok := winners[key]
-	if !ok {
-		for k, cand := range winners {
-			if cand.Name == name {
-				key, manifest, ok = k, cand, true
-				break
-			}
-		}
-	}
 	if !ok {
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", raw)
 		return exitError
@@ -63,9 +55,6 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "capabilities: %s\n", strings.Join(manifest.Capabilities, ", "))
 	}
 	entry, hasEntry := profileCfg.PluginEntries[key]
-	if !hasEntry {
-		entry, hasEntry = profileCfg.PluginEntries[manifest.Name]
-	}
 	if hasEntry {
 		fmt.Fprintf(stdout, "allow_tool_override: %v\n", entry.AllowToolOverride)
 		fmt.Fprintf(stdout, "mcp_allowlist: %d servers\n", len(entry.MCPAllowlist))

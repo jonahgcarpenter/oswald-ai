@@ -60,6 +60,12 @@ type Manifest struct {
 	Capabilities []string
 	// AllowToolOverride permits replacing a same-named builtin tool.
 	AllowToolOverride bool
+	// ManifestVersion is the plugin contract version. Only 2 is accepted.
+	ManifestVersion int
+	// ApiVersion is the host API version the plugin targets. Only "1" is accepted.
+	ApiVersion string
+	// RequiresPlugins names canonical plugin keys that must load first.
+	RequiresPlugins []string
 	// NodePackage is an optional npm package name backing a plugin CLI
 	// (for example "prettier" or "@scope/tool"). Empty means no Node deps.
 	NodePackage string
