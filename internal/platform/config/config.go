@@ -59,6 +59,13 @@ type Config struct {
 	// and also blocks legitimate DOM extraction.
 	BrowserRestrictEvaluate bool
 	LogLevel                Level
+	// PluginEnabled lists opt-in plugin ids for this profile. Discovery finds
+	// code; nothing with hooks or tools loads until listed here.
+	PluginEnabled []string
+	// PluginDisabled is a deny-list that always wins over enabled.
+	PluginDisabled []string
+	// PluginEntries holds per-plugin operator options keyed by plugin id.
+	PluginEntries map[string]PluginEntry
 }
 
 // RetentionPolicy supplies code-owned worker bounds.

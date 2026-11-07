@@ -139,6 +139,7 @@ type documentYAML struct {
 		LogLevel string `yaml:"log_level"`
 	} `yaml:"runtime"`
 	MCPServers map[string]mcpServerYAML `yaml:"mcp_servers"`
+	Plugins    *pluginsYAML             `yaml:"plugins"`
 }
 
 type mcpToolsYAML struct {
@@ -675,6 +676,9 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		cfg.MCPServers = append(cfg.MCPServers, entry)
 	}
 	sort.Slice(cfg.MCPServers, func(i, j int) bool { return cfg.MCPServers[i].Name < cfg.MCPServers[j].Name })
+	if err := applyPlugins(cfg, doc); err != nil {
+		return err
+	}
 	if doc.API.Key != nil {
 		key, err := credential(doc.API.Key, false)
 		if err != nil {
