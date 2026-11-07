@@ -1,0 +1,68 @@
+// Package plugins implements the `oswald plugins` command group: explicit,
+// operator-driven listing and enablement of profile plugins. All mutations go
+// through the mediated write path with staged validation; reads never dial or
+// execute plugin code.
+package plugins
+
+import (
+	"context"
+	"fmt"
+	"io"
+)
+
+// Exit codes mirror the parent cli convention without importing it.
+const (
+	exitOK    = 0
+	exitError = 1
+	exitUsage = 2
+)
+
+// Run dispatches the plugins command group. --profile is accepted in any position.
+func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
+	profile, rest := splitProfile(args)
+	if len(rest) == 0 {
+		pluginsUsage(stderr)
+		return exitUsage
+	}
+	switch rest[0] {
+	case "list":
+		if len(rest) != 1 {
+			fmt.Fprintln(stderr, "usage: oswald plugins list [--profile NAME]")
+			return exitUsage
+		}
+		return listCmd(root, profile, stdout, stderr)
+	case "enable":
+		if len(rest) != 2 {
+			fmt.Fprintln(stderr, "usage: oswald plugins enable <name> [--profile NAME]")
+			return exitUsage
+		}
+		return enableCmd(root, profile, rest[1], stdout, stderr)
+	case "disable":
+		if len(rest) != 2 {
+			fmt.Fprintln(stderr, "usage: oswald plugins disable <name> [--profile NAME]")
+			return exitUsage
+		}
+		return disableCmd(root, profile, rest[1], stdout, stderr)
+	case "info":
+		if len(rest) != 2 {
+			fmt.Fprintln(stderr, "usage: oswald plugins info <name> [--profile NAME]")
+			return exitUsage
+		}
+		return infoCmd(root, profile, rest[1], stdout, stderr)
+	case "help", "-h", "--help":
+		pluginsUsage(stdout)
+		return exitOK
+	default:
+		fmt.Fprintf(stderr, "oswald: unknown plugins command %q\n", rest[0])
+		pluginsUsage(stderr)
+		return exitUsage
+	}
+}
+
+func pluginsUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: oswald plugins [--profile NAME] <list|enable|disable|info> [name]")
+	fmt.Fprintln(w, "  list                  discovered plugins with enable state")
+	fmt.Fprintln(w, "  enable <name>         opt in to a discovered plugin")
+	fmt.Fprintln(w, "  disable <name>        opt out; always wins over enable")
+	fmt.Fprintln(w, "  info <name>           manifest and entry state, secrets redacted")
+}

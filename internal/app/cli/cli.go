@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/model"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/platforms"
+	cliplugins "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/plugins"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
@@ -77,6 +78,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return gateway.Run(ctx, root, rest[1:], stdout, stderr)
 	case "tools":
 		return tools.Run(ctx, root, rest[1:], stdout, stderr)
+	case "plugins":
+		return cliplugins.Run(ctx, root, rest[1:], stdout, stderr)
 	case "runtime":
 		return runtime.Run(ctx, root, rest[1:], stdout, stderr)
 	case "config":
@@ -113,6 +116,8 @@ commands:
                          manage LLM providers
   model show|set         manage model selection
   tools show|set|unset      manage tool backends
+  plugins list|enable|disable|info
+                          manage profile plugins
   api show|set-key|clear-key
                          manage the OpenAI gateway credential
   config show|get|validate   inspect configuration and validate files
