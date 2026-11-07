@@ -261,6 +261,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetBillingBaseURL(profile.LLMGatewayURL)
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
+		engine.SetPluginHooks(pluginManager)
 		engine.SetMarkdownSummarizer(summarizer)
 		engine.SetWorkspace(profile.ProfileRoot)
 		processor.agents[name] = engine

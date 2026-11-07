@@ -7,6 +7,7 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Hook names accepted by RegisterHook. Directive hooks may block or rewrite;
@@ -93,6 +94,13 @@ func (r *Registration) Dispose() {
 // mutable by the host; hooks must not retain it after return. Returning a
 // non-nil error from a directive hook blocks the operation fail-closed.
 type HookFunc func(ctx context.Context, event map[string]any) error
+
+// HookInvoker is the minimal host surface the agent needs to fire lifecycle
+// hooks without importing the concrete Manager. The timeout bounds one hook
+// chain; directive pre_tool_call failures fail closed.
+type HookInvoker interface {
+	InvokeHook(ctx context.Context, name string, event map[string]any, timeout time.Duration) error
+}
 
 // PluginToolOverrideError reports a blocked builtin replacement without the
 // operator opt-in entry.
