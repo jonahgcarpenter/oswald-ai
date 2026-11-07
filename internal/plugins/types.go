@@ -60,6 +60,15 @@ type Manifest struct {
 	Capabilities []string
 	// AllowToolOverride permits replacing a same-named builtin tool.
 	AllowToolOverride bool
+	// NodePackage is an optional npm package name backing a plugin CLI
+	// (for example "prettier" or "@scope/tool"). Empty means no Node deps.
+	NodePackage string
+	// NodeVersion is the exact pinned npm version (x.y.z, no ranges).
+	// Required when NodePackage is set.
+	NodeVersion string
+	// NodeBin names the executable in node_modules/.bin. Empty defaults to
+	// the package base name (scope stripped).
+	NodeBin string
 	// Source is bundled, user, project, or entrypoint.
 	Source string
 	// Path is the plugin directory or entry-point value. Never logged with secrets.

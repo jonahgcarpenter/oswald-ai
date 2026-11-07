@@ -31,15 +31,18 @@ func pluginsTestRoot(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(pluginsTestConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
-	manifestDir := filepath.Join(root, "plugins-available", "demo")
-	if err := os.MkdirAll(manifestDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	body := "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\n"
-	if err := os.WriteFile(filepath.Join(manifestDir, "plugin.yaml"), []byte(body), 0644); err != nil {
-		t.Fatal(err)
-	}
+	writePluginManifest(t, filepath.Join(root, "plugins-available", "demo"), "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\n")
 	return root
+}
+
+func writePluginManifest(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func pluginsRun(t *testing.T, root string, args ...string) (int, string, string) {
@@ -84,5 +87,21 @@ func TestDisableWinsAndInfoRedacts(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("info missing %q: %q", want, out)
 		}
+	}
+}
+
+func TestBinPathAndInstallDepsGates(t *testing.T) {
+	root := pluginsTestRoot(t)
+	if code, _, _ := pluginsRun(t, root, "bin-path", "ghost"); code == 0 {
+		t.Fatal("unknown bin-path accepted")
+	}
+	if code, _, _ := pluginsRun(t, root, "bin-path", "demo"); code == 0 {
+		t.Fatal("missing install bin-path accepted")
+	}
+	if code, _, _ := pluginsRun(t, root, "install-deps", "ghost"); code == 0 {
+		t.Fatal("unknown install-deps accepted")
+	}
+	if code, _, _ := pluginsRun(t, root, "install-deps", "demo"); code == 0 {
+		t.Fatal("install-deps without node deps accepted")
 	}
 }

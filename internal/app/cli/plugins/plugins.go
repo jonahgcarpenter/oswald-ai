@@ -18,7 +18,7 @@ const (
 )
 
 // Run dispatches the plugins command group. --profile is accepted in any position.
-func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
+func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		pluginsUsage(stderr)
@@ -49,6 +49,18 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 			return exitUsage
 		}
 		return infoCmd(root, profile, rest[1], stdout, stderr)
+	case "install-deps":
+		if len(rest) != 2 {
+			fmt.Fprintln(stderr, "usage: oswald plugins install-deps <name> [--profile NAME]")
+			return exitUsage
+		}
+		return installDepsCmd(ctx, root, profile, rest[1], stdout, stderr)
+	case "bin-path":
+		if len(rest) < 2 || len(rest) > 3 {
+			fmt.Fprintln(stderr, "usage: oswald plugins bin-path <name> [--bin BIN] [--profile NAME]")
+			return exitUsage
+		}
+		return binPathCmd(root, profile, rest[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		pluginsUsage(stdout)
 		return exitOK
@@ -60,9 +72,11 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 }
 
 func pluginsUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald plugins [--profile NAME] <list|enable|disable|info> [name]")
+	fmt.Fprintln(w, "usage: oswald plugins [--profile NAME] <list|enable|disable|info|install-deps|bin-path> [name]")
 	fmt.Fprintln(w, "  list                  discovered plugins with enable state")
 	fmt.Fprintln(w, "  enable <name>         opt in to a discovered plugin")
 	fmt.Fprintln(w, "  disable <name>        opt out; always wins over enable")
 	fmt.Fprintln(w, "  info <name>           manifest and entry state, secrets redacted")
+	fmt.Fprintln(w, "  install-deps <name>   install pinned npm deps into the profile plugin home")
+	fmt.Fprintln(w, "  bin-path <name>       print the absolute plugin-local binary path")
 }

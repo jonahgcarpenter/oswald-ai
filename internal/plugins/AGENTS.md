@@ -9,7 +9,12 @@ per-profile enable/config/storage — same island rule as `mcp_servers`:
 
 - `types.go` owns `Manifest`, hook names, `Registration`, `PluginContext`, typed errors.
 - `manifest.go` parses `plugin.yaml` (name 2–40 lc ASCII, `soul` reserved; version,
-  entry, `requires_env`, `capabilities`).
+  entry, `requires_env`, `capabilities`, optional pinned `node_package@node_version`
+  exact x.y.z plus `node_bin`). Ranges, tags, URLs, and file specs fail closed.
+- `node.go` owns per-profile Node homes (`<profileRoot>/plugins/<name>/`): pinned
+  `npm install` with bounded output and timeouts (`install-deps` is the consent
+  gate), plus `NodeBinPath` absolute resolution. The terminal `PATH` stays fixed;
+  callers invoke the absolute path explicitly.
 - `discovery.go` scans bundled → user → opt-in project dirs; later wins on key
   collision with impostor-dir rejection.
 - `manager.go` tracks loaded plugins, tool/hook/command/skill registrations, and
