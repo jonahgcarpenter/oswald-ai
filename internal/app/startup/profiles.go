@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
@@ -219,6 +220,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cron.RepairProfile(profile.ProfileRoot, name)
 		imagecache.RepairProfile(profile.ProfileRoot, name)
 		docache.RepairProfile(profile.ProfileRoot, name)
+		plugins.RepairProfile(profile.ProfileRoot)
 		store, err := memory.NewProfileStore(ctx, profile.ProfileRoot, name, rootLog)
 		if err != nil {
 			return &Error{Event: "app.profile_storage.init_failed", Message: "failed to open profile state", Cause: err}
@@ -232,6 +234,18 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			return &Error{Event: "app.tools.init_failed", Message: "failed to initialize profile tools", Cause: err}
 		}
 		shutdownClosers = append(shutdownClosers, registry.Close)
+		pluginManager := plugins.NewManager(profile.ProfileRoot, name, rootLog)
+		if globalRoot, err := config.GlobalRootForProfile(profile.ProfileRoot, name); err == nil {
+			pluginManager.LoadEnabledFromConfig(profile, globalRoot)
+		} else {
+			pluginManager.LoadEnabledFromConfig(profile, cfg.ProfileRoot)
+		}
+		if err := pluginManager.RegisterIntoRegistry(registry, func(plugin string) bool {
+			entry, ok := profile.PluginEntries[plugin]
+			return ok && entry.AllowToolOverride
+		}); err != nil {
+			return &Error{Event: "app.plugins.init_failed", Message: "failed to initialize profile plugins", Cause: err}
+		}
 		client := seams.newClient(profile, rootLog)
 		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
