@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -13,6 +14,14 @@ import (
 // call, so edits are visible immediately with no cache to invalidate.
 type Store struct {
 	managed string
+	plugins []PluginRoot
+}
+
+// PluginRoot is one enabled plugin's bundled skills directory, scanned
+// read-only alongside the managed tree.
+type PluginRoot struct {
+	Key string
+	Dir string
 }
 
 // NewStore binds the managed skills root. An empty or missing directory
@@ -21,12 +30,54 @@ func NewStore(managed string) *Store {
 	return &Store{managed: managed}
 }
 
+// BindPlugin adds one plugin skills root. Keys order stably at read time;
+// rebinding a key replaces its directory.
+func (s *Store) BindPlugin(key, dir string) {
+	if s == nil || strings.TrimSpace(key) == "" || strings.TrimSpace(dir) == "" {
+		return
+	}
+	for i, bound := range s.plugins {
+		if bound.Key == key {
+			s.plugins[i].Dir = dir
+			return
+		}
+	}
+	s.plugins = append(s.plugins, PluginRoot{Key: key, Dir: dir})
+}
+
+// catalog merges the managed tree with bound plugin roots. Plugin skills load
+// under "<key>/<load name>", group under the "plugin <key>" category, and
+// carry their origin in Source for read-only enforcement.
+func (s *Store) catalog(platform string) []Skill {
+	if s == nil {
+		return nil
+	}
+	out := resolveCatalog(scanRoots(s.managed), platform)
+	bound := append([]PluginRoot(nil), s.plugins...)
+	sort.Slice(bound, func(i, j int) bool { return bound[i].Key < bound[j].Key })
+	for _, root := range bound {
+		for _, skill := range resolveCatalog(scanRoots(root.Dir), platform) {
+			skill.LoadName = root.Key + "/" + skill.LoadName
+			skill.Category = "plugin " + root.Key
+			skill.Source = root.Key
+			out = append(out, skill)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Category != out[j].Category {
+			return out[i].Category < out[j].Category
+		}
+		return out[i].LoadName < out[j].LoadName
+	})
+	return out
+}
+
 // List returns the visible, resolved catalog for one platform.
 func (s *Store) List(platform string) []Skill {
 	if s == nil {
 		return nil
 	}
-	return resolveCatalog(scanRoots(s.managed), platform)
+	return s.catalog(platform)
 }
 
 // Index renders the prompt selection block for one platform, or "" when
@@ -40,7 +91,7 @@ func (s *Store) View(name, filePath, platform string) (ViewResult, error) {
 	if s == nil {
 		return ViewResult{}, fmt.Errorf("skill store is unavailable")
 	}
-	return View(scanRoots(s.managed), name, filePath, platform)
+	return viewCatalog(s.catalog(platform), name, filePath)
 }
 
 // skillNameRE bounds created skill names to filesystem-safe slugs.
@@ -230,12 +281,20 @@ func firstNonEmpty(values ...string) string {
 
 // Update replaces one substring of a skill's SKILL.md, identified by an
 // exact unique old_text match (the same contract as memory entry edits).
+// Plugin-bundled skills are read-only and fail closed with their origin.
 func (s *Store) Update(name, oldText, newContent string) (Skill, error) {
 	if s == nil || strings.TrimSpace(s.managed) == "" {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
 	}
 	if strings.TrimSpace(oldText) == "" {
 		return Skill{}, fmt.Errorf("old_text is required: the exact unique substring to replace")
+	}
+	resolved, err := viewCatalog(s.catalog(""), name, "")
+	if err != nil {
+		return Skill{}, err
+	}
+	if resolved.Source != "" {
+		return Skill{}, fmt.Errorf("skill %q is bundled with plugin %q and read-only", resolved.LoadName, resolved.Source)
 	}
 	view, err := View(scanRoots(s.managed), name, "", "")
 	if err != nil {

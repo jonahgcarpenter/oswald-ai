@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
@@ -149,5 +150,38 @@ func TestDefinitionContract(t *testing.T) {
 		if _, ok := def.Parameters.Properties[key]; !ok {
 			t.Fatalf("missing property %q", key)
 		}
+	}
+}
+
+func TestBundledPluginSkillsReadOnly(t *testing.T) {
+	process.ClearEnvPassthrough()
+	defer process.ClearEnvPassthrough()
+	root := seedManaged(t)
+	pluginDir := filepath.Join(t.TempDir(), "demo", "skills", "shipped")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("---\nname: shipped\ndescription: Bundled skill\n---\n\nBundled body.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithPlugins(root, []skills.PluginRoot{{Key: "demo", Dir: filepath.Dir(pluginDir)}})
+	listed, err := handler(skillContext(), map[string]interface{}{"action": "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed.Content, "demo/shipped") {
+		t.Fatalf("list missing bundled skill %q", listed.Content)
+	}
+	viewed, err := handler(skillContext(), map[string]interface{}{"action": "view", "name": "demo/shipped"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(viewed.Content, "Bundled body.") {
+		t.Fatalf("view missing bundled body %q", viewed.Content)
+	}
+	if _, err := handler(skillContext(), map[string]interface{}{"action": "update", "name": "demo/shipped", "old_text": "Bundled", "content": "Changed"}); err == nil {
+		t.Fatal("plugin skill update accepted")
+	} else if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("wrong read-only error: %v", err)
 	}
 }

@@ -38,6 +38,68 @@ func TestStoreListAndIndex(t *testing.T) {
 	}
 }
 
+func bindPlugin(t *testing.T, store *Store, key string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), key, "skills", "shipped")
+	writeSkillMD(t, dir, "---\nname: shipped\ndescription: Synthetic bundled skill\n---\n\nBundled body.\n")
+	store.BindPlugin(key, filepath.Join(t.TempDir(), "unused"))
+	store.BindPlugin(key, filepath.Dir(dir))
+	return dir
+}
+
+func TestBindPluginNamespacedAndReadOnly(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	bindPlugin(t, store, "acme")
+	found := store.List("")
+	if len(found) != 3 {
+		t.Fatalf("expected 3 skills, got %+v", found)
+	}
+	var bundled Skill
+	for _, skill := range found {
+		if skill.Source == "acme" {
+			bundled = skill
+		}
+	}
+	if bundled.LoadName != "acme/shipped" || bundled.Category != "plugin acme" {
+		t.Fatalf("bad namespacing: %+v", bundled)
+	}
+	viewed, err := store.View("acme/shipped", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Bundled body.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	if _, err := store.Update("acme/shipped", "Bundled", "Changed"); err == nil {
+		t.Fatal("plugin skill update accepted")
+	} else if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("wrong read-only error: %v", err)
+	}
+	if index := store.Index(""); !strings.Contains(index, "acme/shipped") {
+		t.Fatalf("index missing plugin skill:\n%s", index)
+	}
+}
+
+func TestBindPluginCollisionPrefersProfile(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	bindPlugin(t, store, "acme")
+	other := filepath.Join(t.TempDir(), "other", "skills", "review")
+	writeSkillMD(t, other, "---\nname: review\ndescription: Bundled review\n---\n\nOther body.\n")
+	store.BindPlugin("other", filepath.Dir(other))
+	// The bare name resolves to the profile skill; the namespaced name
+	// reaches the plugin copy. Namespacing disambiguates by construction.
+	viewed, err := store.View("review", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Follow the checklist.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	viewed, err = store.View("other/review", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Other body.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	if _, err := store.View("acme/review", "", ""); err == nil {
+		t.Fatal("cross-plugin name accepted")
+	}
+}
+
 func TestViewLoadsBodyAndSupportingFiles(t *testing.T) {
 	managed := seedLibrary(t)
 	store := NewStore(managed)

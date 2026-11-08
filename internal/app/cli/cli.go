@@ -22,6 +22,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
+	cliskills "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/skills"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/start"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -80,6 +81,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return tools.Run(ctx, root, rest[1:], stdout, stderr)
 	case "plugins":
 		return cliplugins.Run(ctx, root, rest[1:], stdout, stderr)
+	case "skills":
+		return cliskills.Run(ctx, root, rest[1:], stdout, stderr)
 	case "runtime":
 		return runtime.Run(ctx, root, rest[1:], stdout, stderr)
 	case "config":
@@ -122,6 +125,8 @@ commands:
                           install from URL, refresh, or remove shared plugin code
   plugins install-deps|bin-path
                           install pinned npm deps / print a plugin binary path
+  skills list|info|install|update|remove
+                          manage per-profile skills
   api show|set-key|clear-key
                          manage the OpenAI gateway credential
   config show|get|validate   inspect configuration and validate files
