@@ -65,6 +65,20 @@ type Manager struct {
 	mu       sync.Mutex
 	running  map[string]*liveProc
 	handoffs map[string]int
+	// envPassthrough carries caller-declared variable names (operator config)
+	// resolved per spawn against the profile scope.
+	envPassthrough []string
+}
+
+// SetEnvPassthrough replaces the caller-declared allowlist for spawns owned
+// by this manager. Registry names always apply on top.
+func (m *Manager) SetEnvPassthrough(names []string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.envPassthrough = append([]string(nil), names...)
 }
 
 var globalMu sync.Mutex
@@ -186,7 +200,10 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 	}
 	cmd := exec.Command(shell, "-c", command)
 	cmd.Dir = workdir
-	cmd.Env = append([]string{
+	m.mu.Lock()
+	configured := append([]string(nil), m.envPassthrough...)
+	m.mu.Unlock()
+	baseEnv := []string{
 		"PATH=/usr/bin:/bin:/usr/local/bin",
 		"HOME=" + sandboxHome(),
 		"LANG=C.UTF-8",
@@ -194,7 +211,8 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 		"OSWALD_WORKSPACE=" + workdir,
 		"OSWALD_SCRATCH=" + scratch,
 		"OSWALD_HOME=" + m.root,
-	}, GitHubTokenEnv()...)
+	}
+	cmd.Env = append(SandboxEnv(baseEnv, m.root, configured), GitHubTokenEnv()...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		out.Close()
