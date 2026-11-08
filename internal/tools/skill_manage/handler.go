@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // NewHandler returns the model-facing skill handler bound to one profile's
@@ -99,6 +100,13 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
 	}
+	// A viewed skill's declared sandbox variables register for passthrough so
+	// later terminal and execute_code calls in this process can receive them
+	// from the profile scope. Provider credential names are refused.
+	refusedNote := ""
+	if refused := process.RegisterEnvPassthrough(result.RequiredEnv); len(refused) > 0 {
+		refusedNote = fmt.Sprintf("\n\nnote: %d requested variable(s) were refused.", len(refused))
+	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Skill: %s [%s]\n", result.LoadName, result.Category)
 	if result.Version != "" {
@@ -107,7 +115,7 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 	sb.WriteString("\n")
 	if result.FilePath != "" {
 		sb.WriteString(outputpkg.Clean(result.FileContent))
-		return governance.Result{Content: sb.String(), Outcome: governance.OutcomeProductive}, nil
+		return governance.Result{Content: sb.String() + refusedNote, Outcome: governance.OutcomeProductive}, nil
 	}
 	sb.WriteString(outputpkg.Clean(result.Body))
 	if len(result.Supporting) > 0 {
@@ -116,7 +124,7 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 			sb.WriteString("- " + file + "\n")
 		}
 	}
-	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
+	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n") + refusedNote, Outcome: governance.OutcomeProductive}, nil
 }
 
 func create(store *skills.Store, name, description, content, category string) (governance.Result, error) {

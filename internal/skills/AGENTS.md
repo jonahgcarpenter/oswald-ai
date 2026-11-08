@@ -7,8 +7,8 @@ Applies on top of the root `AGENTS.md` (operator-state and never-log-rules).
 One root feeds one catalog: the profile-managed `<profileRoot>/skills/` tree, scanned
 fresh on every call — no cache, so tool edits are visible on the next turn with
 nothing to invalidate. `frontmatter.go` parses the `SKILL.md` subset (`name`,
-`description`, `version`, `platforms`, `prerequisites`, tags; unknown keys ignored),
-`scan.go` walks it (dot-dirs skipped, directory symlinks unfollowed, files over
+`description`, `version`, `platforms`, `prerequisites`, `required_env`, tags;
+unknown keys ignored), `scan.go` walks it (dot-dirs skipped, directory symlinks unfollowed, files over
 1 MiB skipped, malformed/unclosed fences skipped — a scan never fails for one file),
 `catalog.go` resolves it, `index.go` renders the prompt block, `read.go` loads
 bodies, `store.go` binds roots and owns create/update. The model-facing tool
@@ -33,7 +33,9 @@ supporting files listed from `references/`, `templates/`, `scripts/`, `assets/`.
 `View` matches load name, then declared name (exact, then case-insensitive), then
 directory base name; shared names error with the disambiguating paths instead of
 guessing. `file_path` reads stay inside the skill directory (symlink-resolved);
-`..`, absolute paths, and escapes fail closed. `Create` enforces the
+`..`, absolute paths, and escapes fail closed. A viewed skill's `required_env`
+names register for sandbox passthrough (provider credential names refused).
+`Create` enforces the
 `[a-z0-9][a-z0-9_-]{0,63}` slug, `0700` dirs, `0600` files, and refuses existing
 names; `Update` needs an exact unique `old_text` match and keeps file permissions.
 

@@ -13,6 +13,7 @@ type RawEntry struct {
 	Name        string
 	Description string
 	Version     string
+	RequiredEnv []string
 	Dir         string
 	File        string
 	Root        string
@@ -73,6 +74,7 @@ func scanRoot(root string) []RawEntry {
 			Name:        name,
 			Description: description,
 			Version:     strings.TrimSpace(front.version),
+			RequiredEnv: append([]string(nil), front.requiredEnv...),
 			Dir:         dir,
 			File:        path,
 			Root:        root,

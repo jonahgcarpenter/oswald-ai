@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 func skillContext() context.Context {
@@ -22,7 +23,7 @@ func seedManaged(t *testing.T) string {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: review\ndescription: Review code\n---\n\nFollow the checklist.\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: review\ndescription: Review code\nrequired_env: [SYNTH_SKILL_VAR, OPENAI_API_KEY]\n---\n\nFollow the checklist.\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return root
@@ -46,6 +47,8 @@ func TestHandlerRejectsUnknownArgs(t *testing.T) {
 }
 
 func TestListAndViewShapes(t *testing.T) {
+	process.ClearEnvPassthrough()
+	defer process.ClearEnvPassthrough()
 	handler := NewHandler(seedManaged(t))
 	result, err := handler(skillContext(), map[string]interface{}{"action": "list"})
 	if err != nil {
@@ -60,6 +63,12 @@ func TestListAndViewShapes(t *testing.T) {
 	}
 	if !strings.Contains(viewed.Content, "Follow the checklist.") {
 		t.Fatalf("unexpected view content %q", viewed.Content)
+	}
+	if !strings.Contains(viewed.Content, "1 requested variable(s) were refused") {
+		t.Fatalf("expected refusal note: %q", viewed.Content)
+	}
+	if got := process.PassthroughNames(); len(got) != 1 || got[0] != "SYNTH_SKILL_VAR" {
+		t.Fatalf("passthrough = %v", got)
 	}
 	if _, err := handler(skillContext(), map[string]interface{}{"action": "view", "name": "missing"}); err == nil {
 		t.Fatal("expected unknown skill error")

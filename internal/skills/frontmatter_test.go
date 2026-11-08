@@ -16,8 +16,8 @@ func TestParseFrontmatterFull(t *testing.T) {
 	}
 }
 
-func TestParseFrontmatterIgnoresHermesHeaders(t *testing.T) {
-	content := "---\nname: github\ndescription: \"GitHub via gh CLI: PRs, issues, reviews.\"\nversion: 2.0.0\nauthor: Ben Barclay\nlicense: MIT\nplatforms: [linux, macos, windows]\nmetadata:\n  hermes:\n    tags: [github, gh]\n    category: software-development\n---\nbody\n"
+func TestParseFrontmatterIgnoresVendorHeaders(t *testing.T) {
+	content := "---\nname: github\ndescription: \"GitHub via gh CLI: PRs, issues, reviews.\"\nversion: 2.0.0\nauthor: Ben Barclay\nlicense: MIT\nplatforms: [linux, macos, windows]\nmetadata:\n  vendor:\n    tags: [github, gh]\n    category: software-development\n---\nbody\n"
 	front, _, ok := parseFrontmatter(content)
 	if !ok {
 		t.Fatal("expected ok parse")
@@ -72,6 +72,31 @@ func TestParseFrontmatterUnclosedFailsClosed(t *testing.T) {
 	_, _, ok := parseFrontmatter("---\nname: broken\nbody without end\n")
 	if ok {
 		t.Fatal("expected unclosed fence to fail")
+	}
+}
+
+func TestParseFrontmatterRequiredEnv(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  []string
+	}{
+		{"[TENOR_API_KEY, SYNTH_OTHER_VAR]", []string{"TENOR_API_KEY", "SYNTH_OTHER_VAR"}},
+		{"TENOR_API_KEY", []string{"TENOR_API_KEY"}},
+		{"  [  ]  ", nil},
+		{"", nil},
+	} {
+		front, _, ok := parseFrontmatter("---\nname: demo\nrequired_env: " + tc.value + "\n---\nbody\n")
+		if !ok {
+			t.Fatalf("expected ok parse for %q", tc.value)
+		}
+		if len(front.requiredEnv) != len(tc.want) {
+			t.Fatalf("value %q = %+v", tc.value, front.requiredEnv)
+		}
+		for i := range tc.want {
+			if front.requiredEnv[i] != tc.want[i] {
+				t.Fatalf("value %q = %+v", tc.value, front.requiredEnv)
+			}
+		}
 	}
 }
 

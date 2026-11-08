@@ -7,11 +7,13 @@ import (
 
 // Skill is one loadable skill after catalog resolution. LoadName is what a
 // view call accepts: the declared name when unique, otherwise the exact
-// path relative to the skills root.
+// path relative to the skills root. RequiredEnv names sandbox variables the
+// skill asks to receive; they register for passthrough on view.
 type Skill struct {
 	Name        string
 	Description string
 	Version     string
+	RequiredEnv []string
 	Category    string
 	LoadName    string
 	Dir         string
@@ -77,6 +79,7 @@ func toSkill(entry RawEntry, loadName, root string) Skill {
 		Name:        entry.Name,
 		Description: entry.Description,
 		Version:     entry.Version,
+		RequiredEnv: append([]string(nil), entry.RequiredEnv...),
 		Category:    categoryFor(entry.Dir, root),
 		LoadName:    loadName,
 		Dir:         entry.Dir,
