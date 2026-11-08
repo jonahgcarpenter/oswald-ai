@@ -30,6 +30,8 @@ per-profile enable/config/storage — same island rule as `mcp_servers`:
   collision with impostor-dir rejection.
 - `manager.go` tracks loaded plugins, tool/hook/command/skill registrations, and
   per-profile `plugins/<name>/` storage (`0700` dirs, `0600` files, workspace-protected).
+  `EnabledRequiresEnv` reports each enabled plugin's declared `requires_env` so
+  startup can register them for sandbox passthrough.
 - `runtime.go` repairs `plugins/` roots, loads enabled plugins from shared
   `plugins-available/` + opt-in project dirs, checks `requires_env` fail-closed,
   and publishes tools into the profile registry with override gating.

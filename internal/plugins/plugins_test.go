@@ -177,3 +177,29 @@ func TestManagerStorageConfined(t *testing.T) {
 		t.Fatal("expected escape reject")
 	}
 }
+
+func TestEnabledRequiresEnvCoversEnabledOnly(t *testing.T) {
+	log := config.NewLogger(config.LevelWarn)
+	m := NewManager(t.TempDir(), "default", log)
+	m.Discover(map[string]Manifest{
+		"on":   {Name: "on", Key: "on", Source: "user", RequiresEnv: []string{"SYNTH_B_VAR", "SYNTH_A_VAR"}},
+		"off":  {Name: "off", Key: "off", Source: "user", RequiresEnv: []string{"SYNTH_OFF_VAR"}},
+		"bare": {Name: "bare", Key: "bare", Source: "user"},
+	})
+	if err := m.SetEnabled("on", true); err != nil {
+		t.Fatal(err)
+	}
+	got := m.EnabledRequiresEnv()
+	if len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	names, ok := got["on"]
+	if !ok || len(names) != 2 || names[0] != "SYNTH_B_VAR" {
+		t.Fatalf("got %+v", got)
+	}
+	// Returned slices are copies: mutating them must not affect the manager.
+	names[0] = "SYNTH_MUTATED"
+	if again := m.EnabledRequiresEnv()["on"]; again[0] != "SYNTH_B_VAR" {
+		t.Fatalf("manager state mutated: %+v", again)
+	}
+}
