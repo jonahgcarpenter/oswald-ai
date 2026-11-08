@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -193,4 +194,80 @@ func TestRemoveInstallUnknown(t *testing.T) {
 	if err := RemoveInstall(t.TempDir(), "nope!"); err == nil {
 		t.Fatal("bad key accepted")
 	}
+}
+
+func TestUpdateFromLocalGitRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	global := t.TempDir()
+	repo := filepath.Join(t.TempDir(), "plugin-repo")
+	manifest := "name: widget\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n"
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "plugin.yaml"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=synth", "GIT_AUTHOR_EMAIL=synth@example.com", "GIT_COMMITTER_NAME=synth", "GIT_COMMITTER_EMAIL=synth@example.com")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("add", "plugin.yaml")
+	runGit("commit", "-qm", "synthetic")
+	first, err := gitHead(t, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := InstallFromURL(t.Context(), global, repo, "", "", false, nil)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if result.Revision != first {
+		t.Fatalf("revision = %+v want %s", result, first)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "extra.txt"), []byte("more\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "extra.txt")
+	runGit("commit", "-qm", "synthetic two")
+	second, err := gitHead(t, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := UpdateFromURL(t.Context(), global, "widget", "", nil)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Revision != second || updated.AlreadyInstalled {
+		t.Fatalf("updated = %+v want %s", updated, second)
+	}
+	if _, err := os.Stat(filepath.Join(global, "plugins-available", "widget", "extra.txt")); err != nil {
+		t.Fatalf("updated tree missing file: %v", err)
+	}
+	pinned, err := UpdateFromURL(t.Context(), global, "widget", second, nil)
+	if err != nil || !pinned.Pinned {
+		t.Fatalf("pin = %+v %v", pinned, err)
+	}
+	if _, err := UpdateFromURL(t.Context(), global, "widget", "", nil); err == nil {
+		t.Fatal("pinned update without ref accepted")
+	}
+}
+
+func gitHead(t *testing.T, dir string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }

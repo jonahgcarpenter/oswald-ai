@@ -222,3 +222,34 @@ func TestRemoveAndUpdateGates(t *testing.T) {
 		t.Fatal("storage survived --full")
 	}
 }
+
+func execFixture(t *testing.T, root, name string) {
+	t.Helper()
+	manifestDir := filepath.Join(root, "plugins-available", name)
+	writePluginManifest(t, manifestDir, "name: "+name+"\nversion: \"1.0\"\ndescription: synthetic exec plugin\nmanifest_version: 2\napi_version: \"1\"\n")
+	binDir := filepath.Join(manifestDir, "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\necho exec-output\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecGatesAndRuns(t *testing.T) {
+	root := pluginsTestRoot(t)
+	if code, _, _ := pluginsRun(t, root, "exec", "ghost", "--", "x"); code == 0 {
+		t.Fatal("unknown exec accepted")
+	}
+	execFixture(t, root, "tool")
+	if code, _, stderr := pluginsRun(t, root, "exec", "tool", "--", "x"); code == 0 {
+		t.Fatalf("disabled exec accepted: %s", stderr)
+	}
+	if code, _, stderr := pluginsRun(t, root, "enable", "tool"); code != 0 {
+		t.Fatalf("enable = %d %s", code, stderr)
+	}
+	code, out, stderr := pluginsRun(t, root, "exec", "tool", "--bin", "tool", "--", "x")
+	if code != 0 || !strings.Contains(out, "exec-output") {
+		t.Fatalf("exec = %d %q %s", code, out, stderr)
+	}
+}

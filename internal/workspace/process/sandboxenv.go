@@ -11,7 +11,9 @@
 package process
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -57,6 +59,22 @@ var (
 	// profileConfigured holds operator-configured passthrough names per
 	// absolutized profile root, installed once per profile at startup.
 	profileConfigured = map[string][]string{}
+	// nodeDirOnce resolves the server's node binary directory a single time.
+	// Plugin shims (`#!/usr/bin/env node`) need node on the child PATH.
+	nodeDirOnce = sync.OnceValues(func() (string, error) {
+		path, err := exec.LookPath("node")
+		if err != nil {
+			return "", err
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			resolved = path
+		}
+		if dir := filepath.Dir(resolved); dir != "" && dir != "." {
+			return dir, nil
+		}
+		return "", fmt.Errorf("node directory is unavailable")
+	})
 )
 
 // SetProfileEnvPassthrough replaces the operator-configured allowlist for one
@@ -190,6 +208,31 @@ func ResolveEnvValue(name string, scope map[string]string) (string, bool) {
 		return value, true
 	}
 	return "", false
+}
+
+// WithNodeOnPath ensures the server-resolved node directory heads the PATH
+// entries of a child env base, so plugin shims (`#!/usr/bin/env node`) run
+// under sandboxed PATHs that would otherwise hide node. Bases without a PATH
+// entry, or hosts without node, pass through unchanged.
+func WithNodeOnPath(base []string) []string {
+	dir, err := nodeDirOnce()
+	if err != nil || dir == "" {
+		return base
+	}
+	out := append([]string(nil), base...)
+	for i, entry := range out {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.EqualFold(key, "PATH") {
+			continue
+		}
+		for _, part := range strings.Split(value, string(os.PathListSeparator)) {
+			if part == dir {
+				return out
+			}
+		}
+		out[i] = "PATH=" + dir + string(os.PathListSeparator) + value
+	}
+	return out
 }
 
 // SandboxEnvForProfile appends allowlisted variables for one profile root:

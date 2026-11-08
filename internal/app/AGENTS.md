@@ -17,7 +17,7 @@ with workers joined before stores close, and errors returned only after cleanup.
 logs, and listeners can outlive `Run` until process exit.
 
 `cli/cli.go` dispatches `setup | start | profile | mcp | gateway | platforms |
-providers | model | api | tools | plugins | runtime | config | env | help` with exit codes 0/1/2 and injectable
+providers | model | api | tools | plugins | skills | runtime | config | env | help` with exit codes 0/1/2 and injectable
 stdio. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
 one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
 copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only

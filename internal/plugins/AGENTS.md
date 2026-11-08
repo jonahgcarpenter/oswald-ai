@@ -22,10 +22,16 @@ per-profile enable/config/storage — same island rule as `mcp_servers`:
   `UpdateFromURL` refreshes managed git installs (pins need explicit `--ref`);
   `RemoveInstall` deletes shared code after callers verify no other profile
   references the key. Ranges, tags, URLs, and file specs fail closed.
-- `node.go` owns per-profile Node homes (`<profileRoot>/plugins/<name>/`): pinned
-  `npm install` with bounded output and timeouts (`install-deps` is the consent
-  gate), plus `NodeBinPath` absolute resolution. The terminal `PATH` stays fixed;
-  callers invoke the absolute path explicitly.
+- `node.go` owns the shared Node sidecar (`<global>/plugins-available/<name>/node_modules`,
+  installed once via `install-deps` as the consent gate, default scope only): pinned
+  `npm install` with bounded output and timeouts, plus `NodeBinPath` absolute resolution.
+  The terminal `PATH` stays fixed (plus the server-resolved node dir so shims run);
+  callers invoke the absolute path explicitly. Per-profile `<profileRoot>/plugins/<name>/`
+  holds data only, never code.
+- `exec.go` runs one installed plugin binary for a profile (`ExecPluginBinary`):
+  fixed base + profile passthrough, `HOME` redirected to the per-profile plugin home
+  so CLI config files land on the persisted volume, stdin closed, bounded output.
+  Requires the plugin enabled for that profile.
 - `manager.go` tracks loaded plugins, tool/hook/command/skill registrations, and
   per-profile `plugins/<name>/` storage (`0700` dirs, `0600` files, workspace-protected).
   `EnabledRequiresEnv` reports each enabled plugin's declared `requires_env` so
@@ -57,8 +63,9 @@ stay per profile. From a local shell (default scope):
 ```bash
 oswald plugins install owner/repo --enable --profile jonah  # https URL or local path too
 oswald plugins enable demo --profile jonah                   # opt in later / re-enable
-oswald plugins install-deps demo --profile jonah             # pinned npm deps, explicit consent
-oswald plugins bin-path demo --profile jonah                 # absolute path for terminal use
+oswald plugins install-deps demo                             # pinned npm deps, shared, explicit consent
+oswald plugins bin-path demo                                 # absolute path for terminal use
+oswald plugins exec demo -- --version                        # run for the calling profile (HOME redirected)
 oswald plugins update demo [--ref <40-char SHA>]             # pins never move without --ref
 oswald plugins remove demo --profile jonah [--full]          # refuses when other profiles reference it
 ```
@@ -88,7 +95,8 @@ Enabled plugins automatically receive their declared `requires_env` values in sa
 children (terminal, execute_code, background processes) from the acting profile's scope;
 see `internal/workspace/AGENTS.md` for the passthrough contract. Provider credential names
 are always refused. `terminal` never gains plugin directories on `PATH` — invoke plugin
-CLIs via the absolute `bin-path`.
+CLIs via the absolute `bin-path`, or `oswald plugins exec` (same sandbox env plus `HOME`
+redirected to the per-profile plugin home so CLI config files persist on the volume).
 
 ## Tests
 

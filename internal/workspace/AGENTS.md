@@ -58,13 +58,15 @@ environment: see Sandbox environment below.
 ## Sandbox environment (terminal, execute_code, background)
 
 `runShell`, `execute_code`, and `process.Manager.Spawn` build every child env from a fixed
-base (`PATH`, `HOME`, `LANG`, `TMPDIR`, `OSWALD_*`, plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN`)
-plus a deny-by-default passthrough allowlist resolved against the acting profile's own
-dotenv pair (global overlaid with the profile's own; `os.Getenv` fallback only for declared
-names). Three sources register names: skill frontmatter `required_env` (on `skill_view`),
-operator config `tools.terminal.env_passthrough` (per profile, restart to apply, staged
-validation), and enabled plugins' manifest `requires_env` (automatic on load) — see
-`process/sandboxenv.go` (`SandboxEnvForProfile`, `ProfileSecretScope`, `RegisterEnvPassthrough`).
+base (`PATH` plus the server-resolved node dir so shims run, `HOME`, `LANG`, `TMPDIR`,
+`OSWALD_*`, plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN`) plus a deny-by-default passthrough
+allowlist resolved against the acting profile's own dotenv pair (global overlaid with the
+profile's own; `os.Getenv` fallback only for declared names). Three sources register names:
+skill frontmatter `required_env` (on `skill_view`), operator config
+`tools.terminal.env_passthrough` (per profile, restart to apply, staged validation), and
+enabled plugins' manifest `requires_env` (automatic on load) — see
+`process/sandboxenv.go` (`SandboxEnvForProfile`, `ProfileSecretScope`, `RegisterEnvPassthrough`,
+`WithNodeOnPath`).
 
 Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`,
 `OSWALD_*`) can never tunnel into a sandbox; `ResolveEnvValue` skips refused and empty
