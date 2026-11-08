@@ -54,7 +54,46 @@ var refusedPassthroughNames = map[string]bool{
 var (
 	passthroughMu    sync.Mutex
 	passthroughNames = map[string]bool{}
+	// profileConfigured holds operator-configured passthrough names per
+	// absolutized profile root, installed once per profile at startup.
+	profileConfigured = map[string][]string{}
 )
+
+// SetProfileEnvPassthrough replaces the operator-configured allowlist for one
+// profile root. Registry names always apply on top.
+func SetProfileEnvPassthrough(profileRoot string, names []string) {
+	abs := strings.TrimSpace(profileRoot)
+	if abs != "" {
+		if resolved, err := filepath.Abs(abs); err == nil {
+			abs = resolved
+		}
+	}
+	cleaned := make([]string, 0, len(names))
+	for _, raw := range names {
+		if name := strings.TrimSpace(raw); name != "" && envNameRE.MatchString(name) {
+			cleaned = append(cleaned, name)
+		}
+	}
+	passthroughMu.Lock()
+	defer passthroughMu.Unlock()
+	if abs == "" {
+		return
+	}
+	profileConfigured[abs] = cleaned
+}
+
+// sandboxConfigured returns the operator-configured names for a profile root.
+func sandboxConfigured(profileRoot string) []string {
+	abs := strings.TrimSpace(profileRoot)
+	if abs != "" {
+		if resolved, err := filepath.Abs(abs); err == nil {
+			abs = resolved
+		}
+	}
+	passthroughMu.Lock()
+	defer passthroughMu.Unlock()
+	return append([]string(nil), profileConfigured[abs]...)
+}
 
 // RegisterEnvPassthrough records variable names allowed into sandboxed
 // children. Refused credential names are skipped and returned so callers can
@@ -151,6 +190,13 @@ func ResolveEnvValue(name string, scope map[string]string) (string, bool) {
 		return value, true
 	}
 	return "", false
+}
+
+// SandboxEnvForProfile appends allowlisted variables for one profile root:
+// registry names plus that profile's operator-configured names, each resolved
+// through the profile scope.
+func SandboxEnvForProfile(base []string, profileRoot string) []string {
+	return SandboxEnv(base, profileRoot, sandboxConfigured(profileRoot))
 }
 
 // SandboxEnv appends allowlisted variables to a caller-owned fixed base:

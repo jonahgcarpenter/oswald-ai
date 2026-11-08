@@ -94,7 +94,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 			"OSWALD_HOME=" + ws.Root(),
 			"PYTHONDONTWRITEBYTECODE=1",
 		}
-		cmd.Env = append(process.SandboxEnv(base, ws.Root(), nil), process.GitHubTokenEnv()...)
+		cmd.Env = append(process.SandboxEnvForProfile(base, ws.Root()), process.GitHubTokenEnv()...)
 		var buf bytes.Buffer
 		cmd.Stdout = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
 		cmd.Stderr = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
