@@ -19,11 +19,21 @@ import (
 // direct skills/ writes) the same way the memory tool bypasses them for
 // memories/: the tool is the mediated path.
 func NewHandler(profileRoot string) func(context.Context, map[string]interface{}) (governance.Result, error) {
+	return NewHandlerWithPlugins(profileRoot, nil)
+}
+
+// NewHandlerWithPlugins binds the managed tree plus read-only bundled plugin
+// skills roots. Plugin skills load under "<key>/<load name>" and reject
+// create/update; view works unchanged, including required_env registration.
+func NewHandlerWithPlugins(profileRoot string, pluginSkills []skills.PluginRoot) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	managed := ""
 	if strings.TrimSpace(profileRoot) != "" {
 		managed = filepath.Join(profileRoot, "skills")
 	}
 	store := skills.NewStore(managed)
+	for _, root := range pluginSkills {
+		store.BindPlugin(root.Key, root.Dir)
+	}
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err

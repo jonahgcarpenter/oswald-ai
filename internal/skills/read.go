@@ -39,11 +39,17 @@ type ViewResult struct {
 // filePath reads one supporting file inside the skill directory instead of
 // the body; it must stay inside the skill directory.
 func View(entries []RawEntry, name, filePath, platform string) (ViewResult, error) {
+	return viewCatalog(resolveCatalog(entries, platform), name, filePath)
+}
+
+// viewCatalog loads one skill from an already-resolved catalog. Plugin skills
+// resolve by their namespaced load name; their declared names still match,
+// with ambiguity reported the same way when a profile skill shares the name.
+func viewCatalog(catalog []Skill, name, filePath string) (ViewResult, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return ViewResult{}, fmt.Errorf("skill name is required")
 	}
-	catalog := resolveCatalog(entries, platform)
 	candidates := matchSkills(catalog, name)
 	if len(candidates) == 0 {
 		return ViewResult{}, fmt.Errorf("unknown skill %q", name)

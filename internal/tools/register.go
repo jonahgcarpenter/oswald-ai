@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/searxng"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -121,7 +124,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		return fmt.Errorf("register memory tool: %w", err)
 	}
 
-	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(cfg.ProfileRoot))); err != nil {
+	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandlerWithPlugins(cfg.ProfileRoot, pluginSkillRoots(cfg)))); err != nil {
 		return fmt.Errorf("register skill_manage tool: %w", err)
 	}
 
@@ -175,6 +178,33 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 		NormalizeArgs: normalize,
 		History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 	}
+}
+
+// pluginSkillRoots collects read-only bundled skills dirs for enabled plugins.
+// Disabled entries never bind. Missing skills dirs bind harmlessly: the scan
+// reads them as empty.
+func pluginSkillRoots(cfg *config.Config) []skills.PluginRoot {
+	globalRoot, err := config.GlobalRootForProfile(cfg.ProfileRoot, cfg.ProfileName)
+	if err != nil {
+		return nil
+	}
+	keys := append([]string(nil), cfg.PluginEnabled...)
+	sort.Strings(keys)
+	var out []skills.PluginRoot
+	for _, key := range keys {
+		blocked := false
+		for _, denied := range cfg.PluginDisabled {
+			if denied == key {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
+		out = append(out, skills.PluginRoot{Key: key, Dir: filepath.Join(globalRoot, "plugins-available", filepath.FromSlash(key), "skills")})
+	}
+	return out
 }
 
 // registerBrowserTools wires the local headless browser_* and

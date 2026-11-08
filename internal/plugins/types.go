@@ -60,9 +60,14 @@ type Manifest struct {
 	Capabilities []string
 	// AllowToolOverride permits replacing a same-named builtin tool.
 	AllowToolOverride bool
-	// ManifestVersion is the plugin contract version. Only 2 is accepted.
+	// Kind names the plugin kind. Empty or "standalone" is loadable;
+	// anything else fails closed: Oswald cannot honor backend, platform,
+	// or provider plugins.
+	Kind string
+	// ManifestVersion is the plugin contract version. 1 and 2 are accepted.
 	ManifestVersion int
-	// ApiVersion is the host API version the plugin targets. Only "1" is accepted.
+	// ApiVersion is the host API version the plugin targets. Empty defaults
+	// to "1" at parse time; a present value must be "1".
 	ApiVersion string
 	// RequiresPlugins names canonical plugin keys that must load first.
 	RequiresPlugins []string

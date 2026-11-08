@@ -8,16 +8,39 @@ import (
 // Skill is one loadable skill after catalog resolution. LoadName is what a
 // view call accepts: the declared name when unique, otherwise the exact
 // path relative to the skills root. RequiredEnv names sandbox variables the
-// skill asks to receive; they register for passthrough on view.
+// skill asks to receive; they register for passthrough on view. Source names
+// the origin: empty for the profile tree, otherwise the plugin key for
+// read-only bundled skills.
 type Skill struct {
 	Name        string
 	Description string
 	Version     string
 	RequiredEnv []string
+	Source      string
 	Category    string
 	LoadName    string
 	Dir         string
 	File        string
+}
+
+// ScanResult is one loadable skill found by scanning an explicit root:
+// bundled plugin skills, local directories, or anything else shaped like the
+// managed tree. Keys are always load names as the catalog resolves them.
+type ScanResult struct {
+	LoadName    string
+	Category    string
+	Description string
+	Dir         string
+}
+
+// ScanDir scans an explicit skills root without binding a store. Missing or
+// unreadable roots read as empty; malformed entries are skipped, never fatal.
+func ScanDir(root string) []ScanResult {
+	var out []ScanResult
+	for _, skill := range resolveCatalog(scanRoots(root), "") {
+		out = append(out, ScanResult{LoadName: skill.LoadName, Category: skill.Category, Description: skill.Description, Dir: skill.Dir})
+	}
+	return out
 }
 
 // resolveCatalog turns scanned entries into the visible, loadable catalog.

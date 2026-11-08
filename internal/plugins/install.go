@@ -43,18 +43,43 @@ type InstallResult struct {
 	Revision string
 	// Pinned reports whether --ref pinned the install.
 	Pinned bool
+	// AlreadyInstalled reports an idempotent no-op: the published tree
+	// already satisfies the request, so nothing was copied or rewritten.
+	AlreadyInstalled bool
+	// DepsInstalled reports whether this invocation installed (or repaired)
+	// the node sidecar. False when there is no sidecar, --no-deps was set,
+	// or an idempotent hit found the binary already present.
+	DepsInstalled bool
+}
+
+// InstallOptions carries the optional inputs to InstallFromURL beyond the
+// source argument. NodePackage and NodeVersion must be set together or not
+// at all; they supply the sidecar for repos whose manifest predates the
+// node_package convention. NoDeps records the sidecar without installing it.
+type InstallOptions struct {
+	Ref         string
+	Subdir      string
+	Force       bool
+	NodePackage string
+	NodeVersion string
+	NoDeps      bool
 }
 
 // InstallMetadata is the provenance record written beside installed code.
-// It carries source and revision only, never config values or secrets.
+// It carries source, revision, and the resolved node sidecar — never config
+// values or secrets. install-deps, bin-path, and exec fall back to the
+// recorded node fields when the published manifest declares none.
 type InstallMetadata struct {
-	Source      string `json:"source"`
-	URL         string `json:"url"`
-	Ref         string `json:"ref,omitempty"`
-	Revision    string `json:"revision,omitempty"`
-	Pinned      bool   `json:"pinned"`
-	Subdir      string `json:"subdir,omitempty"`
-	InstalledAt string `json:"installed_at"`
+	Source       string `json:"source"`
+	URL          string `json:"url"`
+	Ref          string `json:"ref,omitempty"`
+	Revision     string `json:"revision,omitempty"`
+	Pinned       bool   `json:"pinned"`
+	Subdir       string `json:"subdir,omitempty"`
+	NodePackage  string `json:"node_package,omitempty"`
+	NodeVersion  string `json:"node_version,omitempty"`
+	NodeLockfile bool   `json:"node_lockfile,omitempty"`
+	InstalledAt  string `json:"installed_at"`
 }
 
 // ParseInstallSource normalizes a user-supplied install argument: owner/repo
@@ -121,23 +146,149 @@ func ValidateInstallSubdir(subdir string) (string, error) {
 	return filepath.Clean(trimmed), nil
 }
 
+// NodeSpec is a resolved node sidecar: an exact package pin or a lockfile
+// install from the plugin's own root package.json.
+type NodeSpec struct {
+	Package  string
+	Version  string
+	Lockfile bool
+}
+
+// Present reports whether a sidecar install is needed at all.
+func (s NodeSpec) Present() bool {
+	return s.Package != "" || s.Lockfile
+}
+
+// resolveNodeSidecar decides the sidecar for a fresh install. Explicit flags
+// supply it for repos whose manifest predates the node_package convention;
+// otherwise the manifest declaration wins; otherwise a root package.json
+// with a lockfile falls back to npm ci. Flags conflicting with a manifest
+// declaration fail closed instead of silently winning or losing.
+func resolveNodeSidecar(manifest *Manifest, flagPackage, flagVersion, pluginDir string) (NodeSpec, error) {
+	flagPackage = strings.TrimSpace(flagPackage)
+	flagVersion = strings.TrimSpace(flagVersion)
+	if flagPackage != "" || flagVersion != "" {
+		if flagPackage == "" || flagVersion == "" {
+			return NodeSpec{}, fmt.Errorf("plugin --node-package and --node-version must be set together")
+		}
+		if err := ValidateNodeDeps(&Manifest{Name: manifest.Name, NodePackage: flagPackage, NodeVersion: flagVersion}); err != nil {
+			return NodeSpec{}, err
+		}
+		if strings.TrimSpace(manifest.NodePackage) != "" &&
+			(manifest.NodePackage != flagPackage || manifest.NodeVersion != flagVersion) {
+			return NodeSpec{}, fmt.Errorf("plugin %q already declares node_package %q; flags conflict with the manifest", manifest.Name, manifest.NodePackage)
+		}
+		return NodeSpec{Package: flagPackage, Version: flagVersion}, nil
+	}
+	if strings.TrimSpace(manifest.NodePackage) != "" {
+		return NodeSpec{Package: manifest.NodePackage, Version: manifest.NodeVersion}, nil
+	}
+	if hasLockfileSidecar(pluginDir) {
+		return NodeSpec{Lockfile: true}, nil
+	}
+	return NodeSpec{}, nil
+}
+
+// resolveUpdateNodeSpec decides the sidecar for an update. A fresh manifest
+// declaration wins; otherwise the recorded install-time spec carries forward.
+func resolveUpdateNodeSpec(manifest *Manifest, meta InstallMetadata) NodeSpec {
+	if strings.TrimSpace(manifest.NodePackage) != "" {
+		return NodeSpec{Package: manifest.NodePackage, Version: manifest.NodeVersion}
+	}
+	return NodeSpec{Package: meta.NodePackage, Version: meta.NodeVersion, Lockfile: meta.NodeLockfile}
+}
+
+// hasLockfileSidecar reports whether dir carries a root package.json with a
+// lockfile, making it installable via npm ci with fully pinned deps. A
+// package.json without a lockfile is correctly ignored: unpinned installs
+// never run.
+func hasLockfileSidecar(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	if info, err := os.Stat(filepath.Join(dir, "package.json")); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	for _, lock := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
+		if info, err := os.Stat(filepath.Join(dir, lock)); err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveNodeSpec decides the sidecar for an already-installed plugin:
+// the published manifest declaration wins, otherwise the recorded
+// install-time metadata carries. It backs install-deps after the fact.
+func ResolveNodeSpec(manifest Manifest, meta InstallMetadata) (NodeSpec, bool) {
+	if strings.TrimSpace(manifest.NodePackage) != "" {
+		return NodeSpec{Package: manifest.NodePackage, Version: manifest.NodeVersion}, true
+	}
+	if strings.TrimSpace(meta.NodePackage) != "" {
+		return NodeSpec{Package: meta.NodePackage, Version: meta.NodeVersion}, true
+	}
+	if meta.NodeLockfile {
+		return NodeSpec{Lockfile: true}, true
+	}
+	return NodeSpec{}, false
+}
+
+// EffectiveNodeBin resolves the binary name for display and exec: explicit,
+// else the manifest default, else the recorded package base. Lockfile-only
+// installs resolve to "" and need an explicit --bin.
+func EffectiveNodeBin(manifest Manifest, meta InstallMetadata, explicit string) string {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit)
+	}
+	if bin := DefaultNodeBin(manifest); bin != "" {
+		return bin
+	}
+	base := meta.NodePackage
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	return base
+}
+
+// sidecarMissing reports whether the installed sidecar binary (or, for
+// lockfile-only installs with no known bin, the node_modules tree) is absent.
+func sidecarMissing(globalRoot, key, bin string) bool {
+	if bin != "" {
+		_, err := NodeBinPath(globalRoot, key, bin)
+		return err != nil
+	}
+	info, err := os.Stat(filepath.Join(UserPluginsDir(globalRoot), filepath.FromSlash(key), "node_modules"))
+	return err != nil || !info.IsDir()
+}
+
 // InstallFromURL clones or copies a plugin into the shared plugins-available
 // tree and records provenance metadata. Code writes require default scope;
 // callers check RequireDefaultScope before invoking. Force replaces an
-// existing install, backing up the previous tree first.
-func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, force bool, log *config.Logger) (InstallResult, error) {
+// existing install, backing up the previous tree first. The node sidecar
+// installs as part of the invocation unless NoDeps opts out; a sidecar
+// failure rolls the published tree back so installs stay atomic.
+func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOptions, log *config.Logger) (InstallResult, error) {
 	source, err := ParseInstallSource(raw)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	if err := ValidateInstallRef(ref); err != nil {
+	if err := ValidateInstallRef(opts.Ref); err != nil {
 		return InstallResult{}, err
 	}
-	cleanSubdir, err := ValidateInstallSubdir(subdir)
+	cleanSubdir, err := ValidateInstallSubdir(opts.Subdir)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	ref = strings.TrimSpace(ref)
+	ref := strings.TrimSpace(opts.Ref)
+	if source.Kind == "local" {
+		if _, err := os.Stat(filepath.Join(source.URL, ".git")); err == nil {
+			// Local git checkout: clone it so the install records a
+			// revision and supports update. File clones need no network.
+			source = InstallSource{Kind: "git", URL: source.URL}
+		} else if ref != "" {
+			return InstallResult{}, fmt.Errorf("plugin --ref applies to git sources only")
+		}
+	}
 	available := UserPluginsDir(globalRoot)
 	if err := os.MkdirAll(available, 0755); err != nil {
 		return InstallResult{}, fmt.Errorf("prepare plugin directory: %w", err)
@@ -173,12 +324,25 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 	if err != nil {
 		return InstallResult{}, err
 	}
+	spec, err := resolveNodeSidecar(manifest, opts.NodePackage, opts.NodeVersion, pluginDir)
+	if err != nil {
+		return InstallResult{}, err
+	}
 	// The published directory is always the manifest name so the key stays
 	// canonical: the repo or local path is only a transport.
 	dest := filepath.Join(available, manifest.Name)
 	if _, err := os.Lstat(dest); err == nil {
-		if !force {
-			return InstallResult{}, fmt.Errorf("plugin %q is already installed (use --force to replace)", manifest.Name)
+		if !opts.Force {
+			if result, done, err := existingInstallState(globalRoot, manifest.Name, source, cleanSubdir, ref, spec); err != nil {
+				return InstallResult{}, err
+			} else if done {
+				if repaired, err := repairSidecar(ctx, globalRoot, manifest, spec, opts.NoDeps, log); err != nil {
+					return InstallResult{}, err
+				} else if repaired {
+					result.DepsInstalled = true
+				}
+				return result, nil
+			}
 		}
 		backup, err := backupInstall(globalRoot, manifest.Name)
 		if err != nil {
@@ -192,14 +356,26 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 	if err := copyPluginTree(pluginDir, dest); err != nil {
 		return InstallResult{}, err
 	}
+	depsInstalled := false
+	if spec.Present() && !opts.NoDeps {
+		bin := EffectiveNodeBin(*manifest, InstallMetadata{NodePackage: spec.Package}, "")
+		if err := installSidecarInto(ctx, globalRoot, manifest.Name, bin, spec, dest, log); err != nil {
+			_ = os.RemoveAll(dest)
+			return InstallResult{}, err
+		}
+		depsInstalled = true
+	}
 	meta := InstallMetadata{
-		Source:      source.Kind,
-		URL:         source.URL,
-		Ref:         ref,
-		Revision:    revision,
-		Pinned:      ref != "",
-		Subdir:      cleanSubdir,
-		InstalledAt: time.Now().UTC().Format(time.RFC3339),
+		Source:       source.Kind,
+		URL:          source.URL,
+		Ref:          ref,
+		Revision:     revision,
+		Pinned:       ref != "",
+		Subdir:       cleanSubdir,
+		NodePackage:  spec.Package,
+		NodeVersion:  spec.Version,
+		NodeLockfile: spec.Lockfile,
+		InstalledAt:  time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := WriteInstallMetadata(dest, meta); err != nil {
 		_ = os.RemoveAll(dest)
@@ -208,7 +384,64 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 	if log != nil {
 		log.Server("plugin.install").Debug("plugin.install.completed", "installed plugin", config.F("plugin", manifest.Name), config.F("pinned", meta.Pinned))
 	}
-	return InstallResult{Key: manifest.Name, Revision: revision, Pinned: meta.Pinned}, nil
+	return InstallResult{Key: manifest.Name, Revision: revision, Pinned: meta.Pinned, DepsInstalled: depsInstalled}, nil
+}
+
+// installSidecarInto installs the resolved sidecar into an already-published
+// plugin directory: an exact npm pin, or npm ci for lockfile fallbacks.
+// dir is the install target (the published tree, or staged temp on update).
+func installSidecarInto(ctx context.Context, globalRoot, key, bin string, spec NodeSpec, dir string, log *config.Logger) error {
+	if spec.Lockfile {
+		return InstallNodeLockfile(ctx, globalRoot, key, dir, log)
+	}
+	return InstallNodePackage(ctx, globalRoot, key, bin, spec.Package+"@"+spec.Version, dir, log)
+}
+
+// repairSidecar verifies the sidecar on the idempotent path and installs it
+// when the binary (or lockfile tree) is missing. It reports whether a repair
+// ran. With NoDeps the missing sidecar stays missing: the operator opted out.
+func repairSidecar(ctx context.Context, globalRoot string, manifest *Manifest, spec NodeSpec, noDeps bool, log *config.Logger) (bool, error) {
+	if !spec.Present() || noDeps {
+		return false, nil
+	}
+	meta, err := ReadInstallMetadata(globalRoot, manifest.Name)
+	if err != nil {
+		meta = InstallMetadata{}
+	}
+	if !sidecarMissing(globalRoot, manifest.Name, EffectiveNodeBin(*manifest, meta, "")) {
+		return false, nil
+	}
+	dest := filepath.Join(UserPluginsDir(globalRoot), manifest.Name)
+	bin := EffectiveNodeBin(*manifest, InstallMetadata{NodePackage: spec.Package}, "")
+	if err := installSidecarInto(ctx, globalRoot, manifest.Name, bin, spec, dest, log); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// existingInstallState compares a staged install request against the
+// published tree. It returns done=true with an AlreadyInstalled result when
+// the published tree already satisfies the request (no copy needed).
+// Otherwise it returns a guiding error: conflicting sources or node sidecars
+// must be replaced with --force, and revision moves go through update.
+func existingInstallState(globalRoot, name string, source InstallSource, subdir, ref string, spec NodeSpec) (InstallResult, bool, error) {
+	meta, err := ReadInstallMetadata(globalRoot, name)
+	if err != nil {
+		return InstallResult{}, false, fmt.Errorf("plugin %q is already installed but unmanaged (use --force to replace)", name)
+	}
+	if meta.Source != source.Kind || meta.URL != source.URL || meta.Subdir != subdir {
+		return InstallResult{}, false, fmt.Errorf("plugin %q is already installed from a different source (use --force to replace)", name)
+	}
+	if meta.NodePackage != spec.Package || meta.NodeVersion != spec.Version || meta.NodeLockfile != spec.Lockfile {
+		return InstallResult{}, false, fmt.Errorf("plugin %q is already installed with different node dependencies (use --force to replace)", name)
+	}
+	if ref != "" && ref != meta.Revision {
+		if source.Kind != "git" {
+			return InstallResult{}, false, fmt.Errorf("plugin %q is already installed (use --force to replace)", name)
+		}
+		return InstallResult{}, false, fmt.Errorf("plugin %q is installed at another revision (use plugins update to move it)", name)
+	}
+	return InstallResult{Key: name, Revision: meta.Revision, Pinned: meta.Pinned, AlreadyInstalled: true}, true, nil
 }
 
 // MetadataPath returns the provenance file for one installed plugin key.
@@ -399,8 +632,34 @@ func gitCheckoutPin(ctx context.Context, dir, ref string) (string, error) {
 	return head, nil
 }
 
-// UpdateFromURL refreshes one managed install in place. Pinned installs need
-// an explicit --ref; unpinned installs follow the remote HEAD.
+// gitLsRemote resolves the remote HEAD SHA without cloning. It needs the
+// network for remote URLs but works offline for local paths.
+func gitLsRemote(ctx context.Context, url string) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, installRevTimeout)
+	defer cancel()
+	tmp, err := os.MkdirTemp("", "oswald-git-*")
+	if err != nil {
+		return "", fmt.Errorf("stage plugin fetch: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	cmd := exec.CommandContext(runCtx, "git", "ls-remote", url, "HEAD")
+	cmd.Env = gitEnv(tmp)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("plugin fetch failed")
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 || !fullSHARE.MatchString(fields[0]) {
+		return "", fmt.Errorf("plugin fetch failed")
+	}
+	return fields[0], nil
+}
+
+// UpdateFromURL refreshes one managed install by re-cloning its recorded
+// source and publishing the result over the installed tree. Published trees
+// carry no git metadata (only provenance), so in-place fetch is impossible.
+// Pinned installs need an explicit --ref; unpinned installs follow the remote
+// HEAD.
 func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config.Logger) (InstallResult, error) {
 	if !ValidPluginKey(key) || strings.Contains(key, "/") {
 		return InstallResult{}, fmt.Errorf("invalid plugin key")
@@ -409,11 +668,6 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 		return InstallResult{}, err
 	}
 	ref = strings.TrimSpace(ref)
-	dir := filepath.Join(UserPluginsDir(globalRoot), key)
-	info, err := os.Stat(filepath.Join(dir, ".git"))
-	if err != nil || !info.IsDir() {
-		return InstallResult{}, fmt.Errorf("plugin %q is not a managed git install", key)
-	}
 	meta, err := ReadInstallMetadata(globalRoot, key)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("plugin %q has no install provenance; remove and reinstall it", key)
@@ -424,76 +678,82 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 	if meta.Source != "git" {
 		return InstallResult{}, fmt.Errorf("plugin %q is not a git install", key)
 	}
-	runCtx, cancel := context.WithTimeout(ctx, installCloneTimeout)
-	defer cancel()
-	tmp, err := os.MkdirTemp("", "oswald-git-*")
+	staging, err := os.MkdirTemp("", "oswald-plugin-*")
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("stage plugin fetch: %w", err)
+		return InstallResult{}, fmt.Errorf("stage plugin update: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	env := gitEnv(tmp)
-	fetch := exec.CommandContext(runCtx, "git", "fetch", "origin")
-	fetch.Dir = dir
-	fetch.Env = env
-	if output, err := fetch.CombinedOutput(); err != nil {
-		_ = output
-		return InstallResult{}, fmt.Errorf("plugin fetch failed")
+	defer func() { _ = os.RemoveAll(staging) }()
+	cloneDir := filepath.Join(staging, "repo")
+	if err := gitClone(ctx, meta.URL, cloneDir); err != nil {
+		return InstallResult{}, err
 	}
 	target := ref
 	if target == "" {
-		head := exec.CommandContext(runCtx, "git", "rev-parse", "origin/HEAD")
-		head.Dir = dir
-		head.Env = env
-		output, err := head.Output()
+		target, err = gitLsRemote(ctx, meta.URL)
 		if err != nil {
-			return InstallResult{}, fmt.Errorf("plugin fetch failed")
-		}
-		target = strings.TrimSpace(string(output))
-	} else {
-		fetchRef := exec.CommandContext(runCtx, "git", "fetch", "origin", target)
-		fetchRef.Dir = dir
-		fetchRef.Env = env
-		if output, err := fetchRef.CombinedOutput(); err != nil {
-			_ = output
-			return InstallResult{}, fmt.Errorf("plugin ref is unavailable")
+			return InstallResult{}, err
 		}
 	}
-	checkout := exec.CommandContext(runCtx, "git", "checkout", "--detach", target)
-	checkout.Dir = dir
-	checkout.Env = env
-	if output, err := checkout.CombinedOutput(); err != nil {
-		_ = output
-		return InstallResult{}, fmt.Errorf("plugin ref is unavailable")
-	}
-	revParse := exec.CommandContext(runCtx, "git", "rev-parse", "HEAD")
-	revParse.Dir = dir
-	revParse.Env = env
-	output, err := revParse.Output()
+	revision, err := gitCheckoutPin(ctx, cloneDir, target)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("plugin fetch failed")
-	}
-	revision := strings.TrimSpace(string(output))
-	if ref != "" && revision != ref {
-		return InstallResult{}, fmt.Errorf("plugin ref mismatch")
-	}
-	if _, err := ParseManifestFile(dir, "user"); err != nil {
 		return InstallResult{}, err
+	}
+	pluginDir := cloneDir
+	if meta.Subdir != "" {
+		pluginDir = filepath.Join(cloneDir, filepath.FromSlash(meta.Subdir))
+	}
+	manifest, err := ParseManifestFile(pluginDir, "user")
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if manifest.Name != key {
+		return InstallResult{}, fmt.Errorf("plugin update changed its name to %q", manifest.Name)
+	}
+	dest := filepath.Join(UserPluginsDir(globalRoot), key)
+	fresh, err := os.MkdirTemp(filepath.Dir(dest), ".plugin-update-*.tmp")
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("stage plugin update: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(fresh) }()
+	if err := copyPluginTree(pluginDir, fresh); err != nil {
+		return InstallResult{}, err
+	}
+	spec := resolveUpdateNodeSpec(manifest, meta)
+	depsInstalled := false
+	if spec.Present() {
+		bin := EffectiveNodeBin(*manifest, InstallMetadata{NodePackage: spec.Package}, "")
+		if err := installSidecarInto(ctx, globalRoot, key, bin, spec, fresh, log); err != nil {
+			return InstallResult{}, err
+		}
+		depsInstalled = true
 	}
 	meta.Revision = revision
 	meta.InstalledAt = time.Now().UTC().Format(time.RFC3339)
+	if strings.TrimSpace(manifest.NodePackage) != "" {
+		meta.NodePackage = manifest.NodePackage
+		meta.NodeVersion = manifest.NodeVersion
+		meta.NodeLockfile = false
+	}
 	if ref != "" {
 		meta.Ref = ref
 		meta.Pinned = true
 	} else {
+		meta.Ref = ""
 		meta.Pinned = false
 	}
-	if err := WriteInstallMetadata(dir, meta); err != nil {
+	if err := WriteInstallMetadata(fresh, meta); err != nil {
 		return InstallResult{}, err
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return InstallResult{}, fmt.Errorf("plugin update failed: %w", err)
+	}
+	if err := os.Rename(fresh, dest); err != nil {
+		return InstallResult{}, fmt.Errorf("plugin update failed: %w", err)
 	}
 	if log != nil {
 		log.Server("plugin.install").Debug("plugin.install.updated", "updated plugin", config.F("plugin", key))
 	}
-	return InstallResult{Key: key, Revision: revision, Pinned: meta.Pinned}, nil
+	return InstallResult{Key: key, Revision: revision, Pinned: meta.Pinned, DepsInstalled: depsInstalled}, nil
 }
 
 // RemoveInstall deletes shared code for one plugin key. Config cleanup is the

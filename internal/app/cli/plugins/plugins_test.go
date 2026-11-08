@@ -115,6 +115,12 @@ func TestBinPathAndInstallDepsGates(t *testing.T) {
 	if code, _, _ := pluginsRun(t, root, "install-deps", "demo"); code == 0 {
 		t.Fatal("install-deps without node deps accepted")
 	}
+	if code, _, _ := pluginsRun(t, root, "install-deps", "demo", "--profile", "alice"); code != 2 {
+		t.Fatalf("profile-scoped install-deps = %d, want usage", code)
+	}
+	if code, _, _ := pluginsRun(t, root, "bin-path", "demo", "--profile", "alice"); code != 2 {
+		t.Fatalf("profile-scoped bin-path = %d, want usage", code)
+	}
 }
 
 func installSourceFixture(t *testing.T, name string) string {
@@ -137,8 +143,9 @@ func TestInstallLocalWithEnable(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "installed_from: local") {
 		t.Fatalf("info = %d %q", code, out)
 	}
-	if code, _, _ := pluginsRun(t, root, "install", src); code == 0 {
-		t.Fatal("duplicate install accepted")
+	code, out, _ = pluginsRun(t, root, "install", src)
+	if code != 0 || !strings.Contains(out, "already installed shipped") {
+		t.Fatalf("idempotent reinstall = %d %q", code, out)
 	}
 	if code, _, stderr := pluginsRun(t, root, "install", src, "--force"); code != 0 {
 		t.Fatalf("force reinstall = %d %s", code, stderr)
@@ -213,5 +220,63 @@ func TestRemoveAndUpdateGates(t *testing.T) {
 	}
 	if _, err := os.Stat(storage); !os.IsNotExist(err) {
 		t.Fatal("storage survived --full")
+	}
+}
+
+func execFixture(t *testing.T, root, name string) {
+	t.Helper()
+	manifestDir := filepath.Join(root, "plugins-available", name)
+	writePluginManifest(t, manifestDir, "name: "+name+"\nversion: \"1.0\"\ndescription: synthetic exec plugin\nmanifest_version: 2\napi_version: \"1\"\n")
+	binDir := filepath.Join(manifestDir, "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\necho exec-output\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecGatesAndRuns(t *testing.T) {
+	root := pluginsTestRoot(t)
+	if code, _, _ := pluginsRun(t, root, "exec", "ghost", "--", "x"); code == 0 {
+		t.Fatal("unknown exec accepted")
+	}
+	execFixture(t, root, "tool")
+	if code, _, stderr := pluginsRun(t, root, "exec", "tool", "--", "x"); code == 0 {
+		t.Fatalf("disabled exec accepted: %s", stderr)
+	}
+	if code, _, stderr := pluginsRun(t, root, "enable", "tool"); code != 0 {
+		t.Fatalf("enable = %d %s", code, stderr)
+	}
+	code, out, stderr := pluginsRun(t, root, "exec", "tool", "--bin", "tool", "--", "x")
+	if code != 0 || !strings.Contains(out, "exec-output") {
+		t.Fatalf("exec = %d %q %s", code, out, stderr)
+	}
+}
+
+func TestInstallNodeFlagsEndToEnd(t *testing.T) {
+	root := pluginsTestRoot(t)
+	src := installSourceFixture(t, "flagged")
+	if code, out, stderr := pluginsRun(t, root, "install", src, "--node-package", "agent-data", "--node-version", "0.13.0", "--no-deps"); code != 0 {
+		t.Fatalf("install = %d %s %s", code, out, stderr)
+	}
+	code, out, _ := pluginsRun(t, root, "info", "flagged")
+	if code != 0 {
+		t.Fatalf("info = %d %q", code, out)
+	}
+	// Metadata fallback: bin-path resolves the recorded package base.
+	code, out, _ = pluginsRun(t, root, "bin-path", "flagged")
+	if code == 0 {
+		t.Fatalf("bin-path succeeded without installed deps: %q", out)
+	}
+	if code, _, _ := pluginsRun(t, root, "install", src, "--node-package", "agent-data"); code == 0 {
+		t.Fatal("half node flags accepted")
+	}
+	// Idempotent reinstall with the same flags stays a no-op (no npm run).
+	if code, out, _ := pluginsRun(t, root, "install", src, "--node-package", "agent-data", "--node-version", "0.13.0", "--no-deps"); code != 0 || !strings.Contains(out, "already installed flagged") {
+		t.Fatalf("idempotent reinstall = %d %q", code, out)
+	}
+	if code, _, _ := pluginsRun(t, root, "install", src, "--node-package", "other", "--node-version", "9.9.9", "--no-deps"); code == 0 {
+		t.Fatal("node mismatch accepted without --force")
 	}
 }

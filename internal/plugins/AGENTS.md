@@ -7,7 +7,7 @@ Applies on top of the root `AGENTS.md` (operator-state, persisted-contract, and 
 One `Manager` per profile (`scope_key` is the absolute profile root). Shared code,
 per-profile enable/config/storage — same island rule as `mcp_servers`:
 
-- `types.go` owns `Manifest` (including `manifest_version: 2`, `api_version: "1"`,
+- `types.go` owns `Manifest` (including `manifest_version` 1 or 2, `api_version: "1"`,
   `requires_plugins`), hook names, `Registration`, `PluginContext`, typed errors.
 - `manifest.go` parses `plugin.yaml` (name 2–40 lc ASCII, `soul` reserved; version,
   entry, `requires_env`, `capabilities`, optional pinned `node_package@node_version`
@@ -22,10 +22,16 @@ per-profile enable/config/storage — same island rule as `mcp_servers`:
   `UpdateFromURL` refreshes managed git installs (pins need explicit `--ref`);
   `RemoveInstall` deletes shared code after callers verify no other profile
   references the key. Ranges, tags, URLs, and file specs fail closed.
-- `node.go` owns per-profile Node homes (`<profileRoot>/plugins/<name>/`): pinned
-  `npm install` with bounded output and timeouts (`install-deps` is the consent
-  gate), plus `NodeBinPath` absolute resolution. The terminal `PATH` stays fixed;
-  callers invoke the absolute path explicitly.
+- `node.go` owns the shared Node sidecar (`<global>/plugins-available/<name>/node_modules`,
+  installed once via `install-deps` as the consent gate, default scope only): pinned
+  `npm install` with bounded output and timeouts, plus `NodeBinPath` absolute resolution.
+  The terminal `PATH` stays fixed (plus the server-resolved node dir so shims run);
+  callers invoke the absolute path explicitly. Per-profile `<profileRoot>/plugins/<name>/`
+  holds data only, never code.
+- `exec.go` runs one installed plugin binary for a profile (`ExecPluginBinary`):
+  fixed base + profile passthrough, `HOME` redirected to the per-profile plugin home
+  so CLI config files land on the persisted volume, stdin closed, bounded output.
+  Requires the plugin enabled for that profile.
 - `manager.go` tracks loaded plugins, tool/hook/command/skill registrations, and
   per-profile `plugins/<name>/` storage (`0700` dirs, `0600` files, workspace-protected).
   `EnabledRequiresEnv` reports each enabled plugin's declared `requires_env` so
@@ -56,27 +62,40 @@ stay per profile. From a local shell (default scope):
 
 ```bash
 oswald plugins install owner/repo --enable --profile jonah  # https URL or local path too
+oswald plugins install owner/repo --node-package agent-data --node-version 0.13.0 --enable --profile jonah  # sidecar for manifests predating node_package
 oswald plugins enable demo --profile jonah                   # opt in later / re-enable
-oswald plugins install-deps demo --profile jonah             # pinned npm deps, explicit consent
-oswald plugins bin-path demo --profile jonah                 # absolute path for terminal use
+oswald plugins install-deps demo                             # pinned npm deps, shared, explicit consent
+oswald plugins bin-path demo                                 # absolute path for terminal use
+oswald plugins exec demo -- --version                        # run for the calling profile (HOME redirected)
 oswald plugins update demo [--ref <40-char SHA>]             # pins never move without --ref
 oswald plugins remove demo --profile jonah [--full]          # refuses when other profiles reference it
 ```
 
 `install` accepts `--ref` (full SHA only; tags/branches rejected) and `--subdir` for
-monorepos; unpinned installs follow the remote HEAD on `update`. `--profile` selects
+monorepos; unpinned installs follow the remote HEAD on `update`. Manifests at
+`manifest_version` 1 or 2 load (`api_version` defaults to `"1"` when absent;
+`kind` must be empty or `standalone`). The node sidecar installs as part of
+`install` unless `--no-deps` opts out, from the manifest declaration, explicit
+`--node-package`/`--node-version` flags (both required together; conflicts with a
+manifest declaration fail closed), or a root `package.json` with a lockfile
+(`npm ci`; a `package.json` without one is ignored). The resolved spec is
+recorded in `.install-metadata.json`, so `install-deps`, `bin-path`, and `exec`
+fall back to it when the manifest declares nothing; `update` carries it forward
+and refreshes the sidecar after moving code. Reinstalling the same source is a
+no-op that repairs a missing sidecar. `--profile` selects
 the enable target under the normal fencing (mismatched `OSWALD_HOME` fails closed);
 code `install`/`update`/`remove` require the default scope. Reads (`list`, `info`,
 `bin-path`) may name another profile. Everything plugins-related is restart-classified.
 
-`plugin.yaml` shape (v2 contract, unknown keys rejected):
+`plugin.yaml` shape (v1 or v2 contract, unknown keys rejected):
 
 ```yaml
 name: demo              # 2–40 lowercase ASCII, `soul` reserved; the canonical key
 version: "1.0"
 description: what it does
-manifest_version: 2
-api_version: "1"
+manifest_version: 2   # 1 or 2 accepted
+api_version: "1"      # optional; defaults to "1"
+kind: standalone      # optional; empty or standalone only
 requires_env: [EXAMPLE_API_KEY]  # fail closed per profile when unset
 requires_plugins: [base]         # optional load-order dependencies
 node_package: example-cli        # optional pinned npm CLI
@@ -88,7 +107,8 @@ Enabled plugins automatically receive their declared `requires_env` values in sa
 children (terminal, execute_code, background processes) from the acting profile's scope;
 see `internal/workspace/AGENTS.md` for the passthrough contract. Provider credential names
 are always refused. `terminal` never gains plugin directories on `PATH` — invoke plugin
-CLIs via the absolute `bin-path`.
+CLIs via the absolute `bin-path`, or `oswald plugins exec` (same sandbox env plus `HOME`
+redirected to the per-profile plugin home so CLI config files persist on the volume).
 
 ## Tests
 

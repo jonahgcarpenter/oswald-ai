@@ -11,7 +11,10 @@ nothing to invalidate. `frontmatter.go` parses the `SKILL.md` subset (`name`,
 unknown keys ignored), `scan.go` walks it (dot-dirs skipped, directory symlinks unfollowed, files over
 1 MiB skipped, malformed/unclosed fences skipped — a scan never fails for one file),
 `catalog.go` resolves it, `index.go` renders the prompt block, `read.go` loads
-bodies, `store.go` binds roots and owns create/update. The model-facing tool
+bodies, `store.go` binds roots and owns create/update. `hub.go` owns the install
+surface: URL parsing (git shorthand/URLs, local paths), quarantine staging with
+manifest validation, atomic publish, and the per-profile `skills.lock.json`
+provenance sidecar. The model-facing tool
 adapter lives in `internal/tools/skill_manage/`; this package never imports it.
 
 ## Catalog contract

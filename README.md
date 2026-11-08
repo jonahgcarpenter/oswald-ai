@@ -102,11 +102,15 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald api show\|set-key\|clear-key`      | Manage the per-profile OpenAI gateway credential (`--profile` allowed, never printed).                          |
 | `oswald tools show\|set\|unset`            | Manage `web-search`, `image`, `browser`, and `terminal` backends (`--profile` allowed, secrets redacted).      |
 | `oswald plugins list\|enable\|disable\|info` | Discover plugins, opt in per profile, and inspect manifest/provenance state (never prints secrets).            |
-| `oswald plugins install <source>`        | Install shared plugin code from a git URL, `owner/repo`, or local path (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--enable` with `--profile` to also enable; default scope required). |
+| `oswald plugins install <source>`        | Install shared plugin code from a git URL, `owner/repo`, or local path, with bundled skills and node deps (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--node-package/--node-version` for manifests predating the sidecar convention, `--no-deps` to skip, `--enable` with `--profile` to also enable; default scope required). |
 | `oswald plugins update <name>`           | Refresh a managed install (pinned installs need an explicit `--ref`; default scope required).                  |
 | `oswald plugins remove <name>`           | Drop a plugin for a profile and delete shared code (refuses when other profiles still reference it; `--full` also removes per-profile storage). |
-| `oswald plugins install-deps <name>`      | Install a plugin's pinned npm dependencies into the profile home (explicit consent per install).                |
+| `oswald plugins install-deps <name>`      | Install a plugin's pinned npm dependencies into the shared plugin home (explicit consent per install, default scope required). |
 | `oswald plugins bin-path <name>`         | Print the absolute plugin-local binary path for explicit use in `terminal` (PATH is never mutated).            |
+| `oswald plugins exec <name> [-- <args>]` | Run an installed plugin binary for the calling profile (sandbox env, HOME redirected to the per-profile plugin home). |
+| `oswald skills list\|info`                | List installed skills and inspect manifest/provenance state (`--profile` allowed).                              |
+| `oswald skills install <source>`         | Install a skill bundle from a git URL, `owner/repo`, or local path into the calling profile (`--ref` pins a full commit SHA, `--subdir` for monorepos). |
+| `oswald skills update\|remove <name>`     | Refresh a managed install (pins need explicit `--ref`; refuses operator edits without `--force`) or delete a skill and its lockfile record. |
 | `oswald runtime show\|set`                | Inspect and set `runtime.log_level` (applies live).                                                             |
 | `oswald config show\|get\|validate`        | Inspect effective configuration (secrets redacted) and validate files; never writes.                            |
 | `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |

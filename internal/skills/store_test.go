@@ -38,6 +38,68 @@ func TestStoreListAndIndex(t *testing.T) {
 	}
 }
 
+func bindPlugin(t *testing.T, store *Store, key string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), key, "skills", "shipped")
+	writeSkillMD(t, dir, "---\nname: shipped\ndescription: Synthetic bundled skill\n---\n\nBundled body.\n")
+	store.BindPlugin(key, filepath.Join(t.TempDir(), "unused"))
+	store.BindPlugin(key, filepath.Dir(dir))
+	return dir
+}
+
+func TestBindPluginNamespacedAndReadOnly(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	bindPlugin(t, store, "acme")
+	found := store.List("")
+	if len(found) != 3 {
+		t.Fatalf("expected 3 skills, got %+v", found)
+	}
+	var bundled Skill
+	for _, skill := range found {
+		if skill.Source == "acme" {
+			bundled = skill
+		}
+	}
+	if bundled.LoadName != "acme/shipped" || bundled.Category != "plugin acme" {
+		t.Fatalf("bad namespacing: %+v", bundled)
+	}
+	viewed, err := store.View("acme/shipped", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Bundled body.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	if _, err := store.Update("acme/shipped", "Bundled", "Changed"); err == nil {
+		t.Fatal("plugin skill update accepted")
+	} else if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("wrong read-only error: %v", err)
+	}
+	if index := store.Index(""); !strings.Contains(index, "acme/shipped") {
+		t.Fatalf("index missing plugin skill:\n%s", index)
+	}
+}
+
+func TestBindPluginCollisionPrefersProfile(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	bindPlugin(t, store, "acme")
+	other := filepath.Join(t.TempDir(), "other", "skills", "review")
+	writeSkillMD(t, other, "---\nname: review\ndescription: Bundled review\n---\n\nOther body.\n")
+	store.BindPlugin("other", filepath.Dir(other))
+	// The bare name resolves to the profile skill; the namespaced name
+	// reaches the plugin copy. Namespacing disambiguates by construction.
+	viewed, err := store.View("review", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Follow the checklist.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	viewed, err = store.View("other/review", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Other body.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	if _, err := store.View("acme/review", "", ""); err == nil {
+		t.Fatal("cross-plugin name accepted")
+	}
+}
+
 func TestViewLoadsBodyAndSupportingFiles(t *testing.T) {
 	managed := seedLibrary(t)
 	store := NewStore(managed)
@@ -189,5 +251,55 @@ func TestUpdateRejectsLongDescription(t *testing.T) {
 	long := strings.Repeat("x", 61)
 	if _, err := store.Update("desc", "Short desc", long); err == nil {
 		t.Fatal("expected long description to fail")
+	}
+}
+
+func TestBindPluginJobSearchShape(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	// Job-search layout: skills/<name>/SKILL.md plus scripts and required_env.
+	root := filepath.Join(t.TempDir(), "job-search", "skills")
+	writeSkillMD(t, filepath.Join(root, "job-search"),
+		"---\nname: job-search\ndescription: Find matching jobs\nrequired_env: [SYNTH_AGENT_DATA_KEY]\n---\n\nSearch body.\n")
+	writeSkillMD(t, filepath.Join(root, "job-search-run"),
+		"---\nname: job-search-run\ndescription: Run the search loop\n---\n\nRun body.\n")
+	scripts := filepath.Join(root, "job-search-run", "scripts")
+	if err := os.MkdirAll(scripts, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scripts, "search-jobs.sh"), []byte("#!/bin/sh\necho search\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	store.BindPlugin("job-search", root)
+	found := store.List("")
+	if len(found) != 4 {
+		t.Fatalf("expected 4 skills, got %+v", found)
+	}
+	byLoad := map[string]Skill{}
+	for _, skill := range found {
+		byLoad[skill.LoadName] = skill
+	}
+	for _, want := range []string{"job-search/job-search", "job-search/job-search-run"} {
+		skill, ok := byLoad[want]
+		if !ok {
+			t.Fatalf("missing bundled skill %q in %+v", want, found)
+		}
+		if skill.Source != "job-search" || skill.Category != "plugin job-search" {
+			t.Fatalf("bad namespacing: %+v", skill)
+		}
+	}
+	viewed, err := store.View("job-search/job-search-run", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Run body.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	viewed, err = store.View("job-search/job-search", "", "")
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if len(viewed.RequiredEnv) != 1 || viewed.RequiredEnv[0] != "SYNTH_AGENT_DATA_KEY" {
+		t.Fatalf("required_env = %+v", viewed.RequiredEnv)
+	}
+	if _, err := store.View("job-search/job-search-run", "scripts/search-jobs.sh", ""); err != nil {
+		t.Fatalf("supporting file: %v", err)
 	}
 }

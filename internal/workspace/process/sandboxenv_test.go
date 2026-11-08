@@ -83,3 +83,28 @@ func TestSandboxEnvOnlyAllowlisted(t *testing.T) {
 		t.Fatalf("base lost: %q", joined)
 	}
 }
+
+func TestWithNodeOnPath(t *testing.T) {
+	base := []string{"PATH=/usr/bin:/bin", "HOME=/nowhere"}
+	out := WithNodeOnPath(base)
+	if len(out) != len(base) || out[1] != "HOME=/nowhere" {
+		t.Fatalf("base mutated: %q", out)
+	}
+	found := false
+	for _, entry := range out {
+		if strings.HasPrefix(entry, "PATH=") {
+			found = true
+			if !strings.Contains(entry, "/usr/bin:/bin") {
+				t.Fatalf("base PATH lost: %q", entry)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("PATH entry missing")
+	}
+	// Idempotent: a second pass never stacks another prefix.
+	again := WithNodeOnPath(out)
+	if len(again) != len(out) {
+		t.Fatalf("not idempotent: %q", again)
+	}
+}

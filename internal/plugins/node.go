@@ -12,38 +12,47 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
-// Node dependency bounds. Installs stay per-profile under
-// <profileRoot>/plugins/<name>/ and never touch the terminal PATH.
+// Node dependency bounds. Sidecars install once globally under the shared
+// plugin home and never touch the terminal PATH.
 const (
 	nodeInstallTimeout   = 5 * time.Minute
 	maxNodeInstallOutput = 32 << 10
 )
 
-// NodeDir returns the per-profile plugin home owning its node_modules tree.
-// The plugin argument is a canonical key (flat or single-level category/key).
-func NodeDir(homePath, plugin string) (string, error) {
+// SharedNodeDir returns the shared plugin home owning its node_modules tree:
+// <globalRoot>/plugins-available/<name>. The plugin argument is a canonical
+// key. Per-profile data stays under the profile plugins/ tree (see
+// Manager.StorageRoot); only code and its sidecar live here.
+func SharedNodeDir(globalRoot, plugin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	if strings.TrimSpace(homePath) == "" {
+	if strings.TrimSpace(globalRoot) == "" {
 		return "", fmt.Errorf("plugin home is unavailable")
 	}
-	return filepath.Join(homePath, "plugins", filepath.FromSlash(plugin)), nil
+	return filepath.Join(UserPluginsDir(globalRoot), filepath.FromSlash(plugin)), nil
 }
 
 // NodeBinPath resolves the absolute plugin-local binary without executing it.
-// The binary must already be installed under node_modules/.bin; the terminal
-// PATH is never mutated. Callers invoke the returned absolute path explicitly.
-func NodeBinPath(homePath, plugin, bin string) (string, error) {
+// The binary must already be installed under the shared node_modules/.bin;
+// the terminal PATH is never mutated. Callers invoke the returned absolute
+// path explicitly.
+func NodeBinPath(globalRoot, plugin, bin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	if strings.TrimSpace(bin) == "" || len(bin) > 64 || !npmBinRE.MatchString(bin) {
-		return "", fmt.Errorf("invalid plugin binary")
-	}
-	dir, err := NodeDir(homePath, plugin)
+	dir, err := SharedNodeDir(globalRoot, plugin)
 	if err != nil {
 		return "", err
+	}
+	return nodeBinPathIn(dir, bin)
+}
+
+// nodeBinPathIn resolves a binary inside an explicit plugin directory: the
+// shared home for live installs, a staged temp dir for updates.
+func nodeBinPathIn(dir, bin string) (string, error) {
+	if strings.TrimSpace(bin) == "" || len(bin) > 64 || !npmBinRE.MatchString(bin) {
+		return "", fmt.Errorf("invalid plugin binary")
 	}
 	candidate := filepath.Join(dir, "node_modules", ".bin", bin)
 	info, err := os.Lstat(candidate)
@@ -65,38 +74,133 @@ func NodeBinPath(homePath, plugin, bin string) (string, error) {
 	return candidate, nil
 }
 
-// InstallNodeDeps installs the manifest's pinned npm package into the
-// per-profile plugin home. The explicit CLI invocation is the consent gate;
-// versions are exact pins so two installs resolve identically. It never logs
-// command output, only the plugin name and exit status.
-func InstallNodeDeps(ctx context.Context, homePath string, manifest Manifest, log *config.Logger) error {
+// InstallNodeDeps installs the manifest's pinned npm package into the shared
+// plugin home. The explicit CLI invocation is the consent gate and requires
+// default scope; versions are exact pins so two installs resolve identically.
+// It never logs command output, only the plugin name and exit status.
+func InstallNodeDeps(ctx context.Context, globalRoot string, manifest Manifest, log *config.Logger) error {
 	if err := ValidateNodeDeps(&manifest); err != nil {
 		return err
 	}
 	if strings.TrimSpace(manifest.NodePackage) == "" {
 		return fmt.Errorf("plugin %q declares no node dependencies", manifest.Name)
 	}
-	dir, err := NodeDir(homePath, manifest.Name)
-	if err != nil {
-		return err
+	return InstallNodePackage(ctx, globalRoot, manifest.Name, DefaultNodeBin(manifest),
+		manifest.NodePackage+"@"+manifest.NodeVersion, "", log)
+}
+
+// InstallNodePackage installs one exact npm pin into the plugin directory:
+// the shared home when dir is "", a staged temp dir for updates. bin names
+// the expected binary for post-install verification; empty skips it.
+func InstallNodePackage(ctx context.Context, globalRoot, key, bin, spec, dir string, log *config.Logger) error {
+	if !ValidPluginKey(key) {
+		return fmt.Errorf("invalid plugin key")
+	}
+	if strings.TrimSpace(spec) == "" {
+		return fmt.Errorf("plugin node spec is required")
+	}
+	if dir == "" {
+		var err error
+		dir, err = SharedNodeDir(globalRoot, key)
+		if err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create plugin home: %w", err)
 	}
 	_ = os.Chmod(dir, 0700)
-	cacheDir := filepath.Join(dir, "cache", "npm")
-	tmpDir := filepath.Join(dir, "cache", "tmp")
-	for _, path := range []string{cacheDir, tmpDir} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			return fmt.Errorf("create plugin cache: %w", err)
-		}
+	cacheDir, tmpDir, err := prepareNodeCache(dir)
+	if err != nil {
+		return err
 	}
-	spec := manifest.NodePackage + "@" + manifest.NodeVersion
 	runCtx, cancel := context.WithTimeout(ctx, nodeInstallTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, "npm", "install", "--no-save", "--no-audit", "--no-fund", "--no-update-notifier", "--no-bin-links=false", spec)
 	cmd.Dir = dir
-	cmd.Env = []string{
+	cmd.Env = npmEnv(cacheDir, tmpDir)
+	output, err := cmd.CombinedOutput()
+	_ = output
+	if err != nil {
+		if log != nil {
+			log.Server("plugin.node").Warn("plugin.node.install_failed", "plugin node install failed", config.F("plugin", key))
+		}
+		if runCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("plugin node install timed out")
+		}
+		return fmt.Errorf("plugin node install failed")
+	}
+	if log != nil {
+		log.Server("plugin.node").Debug("plugin.node.installed", "installed plugin node dependencies", config.F("plugin", key))
+	}
+	// Verify the expected binary resolves inside the install directory.
+	if bin != "" {
+		if _, err := nodeBinPathIn(dir, bin); err != nil {
+			return fmt.Errorf("plugin binary is not installed")
+		}
+	}
+	return nil
+}
+
+// InstallNodeLockfile installs a plugin's own pinned dependencies via npm ci
+// into the plugin directory: the shared home when dir is "", a staged temp
+// dir for updates. The directory must carry package.json with a lockfile.
+func InstallNodeLockfile(ctx context.Context, globalRoot, key, dir string, log *config.Logger) error {
+	if !ValidPluginKey(key) {
+		return fmt.Errorf("invalid plugin key")
+	}
+	if dir == "" {
+		var err error
+		dir, err = SharedNodeDir(globalRoot, key)
+		if err != nil {
+			return err
+		}
+	}
+	if !hasLockfileSidecar(dir) {
+		return fmt.Errorf("plugin %q carries no lockfile", key)
+	}
+	cacheDir, tmpDir, err := prepareNodeCache(dir)
+	if err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, nodeInstallTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "npm", "ci", "--no-audit", "--no-fund", "--no-update-notifier")
+	cmd.Dir = dir
+	cmd.Env = npmEnv(cacheDir, tmpDir)
+	output, err := cmd.CombinedOutput()
+	_ = output
+	if err != nil {
+		if log != nil {
+			log.Server("plugin.node").Warn("plugin.node.install_failed", "plugin node install failed", config.F("plugin", key))
+		}
+		if runCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("plugin node install timed out")
+		}
+		return fmt.Errorf("plugin node install failed")
+	}
+	if log != nil {
+		log.Server("plugin.node").Debug("plugin.node.installed", "installed plugin node dependencies", config.F("plugin", key))
+	}
+	return nil
+}
+
+// prepareNodeCache creates the npm cache and temp dirs under the plugin dir.
+func prepareNodeCache(dir string) (cacheDir, tmpDir string, err error) {
+	cacheDir = filepath.Join(dir, "cache", "npm")
+	tmpDir = filepath.Join(dir, "cache", "tmp")
+	for _, path := range []string{cacheDir, tmpDir} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return "", "", fmt.Errorf("create plugin cache: %w", err)
+		}
+	}
+	return cacheDir, tmpDir, nil
+}
+
+// npmEnv is the minimal non-interactive npm environment. No credentials pass
+// through here; registry failures surface as plain install errors.
+func npmEnv(cacheDir, tmpDir string) []string {
+	return []string{
 		"PATH=/usr/bin:/bin:/usr/local/bin",
 		"LANG=C.UTF-8",
 		"TMPDIR=" + tmpDir,
@@ -105,23 +209,4 @@ func InstallNodeDeps(ctx context.Context, homePath string, manifest Manifest, lo
 		"NPM_CONFIG_FUND=false",
 		"NPM_CONFIG_UPDATE_NOTIFIER=false",
 	}
-	output, err := cmd.CombinedOutput()
-	_ = output
-	if err != nil {
-		if log != nil {
-			log.Server("plugin.node").Warn("plugin.node.install_failed", "plugin node install failed", config.F("plugin", manifest.Name))
-		}
-		if runCtx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("plugin node install timed out")
-		}
-		return fmt.Errorf("plugin node install failed")
-	}
-	if log != nil {
-		log.Server("plugin.node").Debug("plugin.node.installed", "installed plugin node dependencies", config.F("plugin", manifest.Name))
-	}
-	// Verify the expected binary resolves inside the plugin home.
-	if _, err := NodeBinPath(homePath, manifest.Name, DefaultNodeBin(manifest)); err != nil {
-		return fmt.Errorf("plugin binary is not installed")
-	}
-	return nil
 }
