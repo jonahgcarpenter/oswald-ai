@@ -40,6 +40,9 @@ func ClassifyReload(old, next *Config) (bool, []string) {
 		old.BrowserAllowPrivateURLs == next.BrowserAllowPrivateURLs && old.BrowserAllowInsecureURLs == next.BrowserAllowInsecureURLs &&
 		old.BrowserRestrictEvaluate == next.BrowserRestrictEvaluate)
 	add("mcp_servers", reflect.DeepEqual(old.MCPServers, next.MCPServers))
+	add("plugins", reflect.DeepEqual(old.PluginEnabled, next.PluginEnabled) &&
+		reflect.DeepEqual(old.PluginDisabled, next.PluginDisabled) &&
+		reflect.DeepEqual(old.PluginEntries, next.PluginEntries))
 	add("profiles", reflect.DeepEqual(old.Profiles, next.Profiles))
 	if len(classes) == 0 {
 		return true, nil

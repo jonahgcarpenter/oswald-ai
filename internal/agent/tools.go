@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
@@ -208,15 +210,34 @@ func (a *Agent) isClientToolCall(clientTools []llm.Tool, name string) bool {
 }
 
 func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *exposure.Exposure, mcp MCPProvider) (governance.Result, error) {
-	if a.registry.HasHandler(name) {
-		return a.registry.Execute(ctx, name, args)
-	}
-	if mcp != nil {
-		if result, handled, err := mcp.Execute(ctx, principal, name, args); handled {
-			return result.Result, err
+	if a.pluginHooks != nil {
+		event := map[string]any{"tool": name, "args": args}
+		if err := a.pluginHooks.InvokeHook(ctx, plugins.HookPreToolCall, event, 5*time.Second); err != nil {
+			return governance.Result{
+				Content:    "Tool call blocked by plugin policy. Continue with the available information.",
+				Outcome:    governance.OutcomeUnproductive,
+				ReasonCode: "plugin_blocked",
+			}, nil
 		}
 	}
-	return a.registry.Execute(ctx, name, args)
+	var result governance.Result
+	var err error
+	if a.registry.HasHandler(name) {
+		result, err = a.registry.Execute(ctx, name, args)
+	} else if mcp != nil {
+		if bridged, handled, bridgeErr := mcp.Execute(ctx, principal, name, args); handled {
+			result, err = bridged.Result, bridgeErr
+		} else {
+			result, err = a.registry.Execute(ctx, name, args)
+		}
+	} else {
+		result, err = a.registry.Execute(ctx, name, args)
+	}
+	if a.pluginHooks != nil {
+		// Observer only: never blocks the turn.
+		_ = a.pluginHooks.InvokeHook(ctx, plugins.HookPostToolCall, map[string]any{"tool": name, "error": err != nil}, 30*time.Second)
+	}
+	return result, err
 }
 
 func normalizeToolCallIDs(message *llm.ChatMessage, iteration int) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
@@ -81,7 +82,15 @@ type Agent struct {
 	toolPolicy     governance.GlobalPolicy
 	summarizer     MarkdownSummarizer
 	workspaceRoot  string
+	pluginHooks    plugins.HookInvoker
 	log            *config.Logger
+}
+
+// SetPluginHooks installs the per-profile plugin hook host. Nil disables hooks.
+func (a *Agent) SetPluginHooks(hooks plugins.HookInvoker) {
+	if a != nil {
+		a.pluginHooks = hooks
+	}
 }
 
 // SetImageCache installs the private per-user image cache before requests start.
@@ -257,6 +266,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		config.F("image_count", len(userImages)),
 		config.F("document_count", len(userDocuments)),
 	)
+	if a.pluginHooks != nil {
+		// Observer only: session lifecycle never blocks admission.
+		_ = a.pluginHooks.InvokeHook(ctx, plugins.HookSessionStart, map[string]any{"profile": senderID, "session_key": sessionKey}, 5*time.Second)
+		defer func() {
+			_ = a.pluginHooks.InvokeHook(context.Background(), plugins.HookSessionEnd, map[string]any{"profile": senderID, "session_key": sessionKey}, 5*time.Second)
+		}()
+	}
 
 	if ctx == nil {
 		ctx = context.Background()
