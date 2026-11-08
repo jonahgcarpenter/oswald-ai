@@ -53,7 +53,7 @@ func NewHandlerWithPlugins(profileRoot string, pluginSkills []skills.PluginRoot)
 		case "view":
 			name, _ := args["name"].(string)
 			filePath, _ := args["file_path"].(string)
-			return view(store, name, filePath, platform)
+			return view(store, profileRoot, pluginSkills, name, filePath, platform)
 		case "create":
 			name, _ := args["name"].(string)
 			description, _ := args["description"].(string)
@@ -105,7 +105,7 @@ func list(store *skills.Store, platform string) (governance.Result, error) {
 	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n") + "\nLoad a skill with skill_manage(action=\"view\", name=\"<skill>\").", Outcome: governance.OutcomeProductive}, nil
 }
 
-func view(store *skills.Store, name, filePath, platform string) (governance.Result, error) {
+func view(store *skills.Store, profileRoot string, pluginSkills []skills.PluginRoot, name, filePath, platform string) (governance.Result, error) {
 	result, err := store.View(name, filePath, platform)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
@@ -134,7 +134,38 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 			sb.WriteString("- " + file + "\n")
 		}
 	}
+	sb.WriteString(pluginRuntimeNote(profileRoot, pluginSkills, result.Source))
 	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n") + refusedNote, Outcome: governance.OutcomeProductive}, nil
+}
+
+// pluginRuntimeNote orients the model for a bundled plugin skill view: where
+// the sidecar binary lives, which HOME its commands run under, and that repo
+// install guides written for other agent systems do not apply here. Profile
+// skills (empty source) and supporting-file reads get no note.
+func pluginRuntimeNote(profileRoot string, pluginSkills []skills.PluginRoot, source string) string {
+	if strings.TrimSpace(source) == "" {
+		return ""
+	}
+	var skillsDir string
+	for _, root := range pluginSkills {
+		if root.Key == source {
+			skillsDir = root.Dir
+			break
+		}
+	}
+	if strings.TrimSpace(skillsDir) == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\nPlugin runtime: this skill ships with plugin \"" + source + "\".")
+	sb.WriteString(" Its CLI lives under " + filepath.Join(filepath.Dir(skillsDir), "node_modules", ".bin") + ";")
+	sb.WriteString(" add that directory to PATH for terminal calls instead of installing anything.")
+	if strings.TrimSpace(profileRoot) != "" {
+		sb.WriteString(" Run its commands with HOME set to " + filepath.Join(profileRoot, "plugins", filepath.FromSlash(source), "home") + ";")
+		sb.WriteString(" credentials live in that home's config.")
+	}
+	sb.WriteString(" Setup guides in the repo written for other agent systems do not apply here.")
+	return sb.String()
 }
 
 func create(store *skills.Store, name, description, content, category string) (governance.Result, error) {

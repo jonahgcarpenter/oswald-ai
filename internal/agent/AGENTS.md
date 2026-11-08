@@ -8,7 +8,8 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract in
 and `OswaldToolEvent` timeline. A turn is: validate principal → load soul, file/session memory,
 images, and cached markdown → build the dynamic system prompt (soul + trusted
 operating-directives block) → merge the tool catalog → prepend the skills guidance/index blocks
-above memory (only when `skill_manage` is offered) → 70% markdown compaction check →
+above memory (only when `skill_manage` is offered; the index covers the profile
+tree plus bound plugin skills) → 70% markdown compaction check →
 `AssemblePromptContext` → iterate model ↔ tool calls → finalize, resolve MEDIA/FILE, persist.
 Stateless API turns share the whole path but skip persistence and return `over_budget`
 instead of compacting.

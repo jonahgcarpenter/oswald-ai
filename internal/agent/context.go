@@ -210,7 +210,11 @@ func (a *Agent) skillsIndexBlock(platform string, offered bool) string {
 	if root == "" {
 		return ""
 	}
-	return skills.NewStore(filepath.Join(root, "skills")).Index(platform)
+	store := skills.NewStore(filepath.Join(root, "skills"))
+	for _, bound := range a.pluginSkills {
+		store.BindPlugin(bound.Key, bound.Dir)
+	}
+	return store.Index(platform)
 }
 
 // skillsGuidanceBlock coaches recording reusable workflows as skills. It

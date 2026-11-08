@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
@@ -113,5 +114,49 @@ func TestProcessOmitsSkillsIndexForRestrictedToolset(t *testing.T) {
 	}
 	if system := systemMessageOf(t, request); strings.Contains(system, "skill_manage") {
 		t.Fatalf("skill coaching under restricted toolset:\n%s", system)
+	}
+}
+
+func TestProcessInjectsBundledPluginSkillsIndex(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	root := skillProfileRoot(t)
+	pluginDir := filepath.Join(t.TempDir(), "demo", "skills", "ship")
+	if err := os.MkdirAll(pluginDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("---\nname: ship\ndescription: Ship things\n---\n\nShip it.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	agent := skillTestAgent(t, chat, root, true)
+	agent.SetPluginSkills([]skills.PluginRoot{{Key: "demo", Dir: filepath.Dir(pluginDir)}})
+	if _, err := processAgent(agent, "req-bundled", "discord", "session", "user-1", "Display", "hello", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	system := systemMessageOf(t, primaryRequests(chat.requests)[0])
+	for _, want := range []string{"<available_skills>", "- review: Review code", "demo/ship"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, system)
+		}
+	}
+}
+
+func TestProcessOmitsBundledSkillsIndexWhenUnbound(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	root := skillProfileRoot(t)
+	pluginDir := filepath.Join(t.TempDir(), "demo", "skills", "ship")
+	if err := os.MkdirAll(pluginDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("---\nname: ship\ndescription: Ship things\n---\n\nShip it.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// No SetPluginSkills: the plugin tree exists on disk but is not bound,
+	// so the index must not reference it.
+	agent := skillTestAgent(t, chat, root, true)
+	if _, err := processAgent(agent, "req-unbound", "discord", "session", "user-1", "Display", "hello", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if system := systemMessageOf(t, primaryRequests(chat.requests)[0]); strings.Contains(system, "demo/ship") {
+		t.Fatalf("unbound plugin skill leaked into index:\n%s", system)
 	}
 }

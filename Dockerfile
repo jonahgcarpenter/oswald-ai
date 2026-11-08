@@ -25,6 +25,7 @@ LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
+  git \
   gnupg \
   tzdata \
   libsqlite3-0 \

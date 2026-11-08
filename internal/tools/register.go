@@ -124,7 +124,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		return fmt.Errorf("register memory tool: %w", err)
 	}
 
-	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandlerWithPlugins(cfg.ProfileRoot, pluginSkillRoots(cfg)))); err != nil {
+	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandlerWithPlugins(cfg.ProfileRoot, PluginSkillRoots(cfg)))); err != nil {
 		return fmt.Errorf("register skill_manage tool: %w", err)
 	}
 
@@ -180,10 +180,11 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 	}
 }
 
-// pluginSkillRoots collects read-only bundled skills dirs for enabled plugins.
+// PluginSkillRoots collects read-only bundled skills dirs for enabled plugins.
 // Disabled entries never bind. Missing skills dirs bind harmlessly: the scan
-// reads them as empty.
-func pluginSkillRoots(cfg *config.Config) []skills.PluginRoot {
+// reads them as empty. Shared with the agent prompt index so the tool catalog
+// and the system prompt resolve the same visible set.
+func PluginSkillRoots(cfg *config.Config) []skills.PluginRoot {
 	globalRoot, err := config.GlobalRootForProfile(cfg.ProfileRoot, cfg.ProfileName)
 	if err != nil {
 		return nil
