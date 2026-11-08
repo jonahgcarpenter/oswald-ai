@@ -29,6 +29,7 @@ var backendAliases = map[string]string{
 	"image":          "image_generate",
 	"image_generate": "image_generate",
 	"browser":        "browser",
+	"terminal":       "terminal",
 }
 
 // Run dispatches the tools command group. --profile is accepted in any
@@ -75,11 +76,12 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 
 func toolsUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald tools [--profile NAME] <show|set|unset> [options]")
-	fmt.Fprintln(w, "  show [web-search|image|browser]")
+	fmt.Fprintln(w, "  show [web-search|image|browser|terminal]")
 	fmt.Fprintln(w, "                        tools section, secrets redacted")
 	fmt.Fprintln(w, "  set web-search --brave-key REF --searxng-url URL")
 	fmt.Fprintln(w, "  set image --url URL --generation-timeout DUR")
 	fmt.Fprintln(w, "  set browser [browser flags]")
+	fmt.Fprintln(w, "  set terminal --env-passthrough A,B")
 	fmt.Fprintln(w, "                        staged-validate and atomically write one backend")
 	fmt.Fprintln(w, "  unset <backend.field>  clear one optional tools leaf")
 	fmt.Fprintln(w, "    browser flags: --launch-command CMD --endpoint-url URL")
@@ -138,7 +140,7 @@ func show(t *target, backend string, stdout, stderr io.Writer) int {
 
 func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser> [flags] [--profile NAME]")
+		fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]")
 		return exitUsage
 	}
 	// Backend name accepted in any position.
@@ -161,12 +163,12 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		if len(rest) > 0 {
 			fmt.Fprintf(stderr, "oswald: unknown tools backend %q\n", rest[0])
 		} else {
-			fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser> [flags] [--profile NAME]")
+			fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]")
 		}
 		return exitUsage
 	}
 	if len(filtered) > 0 {
-		fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser> [flags] [--profile NAME]")
+		fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]")
 		return exitUsage
 	}
 	yamlBackend := backendAliases[backend]
@@ -177,6 +179,8 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		return setImage(t, flagArgs, stdout, stderr)
 	case "browser":
 		return setBrowser(t, flagArgs, stdout, stderr)
+	case "terminal":
+		return setTerminal(t, flagArgs, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "oswald: unknown tools backend %q\n", backend)
 		return exitUsage
@@ -303,11 +307,31 @@ func setBrowser(t *target, flagArgs []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+func setTerminal(t *target, flagArgs []string, stdout, stderr io.Writer) int {
+	sub := flag.NewFlagSet("tools set terminal", flag.ContinueOnError)
+	sub.SetOutput(stderr)
+	envPassthrough := sub.String("env-passthrough", "", "comma-separated variable names forwarded into sandboxed children")
+	if err := sub.Parse(flagArgs); err != nil {
+		return exitUsage
+	}
+	if sub.NArg() != 0 || !isSet(sub, "env-passthrough") || strings.TrimSpace(*envPassthrough) == "" {
+		fmt.Fprintln(stderr, "usage: oswald tools set terminal --env-passthrough A,B [--profile NAME]")
+		return exitUsage
+	}
+	oldCfg, _ := config.Validate(t.root)
+	if err := config.SetConfigValue(t.root, t.profile, []string{"tools", "terminal", "env_passthrough"}, "["+*envPassthrough+"]"); err != nil {
+		reportToolsError(stderr, err)
+		return exitError
+	}
+	fmt.Fprintf(stdout, "set tools.terminal (%s)\n", effectForChange(t.root, oldCfg))
+	return exitOK
+}
+
 func unsetField(t *target, dotted string, stdout, stderr io.Writer) int {
 	parts := strings.Split(dotted, ".")
 	if len(parts) != 2 {
 		fmt.Fprintln(stderr, "usage: oswald tools unset <backend.field> [--profile NAME]")
-		fmt.Fprintln(stderr, "  backends: web-search, image, browser; fields use hyphens, e.g. browser.launch-command")
+		fmt.Fprintln(stderr, "  backends: web-search, image, browser, terminal; fields use hyphens, e.g. browser.launch-command")
 		return exitUsage
 	}
 	backend, ok := backendAliases[parts[0]]

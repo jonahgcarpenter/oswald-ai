@@ -266,6 +266,8 @@ tools:
     allow_private_urls: false
     allow_insecure_urls: false
     restrict_evaluate: false
+  # terminal:  # sandbox env passthrough for terminal, execute_code, and background processes
+  #   env_passthrough: []  # extra forwarded names (THIRD_PARTY_KEY); provider credentials never pass
 # MCP connections are isolated by profile and opened lazily; restart to reload.
 # Each server sets exactly one of url (HTTP) or command (stdio).
 mcp_servers:

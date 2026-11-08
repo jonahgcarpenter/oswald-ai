@@ -144,6 +144,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 	}
 
 	pm := process.NewManager(cfg.ProfileRoot)
+	process.SetProfileEnvPassthrough(cfg.ProfileRoot, cfg.TerminalEnvPassthrough)
 	cronStore := cron.NewStore(cfg.ProfileRoot)
 	docCache := docache.NewProfileCache(cfg.ProfileRoot, cfg.ProfileName)
 	workspaceTools := []struct {

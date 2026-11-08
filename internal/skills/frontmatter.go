@@ -16,14 +16,18 @@ const (
 )
 
 // parsedSkill is the frontmatter subset the catalog understands: name,
-// description, and version only. Every other key (author, license,
+// description, version, and required_env. Every other key (author, license,
 // platforms, tags, metadata, etc.) is ignored so libraries carrying
 // richer metadata keep working.
 type parsedSkill struct {
 	name        string
 	description string
 	version     string
+	requiredEnv []string
 }
+
+// maxRequiredEnvVars bounds one skill's declared sandbox passthrough.
+const maxRequiredEnvVars = 32
 
 // parseFrontmatter splits raw SKILL.md content into frontmatter and body.
 // Without a leading "---" fence the whole file is the body and the name
@@ -49,10 +53,11 @@ func parseFrontmatter(content string) (front parsedSkill, body string, ok bool) 
 }
 
 // parseFrontmatterKeys reads flat top-level "key: value" pairs for name,
-// description, and version only. Only lines starting at column 0 count as
-// keys: indented lines (nested maps like metadata:, list items) are ignored
-// entirely. Values may be bare or single/double quoted; full-line "#"
-// comments and trailing comments outside quotes are dropped.
+// description, version, and required_env. Only lines starting at column 0
+// count as keys: indented lines (nested maps like metadata:, list items) are
+// ignored entirely. Values may be bare or single/double quoted; full-line "#"
+// comments and trailing comments outside quotes are dropped. required_env
+// accepts a comma-separated list with optional surrounding brackets.
 func parseFrontmatterKeys(lines []string) parsedSkill {
 	var out parsedSkill
 	for _, line := range lines {
@@ -76,6 +81,27 @@ func parseFrontmatterKeys(lines []string) parsedSkill {
 			out.description = value
 		case "version":
 			out.version = value
+		case "required_env":
+			out.requiredEnv = parseEnvList(value)
+		}
+	}
+	return out
+}
+
+// parseEnvList splits a comma-separated variable list, tolerating one
+// surrounding bracket pair. Entries are trimmed and bounded; shape
+// validation happens at registration time.
+func parseEnvList(value string) []string {
+	trimmed := strings.TrimSpace(value)
+	trimmed = strings.TrimPrefix(trimmed, "[")
+	trimmed = strings.TrimSuffix(trimmed, "]")
+	var out []string
+	for _, part := range strings.Split(trimmed, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+		if len(out) >= maxRequiredEnvVars {
+			break
 		}
 	}
 	return out

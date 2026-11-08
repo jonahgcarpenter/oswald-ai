@@ -9,11 +9,15 @@ Applies on top of the root `AGENTS.md` (operator-state and never-log-rules).
 (workspace-rooted, never the OS home), and CWD-relative inputs alike. `read_file` / `write_file` /
 `patch` / `search_files` are the file tools; `terminal` runs foreground `/bin/sh -c` with a minimal
 environment (`PATH` includes `/opt/oswald` so the agent can run the operator CLI,
-`TMPDIR=<cwd>/cache/scratch/` plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN` only); `execute_code` runs stateless `python3` per call with no cross-call
+`TMPDIR=<cwd>/cache/scratch/` plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN` only, plus sandbox
+passthrough names resolved against the acting profile's dotenv scope); `execute_code` runs stateless `python3` per call with no cross-call
 kernel state; `process_manage` polls tracked sessions owned by `process/`; `cronjob_manage` owns
 schedules. `groups.go` owns the file-group classifier, `guard.go` / `shellscan.go` /
 `fetchscan.go` / `confinewrite.go` implement the pre-execution chain, `review.go` the LLM reviewer,
-and `approve_exec.go` the approved replay.
+and `approve_exec.go` the approved replay. `process/sandboxenv.go` owns the sandbox
+environment contract: deny-by-default passthrough (skill `required_env`, config
+`tools.terminal.env_passthrough`, registry) resolved against the acting profile's
+dotenv scope, with well-known credential names refused and values never logged.
 
 ## Containment (the model to hold in your head)
 

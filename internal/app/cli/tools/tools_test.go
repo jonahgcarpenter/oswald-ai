@@ -147,3 +147,38 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 		t.Fatal("default config mutated by rejected set")
 	}
 }
+
+func TestSetTerminalPassthroughRoundTrip(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, out, stderr := run(t, root, "set", "terminal", "--env-passthrough", "TENOR_API_KEY,SYNTH_OTHER_VAR")
+	if code != 0 {
+		t.Fatalf("set = %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "tools.terminal") {
+		t.Fatalf("stdout = %q", out)
+	}
+	code, out, _ = run(t, root, "show", "terminal")
+	if code != 0 || !strings.Contains(out, "TENOR_API_KEY") || !strings.Contains(out, "SYNTH_OTHER_VAR") {
+		t.Fatalf("show terminal = %d %q", code, out)
+	}
+	code, _, _ = run(t, root, "unset", "terminal.env-passthrough")
+	if code != 0 {
+		t.Fatalf("unset = %d", code)
+	}
+	code, out, _ = run(t, root, "show", "terminal")
+	if code != 0 || strings.Contains(out, "TENOR_API_KEY") {
+		t.Fatalf("unset terminal = %d %q", code, out)
+	}
+}
+
+func TestSetTerminalRejectsBadName(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "set", "terminal", "--env-passthrough", "has space"); code == 0 {
+		t.Fatal("bad name accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("file mutated on failed validation")
+	}
+}

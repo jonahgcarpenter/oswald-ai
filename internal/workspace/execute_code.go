@@ -84,7 +84,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		defer cancel()
 		cmd := exec.CommandContext(runCtx, python, name)
 		cmd.Dir = ws.Root()
-		cmd.Env = append([]string{
+		base := []string{
 			"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
 			"HOME=" + userHome(),
 			"LANG=C.UTF-8",
@@ -93,7 +93,8 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 			"OSWALD_SCRATCH=" + scratch,
 			"OSWALD_HOME=" + ws.Root(),
 			"PYTHONDONTWRITEBYTECODE=1",
-		}, process.GitHubTokenEnv()...)
+		}
+		cmd.Env = append(process.SandboxEnvForProfile(base, ws.Root()), process.GitHubTokenEnv()...)
 		var buf bytes.Buffer
 		cmd.Stdout = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
 		cmd.Stderr = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
