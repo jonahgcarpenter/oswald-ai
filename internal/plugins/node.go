@@ -12,36 +12,39 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
-// Node dependency bounds. Installs stay per-profile under
-// <profileRoot>/plugins/<name>/ and never touch the terminal PATH.
+// Node dependency bounds. Sidecars install once globally under the shared
+// plugin home and never touch the terminal PATH.
 const (
 	nodeInstallTimeout   = 5 * time.Minute
 	maxNodeInstallOutput = 32 << 10
 )
 
-// NodeDir returns the per-profile plugin home owning its node_modules tree.
-// The plugin argument is a canonical key (flat or single-level category/key).
-func NodeDir(homePath, plugin string) (string, error) {
+// SharedNodeDir returns the shared plugin home owning its node_modules tree:
+// <globalRoot>/plugins-available/<name>. The plugin argument is a canonical
+// key. Per-profile data stays under the profile plugins/ tree (see
+// Manager.StorageRoot); only code and its sidecar live here.
+func SharedNodeDir(globalRoot, plugin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	if strings.TrimSpace(homePath) == "" {
+	if strings.TrimSpace(globalRoot) == "" {
 		return "", fmt.Errorf("plugin home is unavailable")
 	}
-	return filepath.Join(homePath, "plugins", filepath.FromSlash(plugin)), nil
+	return filepath.Join(UserPluginsDir(globalRoot), filepath.FromSlash(plugin)), nil
 }
 
 // NodeBinPath resolves the absolute plugin-local binary without executing it.
-// The binary must already be installed under node_modules/.bin; the terminal
-// PATH is never mutated. Callers invoke the returned absolute path explicitly.
-func NodeBinPath(homePath, plugin, bin string) (string, error) {
+// The binary must already be installed under the shared node_modules/.bin;
+// the terminal PATH is never mutated. Callers invoke the returned absolute
+// path explicitly.
+func NodeBinPath(globalRoot, plugin, bin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
 	if strings.TrimSpace(bin) == "" || len(bin) > 64 || !npmBinRE.MatchString(bin) {
 		return "", fmt.Errorf("invalid plugin binary")
 	}
-	dir, err := NodeDir(homePath, plugin)
+	dir, err := SharedNodeDir(globalRoot, plugin)
 	if err != nil {
 		return "", err
 	}
@@ -65,18 +68,18 @@ func NodeBinPath(homePath, plugin, bin string) (string, error) {
 	return candidate, nil
 }
 
-// InstallNodeDeps installs the manifest's pinned npm package into the
-// per-profile plugin home. The explicit CLI invocation is the consent gate;
-// versions are exact pins so two installs resolve identically. It never logs
-// command output, only the plugin name and exit status.
-func InstallNodeDeps(ctx context.Context, homePath string, manifest Manifest, log *config.Logger) error {
+// InstallNodeDeps installs the manifest's pinned npm package into the shared
+// plugin home. The explicit CLI invocation is the consent gate and requires
+// default scope; versions are exact pins so two installs resolve identically.
+// It never logs command output, only the plugin name and exit status.
+func InstallNodeDeps(ctx context.Context, globalRoot string, manifest Manifest, log *config.Logger) error {
 	if err := ValidateNodeDeps(&manifest); err != nil {
 		return err
 	}
 	if strings.TrimSpace(manifest.NodePackage) == "" {
 		return fmt.Errorf("plugin %q declares no node dependencies", manifest.Name)
 	}
-	dir, err := NodeDir(homePath, manifest.Name)
+	dir, err := SharedNodeDir(globalRoot, manifest.Name)
 	if err != nil {
 		return err
 	}
@@ -119,8 +122,8 @@ func InstallNodeDeps(ctx context.Context, homePath string, manifest Manifest, lo
 	if log != nil {
 		log.Server("plugin.node").Debug("plugin.node.installed", "installed plugin node dependencies", config.F("plugin", manifest.Name))
 	}
-	// Verify the expected binary resolves inside the plugin home.
-	if _, err := NodeBinPath(homePath, manifest.Name, DefaultNodeBin(manifest)); err != nil {
+	// Verify the expected binary resolves inside the shared plugin home.
+	if _, err := NodeBinPath(globalRoot, manifest.Name, DefaultNodeBin(manifest)); err != nil {
 		return fmt.Errorf("plugin binary is not installed")
 	}
 	return nil

@@ -141,8 +141,14 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 		return InstallResult{}, err
 	}
 	ref = strings.TrimSpace(ref)
-	if source.Kind == "local" && ref != "" {
-		return InstallResult{}, fmt.Errorf("plugin --ref applies to git sources only")
+	if source.Kind == "local" {
+		if _, err := os.Stat(filepath.Join(source.URL, ".git")); err == nil {
+			// Local git checkout: clone it so the install records a
+			// revision and supports update. File clones need no network.
+			source = InstallSource{Kind: "git", URL: source.URL}
+		} else if ref != "" {
+			return InstallResult{}, fmt.Errorf("plugin --ref applies to git sources only")
+		}
 	}
 	available := UserPluginsDir(globalRoot)
 	if err := os.MkdirAll(available, 0755); err != nil {
@@ -431,8 +437,34 @@ func gitCheckoutPin(ctx context.Context, dir, ref string) (string, error) {
 	return head, nil
 }
 
-// UpdateFromURL refreshes one managed install in place. Pinned installs need
-// an explicit --ref; unpinned installs follow the remote HEAD.
+// gitLsRemote resolves the remote HEAD SHA without cloning. It needs the
+// network for remote URLs but works offline for local paths.
+func gitLsRemote(ctx context.Context, url string) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, installRevTimeout)
+	defer cancel()
+	tmp, err := os.MkdirTemp("", "oswald-git-*")
+	if err != nil {
+		return "", fmt.Errorf("stage plugin fetch: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	cmd := exec.CommandContext(runCtx, "git", "ls-remote", url, "HEAD")
+	cmd.Env = gitEnv(tmp)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("plugin fetch failed")
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 || !fullSHARE.MatchString(fields[0]) {
+		return "", fmt.Errorf("plugin fetch failed")
+	}
+	return fields[0], nil
+}
+
+// UpdateFromURL refreshes one managed install by re-cloning its recorded
+// source and publishing the result over the installed tree. Published trees
+// carry no git metadata (only provenance), so in-place fetch is impossible.
+// Pinned installs need an explicit --ref; unpinned installs follow the remote
+// HEAD.
 func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config.Logger) (InstallResult, error) {
 	if !ValidPluginKey(key) || strings.Contains(key, "/") {
 		return InstallResult{}, fmt.Errorf("invalid plugin key")
@@ -441,11 +473,6 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 		return InstallResult{}, err
 	}
 	ref = strings.TrimSpace(ref)
-	dir := filepath.Join(UserPluginsDir(globalRoot), key)
-	info, err := os.Stat(filepath.Join(dir, ".git"))
-	if err != nil || !info.IsDir() {
-		return InstallResult{}, fmt.Errorf("plugin %q is not a managed git install", key)
-	}
 	meta, err := ReadInstallMetadata(globalRoot, key)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("plugin %q has no install provenance; remove and reinstall it", key)
@@ -456,59 +483,44 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 	if meta.Source != "git" {
 		return InstallResult{}, fmt.Errorf("plugin %q is not a git install", key)
 	}
-	runCtx, cancel := context.WithTimeout(ctx, installCloneTimeout)
-	defer cancel()
-	tmp, err := os.MkdirTemp("", "oswald-git-*")
+	staging, err := os.MkdirTemp("", "oswald-plugin-*")
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("stage plugin fetch: %w", err)
+		return InstallResult{}, fmt.Errorf("stage plugin update: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	env := gitEnv(tmp)
-	fetch := exec.CommandContext(runCtx, "git", "fetch", "origin")
-	fetch.Dir = dir
-	fetch.Env = env
-	if output, err := fetch.CombinedOutput(); err != nil {
-		_ = output
-		return InstallResult{}, fmt.Errorf("plugin fetch failed")
+	defer func() { _ = os.RemoveAll(staging) }()
+	cloneDir := filepath.Join(staging, "repo")
+	if err := gitClone(ctx, meta.URL, cloneDir); err != nil {
+		return InstallResult{}, err
 	}
 	target := ref
 	if target == "" {
-		head := exec.CommandContext(runCtx, "git", "rev-parse", "origin/HEAD")
-		head.Dir = dir
-		head.Env = env
-		output, err := head.Output()
+		target, err = gitLsRemote(ctx, meta.URL)
 		if err != nil {
-			return InstallResult{}, fmt.Errorf("plugin fetch failed")
-		}
-		target = strings.TrimSpace(string(output))
-	} else {
-		fetchRef := exec.CommandContext(runCtx, "git", "fetch", "origin", target)
-		fetchRef.Dir = dir
-		fetchRef.Env = env
-		if output, err := fetchRef.CombinedOutput(); err != nil {
-			_ = output
-			return InstallResult{}, fmt.Errorf("plugin ref is unavailable")
+			return InstallResult{}, err
 		}
 	}
-	checkout := exec.CommandContext(runCtx, "git", "checkout", "--detach", target)
-	checkout.Dir = dir
-	checkout.Env = env
-	if output, err := checkout.CombinedOutput(); err != nil {
-		_ = output
-		return InstallResult{}, fmt.Errorf("plugin ref is unavailable")
-	}
-	revParse := exec.CommandContext(runCtx, "git", "rev-parse", "HEAD")
-	revParse.Dir = dir
-	revParse.Env = env
-	output, err := revParse.Output()
+	revision, err := gitCheckoutPin(ctx, cloneDir, target)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("plugin fetch failed")
+		return InstallResult{}, err
 	}
-	revision := strings.TrimSpace(string(output))
-	if ref != "" && revision != ref {
-		return InstallResult{}, fmt.Errorf("plugin ref mismatch")
+	pluginDir := cloneDir
+	if meta.Subdir != "" {
+		pluginDir = filepath.Join(cloneDir, filepath.FromSlash(meta.Subdir))
 	}
-	if _, err := ParseManifestFile(dir, "user"); err != nil {
+	manifest, err := ParseManifestFile(pluginDir, "user")
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if manifest.Name != key {
+		return InstallResult{}, fmt.Errorf("plugin update changed its name to %q", manifest.Name)
+	}
+	dest := filepath.Join(UserPluginsDir(globalRoot), key)
+	fresh, err := os.MkdirTemp(filepath.Dir(dest), ".plugin-update-*.tmp")
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("stage plugin update: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(fresh) }()
+	if err := copyPluginTree(pluginDir, fresh); err != nil {
 		return InstallResult{}, err
 	}
 	meta.Revision = revision
@@ -517,10 +529,17 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 		meta.Ref = ref
 		meta.Pinned = true
 	} else {
+		meta.Ref = ""
 		meta.Pinned = false
 	}
-	if err := WriteInstallMetadata(dir, meta); err != nil {
+	if err := WriteInstallMetadata(fresh, meta); err != nil {
 		return InstallResult{}, err
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return InstallResult{}, fmt.Errorf("plugin update failed: %w", err)
+	}
+	if err := os.Rename(fresh, dest); err != nil {
+		return InstallResult{}, fmt.Errorf("plugin update failed: %w", err)
 	}
 	if log != nil {
 		log.Server("plugin.install").Debug("plugin.install.updated", "updated plugin", config.F("plugin", key))

@@ -34,12 +34,12 @@ func TestValidateNodeDepsPins(t *testing.T) {
 }
 
 func TestNodeBinPathConfinement(t *testing.T) {
-	home := t.TempDir()
-	binDir := filepath.Join(home, "plugins", "demo", "node_modules", ".bin")
+	global := t.TempDir()
+	binDir := filepath.Join(global, "plugins-available", "demo", "node_modules", ".bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(home, "plugins", "demo", "node_modules", "demo", "bin.js")
+	target := filepath.Join(global, "plugins-available", "demo", "node_modules", "demo", "bin.js")
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -50,17 +50,24 @@ func TestNodeBinPathConfinement(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	got, err := NodeBinPath(home, "demo", "demo")
+	got, err := NodeBinPath(global, "demo", "demo")
 	if err != nil {
 		t.Fatalf("bin path: %v", err)
 	}
 	if got != target {
 		t.Fatalf("got %q want %q", got, target)
 	}
-	if _, err := NodeBinPath(home, "demo", "../escape"); err == nil {
+	if _, err := NodeBinPath(global, "demo", "../escape"); err == nil {
 		t.Fatal("expected escape reject")
 	}
-	if _, err := NodeBinPath(home, "demo", "missing"); err == nil {
+	if _, err := NodeBinPath(global, "demo", "missing"); err == nil {
 		t.Fatal("expected missing reject")
+	}
+}
+
+func TestInstallNodeDepsRejectsMissing(t *testing.T) {
+	manifest := Manifest{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1"}
+	if err := InstallNodeDeps(t.Context(), t.TempDir(), manifest, nil); err == nil {
+		t.Fatal("missing node deps accepted")
 	}
 }

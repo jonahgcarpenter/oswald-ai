@@ -115,6 +115,12 @@ func TestBinPathAndInstallDepsGates(t *testing.T) {
 	if code, _, _ := pluginsRun(t, root, "install-deps", "demo"); code == 0 {
 		t.Fatal("install-deps without node deps accepted")
 	}
+	if code, _, _ := pluginsRun(t, root, "install-deps", "demo", "--profile", "alice"); code != 2 {
+		t.Fatalf("profile-scoped install-deps = %d, want usage", code)
+	}
+	if code, _, _ := pluginsRun(t, root, "bin-path", "demo", "--profile", "alice"); code != 2 {
+		t.Fatalf("profile-scoped bin-path = %d, want usage", code)
+	}
 }
 
 func installSourceFixture(t *testing.T, name string) string {
