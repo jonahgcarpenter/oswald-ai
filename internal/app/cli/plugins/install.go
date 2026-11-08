@@ -83,7 +83,11 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 	} else if result.Revision != "" {
 		pin = "at " + shortSHA(result.Revision)
 	}
-	fmt.Fprintf(stdout, "installed %s (%s, %s)\n", result.Key, pin, state)
+	verb := "installed"
+	if result.AlreadyInstalled {
+		verb = "already installed"
+	}
+	fmt.Fprintf(stdout, "%s %s (%s, %s)\n", verb, result.Key, pin, state)
 	return exitOK
 }
 

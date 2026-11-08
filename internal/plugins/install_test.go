@@ -3,6 +3,7 @@ package plugins
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -95,8 +96,22 @@ func TestInstallFromLocalDir(t *testing.T) {
 	if meta.Source != "local" || meta.URL != src || meta.Pinned {
 		t.Fatalf("meta = %+v", meta)
 	}
-	if _, err := InstallFromURL(t.Context(), global, src, "", "", false, log); err == nil {
-		t.Fatal("duplicate install accepted")
+	again, err := InstallFromURL(t.Context(), global, src, "", "", false, log)
+	if err != nil {
+		t.Fatalf("idempotent reinstall: %v", err)
+	}
+	if !again.AlreadyInstalled || again.Key != "local-widget" {
+		t.Fatalf("result = %+v", again)
+	}
+	other := filepath.Join(t.TempDir(), "other-plugin")
+	installFixture(t, other, "local-widget", "")
+	if _, err := InstallFromURL(t.Context(), global, other, "", "", false, log); err == nil {
+		t.Fatal("conflicting source accepted")
+	} else if !strings.Contains(err.Error(), "different source") {
+		t.Fatalf("wrong conflict: %v", err)
+	}
+	if _, err := InstallFromURL(t.Context(), global, src, "0123456789abcdef0123456789abcdef01234567", "", false, log); err == nil {
+		t.Fatal("local ref accepted")
 	}
 	if _, err := InstallFromURL(t.Context(), global, src, "", "", true, log); err != nil {
 		t.Fatalf("force reinstall: %v", err)
@@ -121,6 +136,53 @@ func TestInstallRejectsBadManifest(t *testing.T) {
 	}
 	if _, err := InstallFromURL(t.Context(), global, src, "main", "", false, log); err == nil {
 		t.Fatal("bad ref accepted")
+	}
+}
+
+func TestExistingInstallState(t *testing.T) {
+	global := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(global, "plugins-available", "widgets"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://github.com/acme/widgets.git"
+	rev := "0123456789abcdef0123456789abcdef01234567"
+	other := "fedcba9876543210fedcba9876543210fedcba98"
+	if err := WriteInstallMetadata(filepath.Join(global, "plugins-available", "widgets"),
+		InstallMetadata{Source: "git", URL: url, Ref: rev, Revision: rev, Pinned: true}); err != nil {
+		t.Fatal(err)
+	}
+	src := InstallSource{Kind: "git", URL: url}
+	if result, done, err := existingInstallState(global, "widgets", src, "", ""); err != nil || !done || !result.AlreadyInstalled {
+		t.Fatalf("same source = %+v %v %v", result, done, err)
+	}
+	if _, done, err := existingInstallState(global, "widgets", src, "", rev); err != nil || !done {
+		t.Fatalf("same ref = %v %v", done, err)
+	}
+	if _, _, err := existingInstallState(global, "widgets", src, "", other); err == nil {
+		t.Fatal("moved pin accepted")
+	} else if !strings.Contains(err.Error(), "update") {
+		t.Fatalf("wrong moved-pin error: %v", err)
+	}
+	otherSrc := InstallSource{Kind: "git", URL: "https://github.com/other/widgets.git"}
+	if _, _, err := existingInstallState(global, "widgets", otherSrc, "", ""); err == nil {
+		t.Fatal("different source accepted")
+	} else if !strings.Contains(err.Error(), "different source") {
+		t.Fatalf("wrong source error: %v", err)
+	}
+	if _, _, err := existingInstallState(global, "widgets", src, "sub", ""); err == nil {
+		t.Fatal("different subdir accepted")
+	}
+	// Hand-placed tree without metadata refuses without --force.
+	plain := filepath.Join(global, "plugins-available", "plain")
+	if err := os.MkdirAll(plain, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plainSrc := filepath.Join(t.TempDir(), "plain")
+	installFixture(t, plainSrc, "plain", "")
+	if _, err := InstallFromURL(t.Context(), global, plainSrc, "", "", false, config.NewLogger(config.LevelWarn)); err == nil {
+		t.Fatal("unmanaged overwrite accepted")
+	} else if !strings.Contains(err.Error(), "unmanaged") {
+		t.Fatalf("wrong unmanaged error: %v", err)
 	}
 }
 

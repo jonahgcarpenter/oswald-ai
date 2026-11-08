@@ -43,6 +43,9 @@ type InstallResult struct {
 	Revision string
 	// Pinned reports whether --ref pinned the install.
 	Pinned bool
+	// AlreadyInstalled reports an idempotent no-op: the published tree
+	// already satisfies the request, so nothing was copied or rewritten.
+	AlreadyInstalled bool
 }
 
 // InstallMetadata is the provenance record written beside installed code.
@@ -138,6 +141,9 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 		return InstallResult{}, err
 	}
 	ref = strings.TrimSpace(ref)
+	if source.Kind == "local" && ref != "" {
+		return InstallResult{}, fmt.Errorf("plugin --ref applies to git sources only")
+	}
 	available := UserPluginsDir(globalRoot)
 	if err := os.MkdirAll(available, 0755); err != nil {
 		return InstallResult{}, fmt.Errorf("prepare plugin directory: %w", err)
@@ -178,7 +184,11 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 	dest := filepath.Join(available, manifest.Name)
 	if _, err := os.Lstat(dest); err == nil {
 		if !force {
-			return InstallResult{}, fmt.Errorf("plugin %q is already installed (use --force to replace)", manifest.Name)
+			if result, done, err := existingInstallState(globalRoot, manifest.Name, source, cleanSubdir, ref); err != nil {
+				return InstallResult{}, err
+			} else if done {
+				return result, nil
+			}
 		}
 		backup, err := backupInstall(globalRoot, manifest.Name)
 		if err != nil {
@@ -209,6 +219,28 @@ func InstallFromURL(ctx context.Context, globalRoot, raw, ref, subdir string, fo
 		log.Server("plugin.install").Debug("plugin.install.completed", "installed plugin", config.F("plugin", manifest.Name), config.F("pinned", meta.Pinned))
 	}
 	return InstallResult{Key: manifest.Name, Revision: revision, Pinned: meta.Pinned}, nil
+}
+
+// existingInstallState compares a staged install request against the
+// published tree. It returns done=true with an AlreadyInstalled result when
+// the published tree already satisfies the request (no copy needed).
+// Otherwise it returns a guiding error: conflicting sources must be replaced
+// with --force, and revision moves go through update.
+func existingInstallState(globalRoot, name string, source InstallSource, subdir, ref string) (InstallResult, bool, error) {
+	meta, err := ReadInstallMetadata(globalRoot, name)
+	if err != nil {
+		return InstallResult{}, false, fmt.Errorf("plugin %q is already installed but unmanaged (use --force to replace)", name)
+	}
+	if meta.Source != source.Kind || meta.URL != source.URL || meta.Subdir != subdir {
+		return InstallResult{}, false, fmt.Errorf("plugin %q is already installed from a different source (use --force to replace)", name)
+	}
+	if ref != "" && ref != meta.Revision {
+		if source.Kind != "git" {
+			return InstallResult{}, false, fmt.Errorf("plugin %q is already installed (use --force to replace)", name)
+		}
+		return InstallResult{}, false, fmt.Errorf("plugin %q is installed at another revision (use plugins update to move it)", name)
+	}
+	return InstallResult{Key: name, Revision: meta.Revision, Pinned: meta.Pinned, AlreadyInstalled: true}, true, nil
 }
 
 // MetadataPath returns the provenance file for one installed plugin key.

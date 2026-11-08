@@ -137,8 +137,9 @@ func TestInstallLocalWithEnable(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "installed_from: local") {
 		t.Fatalf("info = %d %q", code, out)
 	}
-	if code, _, _ := pluginsRun(t, root, "install", src); code == 0 {
-		t.Fatal("duplicate install accepted")
+	code, out, _ = pluginsRun(t, root, "install", src)
+	if code != 0 || !strings.Contains(out, "already installed shipped") {
+		t.Fatalf("idempotent reinstall = %d %q", code, out)
 	}
 	if code, _, stderr := pluginsRun(t, root, "install", src, "--force"); code != 0 {
 		t.Fatalf("force reinstall = %d %s", code, stderr)
