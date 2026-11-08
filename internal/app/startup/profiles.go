@@ -265,6 +265,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetPluginHooks(pluginManager)
 		engine.SetMarkdownSummarizer(summarizer)
 		engine.SetWorkspace(profile.ProfileRoot)
+		engine.SetPluginSkills(tools.PluginSkillRoots(profile))
 		processor.agents[name] = engine
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))

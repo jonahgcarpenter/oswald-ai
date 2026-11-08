@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
@@ -82,6 +83,7 @@ type Agent struct {
 	toolPolicy     governance.GlobalPolicy
 	summarizer     MarkdownSummarizer
 	workspaceRoot  string
+	pluginSkills   []skills.PluginRoot
 	pluginHooks    plugins.HookInvoker
 	log            *config.Logger
 }
@@ -90,6 +92,16 @@ type Agent struct {
 func (a *Agent) SetPluginHooks(hooks plugins.HookInvoker) {
 	if a != nil {
 		a.pluginHooks = hooks
+	}
+}
+
+// SetPluginSkills installs the read-only bundled plugin skills roots bound
+// into the prompt skill index. It mirrors the roots bound into the
+// skill_manage tool handler so the index and the tool resolve the same set.
+// Enablement is restart-classified, so construction-time roots never go stale.
+func (a *Agent) SetPluginSkills(roots []skills.PluginRoot) {
+	if a != nil {
+		a.pluginSkills = roots
 	}
 }
 

@@ -185,3 +185,67 @@ func TestBundledPluginSkillsReadOnly(t *testing.T) {
 		t.Fatalf("wrong read-only error: %v", err)
 	}
 }
+
+func TestBundledSkillViewCarriesRuntimeNote(t *testing.T) {
+	process.ClearEnvPassthrough()
+	defer process.ClearEnvPassthrough()
+	root := seedManaged(t)
+	pluginDir := filepath.Join(t.TempDir(), "demo", "skills", "shipped")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("---\nname: shipped\ndescription: Bundled skill\n---\n\nBundled body.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	skillsDir := filepath.Dir(pluginDir)
+	handler := NewHandlerWithPlugins(root, []skills.PluginRoot{{Key: "demo", Dir: skillsDir}})
+	viewed, err := handler(skillContext(), map[string]interface{}{"action": "view", "name": "demo/shipped"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Plugin runtime:",
+		filepath.Join(filepath.Dir(skillsDir), "node_modules", ".bin"),
+		filepath.Join(root, "plugins", "demo", "home"),
+		"do not apply here",
+	} {
+		if !strings.Contains(viewed.Content, want) {
+			t.Fatalf("runtime note missing %q:\n%s", want, viewed.Content)
+		}
+	}
+	// Profile skills carry no runtime note.
+	plain, err := handler(skillContext(), map[string]interface{}{"action": "view", "name": "review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.Content, "Plugin runtime:") {
+		t.Fatalf("profile skill gained a runtime note:\n%s", plain.Content)
+	}
+}
+
+func TestBundledSkillFileViewOmitsRuntimeNote(t *testing.T) {
+	process.ClearEnvPassthrough()
+	defer process.ClearEnvPassthrough()
+	root := seedManaged(t)
+	pluginDir := filepath.Join(t.TempDir(), "demo", "skills", "shipped")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("---\nname: shipped\ndescription: Bundled skill\n---\n\nBundled body.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithPlugins(root, []skills.PluginRoot{{Key: "demo", Dir: filepath.Dir(pluginDir)}})
+	viewed, err := handler(skillContext(), map[string]interface{}{"action": "view", "name": "demo/shipped", "file_path": "scripts/run.sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(viewed.Content, "Plugin runtime:") {
+		t.Fatalf("file view gained a runtime note:\n%s", viewed.Content)
+	}
+	if !strings.Contains(viewed.Content, "echo hi") {
+		t.Fatalf("file content missing:\n%s", viewed.Content)
+	}
+}
