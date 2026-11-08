@@ -100,7 +100,13 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald providers list\|show\|add\|remove` | Manage LLM providers (`--profile` allowed).                                                                     |
 | `oswald model show\|set`                  | Manage model selection: `--provider`, `--default`, `--context-length` (`--profile` allowed).                    |
 | `oswald api show\|set-key\|clear-key`      | Manage the per-profile OpenAI gateway credential (`--profile` allowed, never printed).                          |
-| `oswald tools show\|set\|unset`            | Manage `web-search`, `image`, and `browser` backends (`--profile` allowed, secrets redacted).                   |
+| `oswald tools show\|set\|unset`            | Manage `web-search`, `image`, `browser`, and `terminal` backends (`--profile` allowed, secrets redacted).      |
+| `oswald plugins list\|enable\|disable\|info` | Discover plugins, opt in per profile, and inspect manifest/provenance state (never prints secrets).            |
+| `oswald plugins install <source>`        | Install shared plugin code from a git URL, `owner/repo`, or local path (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--enable` with `--profile` to also enable; default scope required). |
+| `oswald plugins update <name>`           | Refresh a managed install (pinned installs need an explicit `--ref`; default scope required).                  |
+| `oswald plugins remove <name>`           | Drop a plugin for a profile and delete shared code (refuses when other profiles still reference it; `--full` also removes per-profile storage). |
+| `oswald plugins install-deps <name>`      | Install a plugin's pinned npm dependencies into the profile home (explicit consent per install).                |
+| `oswald plugins bin-path <name>`         | Print the absolute plugin-local binary path for explicit use in `terminal` (PATH is never mutated).            |
 | `oswald runtime show\|set`                | Inspect and set `runtime.log_level` (applies live).                                                             |
 | `oswald config show\|get\|validate`        | Inspect effective configuration (secrets redacted) and validate files; never writes.                            |
 | `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |
@@ -112,6 +118,58 @@ fenced to the calling profile, and global sections plus profile lifecycle requir
 scope — contradictions fail closed instead of landing elsewhere. Log-level and admission
 changes apply live; anything else triggers a supervised automatic restart of the service
 within seconds — no manual restart, no operator signal.
+
+## Plugins
+
+Plugins extend Oswald with extra tools, hooks, and commands without touching core code.
+Code is installed once (shared); enablement, configuration, and storage stay per profile.
+
+A plugin is a directory with a `plugin.yaml` manifest:
+
+```yaml
+name: demo
+version: "1.0"
+description: what it does
+manifest_version: 2
+api_version: "1"
+requires_env: [EXAMPLE_API_KEY]   # fail closed per profile when unset
+requires_plugins: [base]          # optional load-order dependencies
+node_package: example-cli         # optional pinned npm CLI
+node_version: 1.2.3               # exact pin, no ranges
+```
+
+```bash
+oswald plugins install owner/repo --enable --profile jonah   # or https URL / local path
+oswald plugins enable demo --profile jonah
+oswald plugins install-deps demo --profile jonah              # pinned npm deps, explicit consent
+oswald plugins bin-path demo --profile jonah                 # absolute path for terminal use
+```
+
+`install` accepts `--ref <40-char SHA>` to pin (tags and branches are rejected) and
+`--subdir` for monorepos; `update` refreshes managed installs (pins never move without an
+explicit `--ref`); `remove` refuses when another profile still references the key. Reads
+(`list`, `info`, `bin-path`) may name another profile; `enable`/`install-deps` stay fenced
+to the calling profile, and code `install`/`update`/`remove` require the default scope.
+
+`terminal` never gains plugin directories on `PATH`: invoke plugin CLIs via the absolute
+`bin-path`. API keys live in the profile `.env` (`oswald env set`), never in `plugin.yaml`;
+enabled plugins automatically receive their declared `requires_env` values in sandboxed
+children (see below), and provider credential names are always refused.
+
+## Sandbox Environment Variables
+
+`terminal`, `execute_code`, and background processes spawn with a fixed minimal environment
+plus a deny-by-default passthrough allowlist resolved against the acting profile's own
+`.env` files — never another profile's, and never ambient process secrets. Three sources
+can register names:
+
+* skill frontmatter: `required_env: [EXAMPLE_API_KEY]` in `SKILL.md` (registered on `skill_view`),
+* operator config: `oswald tools set terminal --env-passthrough A,B` (per profile, restart to apply),
+* enabled plugins: their manifest `requires_env` (automatic on load).
+
+Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`, `OSWALD_*`)
+can never tunnel into a sandbox. Values are resolved per profile at spawn time and are never
+logged — list output shows only names and counts.
 
 ## Documentation
 

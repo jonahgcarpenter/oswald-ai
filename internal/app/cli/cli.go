@@ -118,6 +118,10 @@ commands:
   tools show|set|unset      manage tool backends
   plugins list|enable|disable|info
                           manage profile plugins
+  plugins install|update|remove
+                          install from URL, refresh, or remove shared plugin code
+  plugins install-deps|bin-path
+                          install pinned npm deps / print a plugin binary path
   api show|set-key|clear-key
                          manage the OpenAI gateway credential
   config show|get|validate   inspect configuration and validate files
