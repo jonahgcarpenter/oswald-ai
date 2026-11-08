@@ -66,6 +66,11 @@ type Config struct {
 	PluginDisabled []string
 	// PluginEntries holds per-plugin operator options keyed by plugin id.
 	PluginEntries map[string]PluginEntry
+	// TerminalEnvPassthrough lists variable names forwarded into sandboxed
+	// children (terminal, execute_code, background processes) for this
+	// profile. Values resolve against the profile dotenv scope; provider
+	// credential names are refused at resolve time.
+	TerminalEnvPassthrough []string
 }
 
 // RetentionPolicy supplies code-owned worker bounds.

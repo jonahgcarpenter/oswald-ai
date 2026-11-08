@@ -98,10 +98,14 @@ type browserYAML struct {
 	AllowInsecureURLs *bool   `yaml:"allow_insecure_urls"`
 	RestrictEvaluate  *bool   `yaml:"restrict_evaluate"`
 }
+type terminalYAML struct {
+	EnvPassthrough []string `yaml:"env_passthrough"`
+}
 type toolsYAML struct {
-	WebSearch     webYAML     `yaml:"web_search"`
-	ImageGenerate imageYAML   `yaml:"image_generate"`
-	Browser       browserYAML `yaml:"browser"`
+	WebSearch     webYAML      `yaml:"web_search"`
+	ImageGenerate imageYAML    `yaml:"image_generate"`
+	Browser       browserYAML  `yaml:"browser"`
+	Terminal      terminalYAML `yaml:"terminal"`
 }
 type platformExtraYAML struct {
 	Token               *string  `yaml:"token"`
@@ -575,6 +579,26 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	}
 	if doc.Tools.Browser.RestrictEvaluate != nil {
 		cfg.BrowserRestrictEvaluate = *doc.Tools.Browser.RestrictEvaluate
+	}
+	if len(doc.Tools.Terminal.EnvPassthrough) > 32 {
+		return configErr("config_value_invalid", "tools.terminal.env_passthrough")
+	}
+	seenPassthrough := map[string]bool{}
+	passthrough := make([]string, 0, len(doc.Tools.Terminal.EnvPassthrough))
+	for _, name := range doc.Tools.Terminal.EnvPassthrough {
+		if !envNameRE.MatchString(name) {
+			return configErr("config_value_invalid", "tools.terminal.env_passthrough")
+		}
+		if !seenPassthrough[name] {
+			seenPassthrough[name] = true
+			passthrough = append(passthrough, name)
+		}
+	}
+	sort.Strings(passthrough)
+	if len(passthrough) > 0 {
+		cfg.TerminalEnvPassthrough = passthrough
+	} else {
+		cfg.TerminalEnvPassthrough = nil
 	}
 	for _, entry := range []struct{ raw, path string }{{cfg.ComfyUIURL, "tools.image_generate.url"}, {cfg.SearxngURL, "tools.web_search.searxng_url"}, {cfg.BrowserEndpointURL, "tools.browser.endpoint_url"}} {
 		if entry.raw == "" {

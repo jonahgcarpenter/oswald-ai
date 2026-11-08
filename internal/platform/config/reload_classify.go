@@ -38,7 +38,8 @@ func ClassifyReload(old, next *Config) (bool, []string) {
 		old.BrowserCommandTimeout == next.BrowserCommandTimeout && old.BrowserSnapshotThreshold == next.BrowserSnapshotThreshold &&
 		old.BrowserInactivityTimeout == next.BrowserInactivityTimeout && old.BrowserRecordSessions == next.BrowserRecordSessions &&
 		old.BrowserAllowPrivateURLs == next.BrowserAllowPrivateURLs && old.BrowserAllowInsecureURLs == next.BrowserAllowInsecureURLs &&
-		old.BrowserRestrictEvaluate == next.BrowserRestrictEvaluate)
+		old.BrowserRestrictEvaluate == next.BrowserRestrictEvaluate &&
+		reflect.DeepEqual(old.TerminalEnvPassthrough, next.TerminalEnvPassthrough))
 	add("mcp_servers", reflect.DeepEqual(old.MCPServers, next.MCPServers))
 	add("plugins", reflect.DeepEqual(old.PluginEnabled, next.PluginEnabled) &&
 		reflect.DeepEqual(old.PluginDisabled, next.PluginDisabled) &&
