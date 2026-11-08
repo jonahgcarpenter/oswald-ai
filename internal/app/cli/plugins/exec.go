@@ -72,8 +72,9 @@ func execCmd(ctx context.Context, root, flagProfile string, rest []string, stdou
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", names[0])
 		return exitError
 	}
+	meta, _ := plugins.ReadInstallMetadata(globalRoot, key)
 	if bin == "" {
-		bin = plugins.DefaultNodeBin(manifest)
+		bin = plugins.EffectiveNodeBin(manifest, meta, "")
 	}
 	output, err := plugins.ExecPluginBinary(ctx, globalRoot, profileRoot, key, bin, args, timeout, nil)
 	if err != nil {

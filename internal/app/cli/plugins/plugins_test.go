@@ -253,3 +253,30 @@ func TestExecGatesAndRuns(t *testing.T) {
 		t.Fatalf("exec = %d %q %s", code, out, stderr)
 	}
 }
+
+func TestInstallNodeFlagsEndToEnd(t *testing.T) {
+	root := pluginsTestRoot(t)
+	src := installSourceFixture(t, "flagged")
+	if code, out, stderr := pluginsRun(t, root, "install", src, "--node-package", "agent-data", "--node-version", "0.13.0", "--no-deps"); code != 0 {
+		t.Fatalf("install = %d %s %s", code, out, stderr)
+	}
+	code, out, _ := pluginsRun(t, root, "info", "flagged")
+	if code != 0 {
+		t.Fatalf("info = %d %q", code, out)
+	}
+	// Metadata fallback: bin-path resolves the recorded package base.
+	code, out, _ = pluginsRun(t, root, "bin-path", "flagged")
+	if code == 0 {
+		t.Fatalf("bin-path succeeded without installed deps: %q", out)
+	}
+	if code, _, _ := pluginsRun(t, root, "install", src, "--node-package", "agent-data"); code == 0 {
+		t.Fatal("half node flags accepted")
+	}
+	// Idempotent reinstall with the same flags stays a no-op (no npm run).
+	if code, out, _ := pluginsRun(t, root, "install", src, "--node-package", "agent-data", "--node-version", "0.13.0", "--no-deps"); code != 0 || !strings.Contains(out, "already installed flagged") {
+		t.Fatalf("idempotent reinstall = %d %q", code, out)
+	}
+	if code, _, _ := pluginsRun(t, root, "install", src, "--node-package", "other", "--node-version", "9.9.9", "--no-deps"); code == 0 {
+		t.Fatal("node mismatch accepted without --force")
+	}
+}

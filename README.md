@@ -102,7 +102,7 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald api show\|set-key\|clear-key`      | Manage the per-profile OpenAI gateway credential (`--profile` allowed, never printed).                          |
 | `oswald tools show\|set\|unset`            | Manage `web-search`, `image`, `browser`, and `terminal` backends (`--profile` allowed, secrets redacted).      |
 | `oswald plugins list\|enable\|disable\|info` | Discover plugins, opt in per profile, and inspect manifest/provenance state (never prints secrets).            |
-| `oswald plugins install <source>`        | Install shared plugin code from a git URL, `owner/repo`, or local path (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--enable` with `--profile` to also enable; default scope required). |
+| `oswald plugins install <source>`        | Install shared plugin code from a git URL, `owner/repo`, or local path, with bundled skills and node deps (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--node-package/--node-version` for manifests predating the sidecar convention, `--no-deps` to skip, `--enable` with `--profile` to also enable; default scope required). |
 | `oswald plugins update <name>`           | Refresh a managed install (pinned installs need an explicit `--ref`; default scope required).                  |
 | `oswald plugins remove <name>`           | Drop a plugin for a profile and delete shared code (refuses when other profiles still reference it; `--full` also removes per-profile storage). |
 | `oswald plugins install-deps <name>`      | Install a plugin's pinned npm dependencies into the shared plugin home (explicit consent per install, default scope required). |

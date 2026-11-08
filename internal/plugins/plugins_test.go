@@ -36,9 +36,12 @@ func TestValidateManifestRejects(t *testing.T) {
 	}
 	for _, tc := range []Manifest{
 		{Name: "demo", Source: "user", ApiVersion: "1"},
-		{Name: "demo", Source: "user", ManifestVersion: 2},
-		{Name: "demo", Source: "user", ManifestVersion: 1, ApiVersion: "1"},
+		{Name: "demo", Source: "user", ManifestVersion: 0, ApiVersion: "1"},
+		{Name: "demo", Source: "user", ManifestVersion: 3, ApiVersion: "1"},
 		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "2"},
+		{Name: "demo", Source: "user", ManifestVersion: 1, ApiVersion: "2"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", Kind: "platform"},
+		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", Kind: "backend"},
 		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"demo"}},
 		{Name: "demo", Source: "user", ManifestVersion: 2, ApiVersion: "1", RequiresPlugins: []string{"nope!"}},
 	} {
@@ -46,6 +49,45 @@ func TestValidateManifestRejects(t *testing.T) {
 		if err := ValidateManifest(&candidate); err == nil {
 			t.Fatalf("expected contract reject for %+v", tc)
 		}
+	}
+}
+
+func TestValidateManifestAcceptsV1(t *testing.T) {
+	// V1 without api_version defaults it to "1".
+	v1 := Manifest{Name: "job-search", Source: "user", ManifestVersion: 1}
+	if err := ValidateManifest(&v1); err != nil {
+		t.Fatalf("v1 rejected: %v", err)
+	}
+	if v1.ApiVersion != "1" {
+		t.Fatalf("api version not defaulted: %q", v1.ApiVersion)
+	}
+	// Job-search shape: v1, no api_version, standalone kind.
+	shaped := Manifest{Name: "job-search", Version: "0.9.0", Source: "user", ManifestVersion: 1, Kind: "standalone"}
+	if err := ValidateManifest(&shaped); err != nil {
+		t.Fatalf("v1 standalone rejected: %v", err)
+	}
+	if shaped.ApiVersion != "1" {
+		t.Fatalf("shaped api version not defaulted: %q", shaped.ApiVersion)
+	}
+	// Empty kind is also loadable.
+	bare := Manifest{Name: "legacy", Source: "user", ManifestVersion: 1, ApiVersion: "1"}
+	if err := ValidateManifest(&bare); err != nil {
+		t.Fatalf("bare v1 rejected: %v", err)
+	}
+}
+
+func TestParseManifestFileV1JobSearchShape(t *testing.T) {
+	dir := t.TempDir()
+	body := "name: job-search\nversion: \"0.9.0\"\ndescription: synthetic job search plugin\nmanifest_version: 1\nkind: standalone\n"
+	if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ParseManifestFile(dir, "user")
+	if err != nil {
+		t.Fatalf("parse v1: %v", err)
+	}
+	if m.Name != "job-search" || m.ManifestVersion != 1 || m.ApiVersion != "1" || m.Kind != "standalone" {
+		t.Fatalf("parsed manifest = %+v", m)
 	}
 }
 

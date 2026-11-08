@@ -51,7 +51,7 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 		return infoCmd(root, profile, rest[1], stdout, stderr)
 	case "install":
 		if len(rest) < 2 {
-			fmt.Fprintln(stderr, "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--enable|--no-enable] [--force] [--profile NAME]")
+			fmt.Fprintln(stderr, "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--node-package PKG --node-version VER] [--no-deps] [--enable|--no-enable] [--force] [--profile NAME]")
 			return exitUsage
 		}
 		return installCmd(ctx, root, profile, rest[1:], stdout, stderr)
@@ -104,7 +104,7 @@ func pluginsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  install-deps <name>   install pinned npm deps into the shared plugin home")
 	fmt.Fprintln(w, "  bin-path <name>       print the absolute plugin-local binary path")
 	fmt.Fprintln(w, "  exec <name>           run an installed plugin binary for the calling profile")
-	fmt.Fprintln(w, "  install <source>      install a plugin from a git URL, owner/repo, or path")
+	fmt.Fprintln(w, "  install <source>      install a plugin from a git URL, owner/repo, or path (deps install too)")
 	fmt.Fprintln(w, "  update <name>         refresh a managed install (pins need --ref)")
 	fmt.Fprintln(w, "  remove <name>         drop a plugin and delete shared code")
 }

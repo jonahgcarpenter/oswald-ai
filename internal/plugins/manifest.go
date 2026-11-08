@@ -36,6 +36,7 @@ type manifestYAML struct {
 	ManifestVersion   int      `yaml:"manifest_version"`
 	ApiVersion        string   `yaml:"api_version"`
 	RequiresPlugins   []string `yaml:"requires_plugins"`
+	Kind              string   `yaml:"kind"`
 }
 
 // ParseManifestFile reads and validates dir/plugin.yaml. dir names the plugin
@@ -67,6 +68,7 @@ func ParseManifestFile(dir, source string) (*Manifest, error) {
 		NodeBin:           strings.TrimSpace(raw.NodeBin),
 		ManifestVersion:   raw.ManifestVersion,
 		ApiVersion:        strings.TrimSpace(raw.ApiVersion),
+		Kind:              strings.TrimSpace(raw.Kind),
 		Source:            source,
 		Path:              dir,
 	}
@@ -158,11 +160,16 @@ func ValidateManifest(m *Manifest) error {
 			return fmt.Errorf("plugin %q declares unknown capability", m.Name)
 		}
 	}
-	if m.ManifestVersion != 2 {
-		return fmt.Errorf("plugin %q uses unsupported manifest_version (want 2)", m.Name)
+	if m.ManifestVersion != 1 && m.ManifestVersion != 2 {
+		return fmt.Errorf("plugin %q uses unsupported manifest_version (want 1 or 2)", m.Name)
 	}
-	if m.ApiVersion != "1" {
+	if strings.TrimSpace(m.ApiVersion) == "" {
+		m.ApiVersion = "1"
+	} else if m.ApiVersion != "1" {
 		return fmt.Errorf("plugin %q uses unsupported api_version (want \"1\")", m.Name)
+	}
+	if m.Kind != "" && m.Kind != "standalone" {
+		return fmt.Errorf("plugin %q declares unsupported kind %q", m.Name, m.Kind)
 	}
 	if len(m.RequiresPlugins) > 16 {
 		return fmt.Errorf("plugin %q lists too many required plugins", m.Name)

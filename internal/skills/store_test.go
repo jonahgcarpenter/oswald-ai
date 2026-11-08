@@ -253,3 +253,53 @@ func TestUpdateRejectsLongDescription(t *testing.T) {
 		t.Fatal("expected long description to fail")
 	}
 }
+
+func TestBindPluginJobSearchShape(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	// Job-search layout: skills/<name>/SKILL.md plus scripts and required_env.
+	root := filepath.Join(t.TempDir(), "job-search", "skills")
+	writeSkillMD(t, filepath.Join(root, "job-search"),
+		"---\nname: job-search\ndescription: Find matching jobs\nrequired_env: [SYNTH_AGENT_DATA_KEY]\n---\n\nSearch body.\n")
+	writeSkillMD(t, filepath.Join(root, "job-search-run"),
+		"---\nname: job-search-run\ndescription: Run the search loop\n---\n\nRun body.\n")
+	scripts := filepath.Join(root, "job-search-run", "scripts")
+	if err := os.MkdirAll(scripts, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scripts, "search-jobs.sh"), []byte("#!/bin/sh\necho search\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	store.BindPlugin("job-search", root)
+	found := store.List("")
+	if len(found) != 4 {
+		t.Fatalf("expected 4 skills, got %+v", found)
+	}
+	byLoad := map[string]Skill{}
+	for _, skill := range found {
+		byLoad[skill.LoadName] = skill
+	}
+	for _, want := range []string{"job-search/job-search", "job-search/job-search-run"} {
+		skill, ok := byLoad[want]
+		if !ok {
+			t.Fatalf("missing bundled skill %q in %+v", want, found)
+		}
+		if skill.Source != "job-search" || skill.Category != "plugin job-search" {
+			t.Fatalf("bad namespacing: %+v", skill)
+		}
+	}
+	viewed, err := store.View("job-search/job-search-run", "", "")
+	if err != nil || !strings.Contains(viewed.Body, "Run body.") {
+		t.Fatalf("view = %+v %v", viewed, err)
+	}
+	viewed, err = store.View("job-search/job-search", "", "")
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if len(viewed.RequiredEnv) != 1 || viewed.RequiredEnv[0] != "SYNTH_AGENT_DATA_KEY" {
+		t.Fatalf("required_env = %+v", viewed.RequiredEnv)
+	}
+	if _, err := store.View("job-search/job-search-run", "scripts/search-jobs.sh", ""); err != nil {
+		t.Fatalf("supporting file: %v", err)
+	}
+}

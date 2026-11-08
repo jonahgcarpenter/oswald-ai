@@ -15,10 +15,14 @@ import (
 
 // installCmd clones or copies a plugin into the shared plugins-available tree.
 // Code writes require default scope; --profile selects the enable target and
-// follows the same fencing as enable (contradictions fail closed).
+// follows the same fencing as enable (contradictions fail closed). The node
+// sidecar installs as part of the invocation unless --no-deps opts out;
+// --node-package with --node-version supplies it for repos whose manifest
+// predates the node_package convention.
 func installCmd(ctx context.Context, root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
-	var source, ref, subdir string
-	enable, noEnable, force := false, false, false
+	const usage = "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--node-package PKG --node-version VER] [--no-deps] [--enable|--no-enable] [--force] [--profile NAME]"
+	var source, ref, subdir, nodePackage, nodeVersion string
+	enable, noEnable, force, noDeps := false, false, false, false
 	for i := 0; i < len(rest); i++ {
 		token := rest[i]
 		switch {
@@ -28,6 +32,8 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 			noEnable = true
 		case token == "--force":
 			force = true
+		case token == "--no-deps":
+			noDeps = true
 		case token == "--ref" && i+1 < len(rest):
 			i++
 			ref = rest[i]
@@ -38,19 +44,29 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 			subdir = rest[i]
 		case strings.HasPrefix(token, "--subdir="):
 			subdir = strings.TrimPrefix(token, "--subdir=")
+		case token == "--node-package" && i+1 < len(rest):
+			i++
+			nodePackage = rest[i]
+		case strings.HasPrefix(token, "--node-package="):
+			nodePackage = strings.TrimPrefix(token, "--node-package=")
+		case token == "--node-version" && i+1 < len(rest):
+			i++
+			nodeVersion = rest[i]
+		case strings.HasPrefix(token, "--node-version="):
+			nodeVersion = strings.TrimPrefix(token, "--node-version=")
 		case strings.HasPrefix(token, "-"):
-			fmt.Fprintln(stderr, "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--enable|--no-enable] [--force] [--profile NAME]")
+			fmt.Fprintln(stderr, usage)
 			return exitUsage
 		default:
 			if source != "" {
-				fmt.Fprintln(stderr, "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--enable|--no-enable] [--force] [--profile NAME]")
+				fmt.Fprintln(stderr, usage)
 				return exitUsage
 			}
 			source = token
 		}
 	}
-	if source == "" || (enable && noEnable) {
-		fmt.Fprintln(stderr, "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--enable|--no-enable] [--force] [--profile NAME]")
+	if source == "" || (enable && noEnable) || (nodePackage == "") != (nodeVersion == "") {
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	if err := config.RequireDefaultScope(); err != nil {
@@ -63,7 +79,12 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 		return exitError
 	}
 	globalRoot := mustAbs(root)
-	result, err := plugins.InstallFromURL(ctx, globalRoot, source, ref, subdir, force, nil)
+	opts := plugins.InstallOptions{
+		Ref: ref, Subdir: subdir, Force: force,
+		NodePackage: strings.TrimSpace(nodePackage), NodeVersion: strings.TrimSpace(nodeVersion),
+		NoDeps: noDeps,
+	}
+	result, err := plugins.InstallFromURL(ctx, globalRoot, source, opts, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -87,7 +108,11 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 	if result.AlreadyInstalled {
 		verb = "already installed"
 	}
-	fmt.Fprintf(stdout, "%s %s (%s, %s)\n", verb, result.Key, pin, state)
+	deps := ""
+	if result.DepsInstalled {
+		deps = ", node deps installed"
+	}
+	fmt.Fprintf(stdout, "%s %s (%s, %s%s)\n", verb, result.Key, pin, state, deps)
 	return exitOK
 }
 

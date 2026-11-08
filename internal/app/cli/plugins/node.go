@@ -13,7 +13,8 @@ import (
 // installDepsCmd installs a discovered plugin's pinned npm deps into the
 // shared plugin home. The explicit invocation is the consent gate and
 // requires default scope; versions are exact pins so repeats resolve
-// identically.
+// identically. A manifest declaration wins; otherwise the recorded
+// install-time metadata carries (flags or lockfile fallback).
 func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	name := strings.ToLower(strings.TrimSpace(raw))
 	if !plugins.ValidPluginKey(name) {
@@ -30,15 +31,26 @@ func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, 
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", raw)
 		return exitError
 	}
-	if strings.TrimSpace(manifest.NodePackage) == "" {
+	meta, _ := plugins.ReadInstallMetadata(globalRoot, name)
+	spec, ok := plugins.ResolveNodeSpec(manifest, meta)
+	if !ok {
 		fmt.Fprintf(stderr, "oswald: plugin %q declares no node dependencies\n", name)
 		return exitError
 	}
-	if err := plugins.InstallNodeDeps(ctx, globalRoot, manifest, nil); err != nil {
+	if spec.Lockfile {
+		if err := plugins.InstallNodeLockfile(ctx, globalRoot, name, "", nil); err != nil {
+			fmt.Fprintf(stderr, "oswald: %v\n", err)
+			return exitError
+		}
+		fmt.Fprintf(stdout, "installed %s node dependencies\n", name)
+		return exitOK
+	}
+	withMeta := plugins.Manifest{Name: manifest.Name, NodePackage: spec.Package, NodeVersion: spec.Version}
+	if err := plugins.InstallNodeDeps(ctx, globalRoot, withMeta, nil); err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	bin, err := plugins.NodeBinPath(globalRoot, name, plugins.DefaultNodeBin(manifest))
+	bin, err := plugins.NodeBinPath(globalRoot, name, plugins.EffectiveNodeBin(manifest, meta, ""))
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -83,8 +95,9 @@ func binPathCmd(root, flagProfile string, rest []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", names[0])
 		return exitError
 	}
+	meta, _ := plugins.ReadInstallMetadata(globalRoot, name)
 	if bin == "" {
-		bin = plugins.DefaultNodeBin(manifest)
+		bin = plugins.EffectiveNodeBin(manifest, meta, "")
 	}
 	resolved, err := plugins.NodeBinPath(globalRoot, name, bin)
 	if err != nil {
