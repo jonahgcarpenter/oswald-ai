@@ -8,10 +8,12 @@ import (
 
 // Same-trust file groups. Profiles within one install share trust — true
 // isolation means a separate container. Secrets and operator configuration
-// (config.yaml, .env) stay sealed everywhere: inspect config.yaml through
-// `oswald config show|get` and edit it through the scoped config groups
-// (`oswald providers|model|api|gateway|platforms|tools|runtime|mcp`);
-// .env goes through `oswald env`. Sessions stay fenced
+// stay sealed: .env* everywhere, and config.yaml at the workspace's own
+// root, sibling profile roots, and the global root (plugin workspace files
+// that merely share the basename stay agent-owned). Inspect operator
+// config.yaml through `oswald config show|get` and edit it through the
+// scoped config groups (`oswald providers|model|api|gateway|platforms|tools|
+// runtime|mcp`); .env goes through `oswald env`. Sessions stay fenced
 // by state.db; everything else is readable, with writes gated by group.
 type Group int
 
@@ -92,7 +94,7 @@ func DenyMessage(rel string, group Group, write bool) string {
 func Classify(abs, root string) Group {
 	abs = filepath.Clean(abs)
 	root = filepath.Clean(root)
-	if isProtectedName(abs) {
+	if isProtectedName(abs) || isOperatorConfig(abs, root) {
 		return GroupProtected
 	}
 	cross := !underPath(abs, root)
@@ -162,14 +164,13 @@ func isStateDBBase(base string) bool {
 	return false
 }
 
-// isProtectedName reports secret- or operator-bearing names at any depth:
-// dotenv files, profile configuration, credential stores, and private keys.
+// isProtectedName reports secret-bearing names at any depth: dotenv files,
+// credential stores, and private keys. Operator config.yaml is not matched
+// here; isOperatorConfig scopes it to Oswald's own config paths so plugin
+// workspace files sharing the basename stay agent-owned.
 // Callers classify basenames and the mcp directory alike.
 func isProtectedName(abs string) bool {
 	base := filepath.Base(abs)
-	if base == "config.yaml" {
-		return true
-	}
 	if base == ".env" || strings.HasPrefix(base, ".env") {
 		return true
 	}
@@ -179,6 +180,37 @@ func isProtectedName(abs string) bool {
 		return true
 	}
 	return hasPathComponent(abs, "mcp")
+}
+
+// isOperatorConfig reports whether abs is Oswald's own operator
+// configuration: the workspace's own config.yaml, another profile's
+// config.yaml seen from the default root, or the global/sibling config.yaml
+// seen from a named profile root. Plugin workspace files that merely share
+// the basename stay agent-owned.
+func isOperatorConfig(abs, root string) bool {
+	if filepath.Base(abs) != "config.yaml" {
+		return false
+	}
+	if filepath.Dir(abs) == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	switch {
+	case len(parts) == 3 && parts[0] == "profiles" && parts[2] == "config.yaml":
+		// <root>/profiles/<name>/config.yaml from the default root.
+		return true
+	case len(parts) == 3 && parts[0] == ".." && parts[2] == "config.yaml":
+		// ../<name>/config.yaml: a sibling profile's config from a named root.
+		return true
+	case rel == filepath.Join("..", "..", "config.yaml"):
+		// <global>/config.yaml from a named profile root.
+		return true
+	}
+	return false
 }
 
 func hasPathComponent(path, name string) bool {

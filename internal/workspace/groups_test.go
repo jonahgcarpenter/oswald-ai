@@ -61,9 +61,14 @@ func TestClassifyGroups(t *testing.T) {
 		// SOUL.md: agent same-profile, system cross-profile.
 		{filepath.Join(root, "SOUL.md"), GroupAgent},
 		{filepath.Join(root, "profiles", "bob", "SOUL.md"), GroupSystem},
-		// config.yaml: protected everywhere, CLI-mediated.
+		// config.yaml: Oswald's own configs stay protected and CLI-mediated;
+		// same-tree namesakes stay agent-owned. Another profile's nested
+		// config.yaml reads as cross-profile system from the default root,
+		// like any other file under profiles/.
 		{filepath.Join(root, "config.yaml"), GroupProtected},
 		{filepath.Join(root, "profiles", "bob", "config.yaml"), GroupProtected},
+		{filepath.Join(root, "profiles", "bob", "plugins", "job-search", "home", ".job-search", "config.yaml"), GroupSystem},
+		{filepath.Join(root, "sub", "config.yaml"), GroupAgent},
 		// cache: scratch is agent same-profile, everything else system.
 		{filepath.Join(root, "cache", "scratch", "a.txt"), GroupAgent},
 		{filepath.Join(root, "cache", "images", "a.png"), GroupSystem},
@@ -80,6 +85,50 @@ func TestClassifyGroups(t *testing.T) {
 	for _, tc := range cases {
 		if got := Classify(tc.path, root); got != tc.want {
 			t.Errorf("Classify(%q) = %d, want %d", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyOperatorConfigNamedRoot(t *testing.T) {
+	tree, bob := fileTree(t)
+	alice := filepath.Join(tree, "profiles", "alice")
+	cases := []struct {
+		path string
+		want Group
+	}{
+		// Own, global, and sibling operator configs stay sealed.
+		{filepath.Join(bob, "config.yaml"), GroupProtected},
+		{filepath.Join(tree, "config.yaml"), GroupProtected},
+		{filepath.Join(alice, "config.yaml"), GroupProtected},
+		// Nested namesakes inside the profile stay agent-owned.
+		{filepath.Join(bob, "plugins", "demo", "home", ".job-search", "config.yaml"), GroupAgent},
+		{filepath.Join(bob, "sub", "config.yaml"), GroupAgent},
+	}
+	for _, tc := range cases {
+		if got := Classify(tc.path, bob); got != tc.want {
+			t.Errorf("Classify(%q, bob) = %d, want %d", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestNestedWorkspaceConfigYamlAgentOwned(t *testing.T) {
+	tree, bob := fileTree(t)
+	// The incident path: a plugin workspace config.yaml nested deep inside
+	// the profile tree must read and write like any other agent-owned file.
+	nested := filepath.Join("plugins", "job-search", "home", ".job-search", "config.yaml")
+	for _, ws := range []*Workspace{NewWorkspace(tree, "default"), NewWorkspace(bob, "bob")} {
+		full := filepath.Join(ws.Root(), nested)
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := ws.ResolveWrite(nested); err != nil {
+			t.Fatalf("nested config write denied: %v", err)
+		}
+		if err := os.WriteFile(full, []byte("version: 2\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := ws.Resolve(nested); err != nil {
+			t.Fatalf("nested config read denied: %v", err)
 		}
 	}
 }
