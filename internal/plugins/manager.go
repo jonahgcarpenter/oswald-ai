@@ -100,6 +100,22 @@ func (m *Manager) EnabledNames() []string {
 	return out
 }
 
+// EnabledRequiresEnv maps each enabled plugin key to a copy of its declared
+// requires_env list. Callers register the names with the sandbox passthrough
+// so enabled plugins receive their variables in spawned children.
+func (m *Manager) EnabledRequiresEnv() map[string][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string][]string{}
+	for key, loaded := range m.plugins {
+		if !loaded.Enabled || len(loaded.Manifest.RequiresEnv) == 0 {
+			continue
+		}
+		out[key] = append([]string(nil), loaded.Manifest.RequiresEnv...)
+	}
+	return out
+}
+
 // KnownNames returns all discovered keys in stable order for listing.
 func (m *Manager) KnownNames() []string {
 	m.mu.Lock()

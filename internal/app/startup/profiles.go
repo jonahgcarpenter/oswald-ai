@@ -246,6 +246,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}); err != nil {
 			return &Error{Event: "app.plugins.init_failed", Message: "failed to initialize profile plugins", Cause: err}
 		}
+		publishPluginEnvPassthrough(pluginManager, name, log)
 		client := seams.newClient(profile, rootLog)
 		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
