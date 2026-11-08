@@ -119,58 +119,6 @@ scope — contradictions fail closed instead of landing elsewhere. Log-level and
 changes apply live; anything else triggers a supervised automatic restart of the service
 within seconds — no manual restart, no operator signal.
 
-## Plugins
-
-Plugins extend Oswald with extra tools, hooks, and commands without touching core code.
-Code is installed once (shared); enablement, configuration, and storage stay per profile.
-
-A plugin is a directory with a `plugin.yaml` manifest:
-
-```yaml
-name: demo
-version: "1.0"
-description: what it does
-manifest_version: 2
-api_version: "1"
-requires_env: [EXAMPLE_API_KEY]   # fail closed per profile when unset
-requires_plugins: [base]          # optional load-order dependencies
-node_package: example-cli         # optional pinned npm CLI
-node_version: 1.2.3               # exact pin, no ranges
-```
-
-```bash
-oswald plugins install owner/repo --enable --profile jonah   # or https URL / local path
-oswald plugins enable demo --profile jonah
-oswald plugins install-deps demo --profile jonah              # pinned npm deps, explicit consent
-oswald plugins bin-path demo --profile jonah                 # absolute path for terminal use
-```
-
-`install` accepts `--ref <40-char SHA>` to pin (tags and branches are rejected) and
-`--subdir` for monorepos; `update` refreshes managed installs (pins never move without an
-explicit `--ref`); `remove` refuses when another profile still references the key. Reads
-(`list`, `info`, `bin-path`) may name another profile; `enable`/`install-deps` stay fenced
-to the calling profile, and code `install`/`update`/`remove` require the default scope.
-
-`terminal` never gains plugin directories on `PATH`: invoke plugin CLIs via the absolute
-`bin-path`. API keys live in the profile `.env` (`oswald env set`), never in `plugin.yaml`;
-enabled plugins automatically receive their declared `requires_env` values in sandboxed
-children (see below), and provider credential names are always refused.
-
-## Sandbox Environment Variables
-
-`terminal`, `execute_code`, and background processes spawn with a fixed minimal environment
-plus a deny-by-default passthrough allowlist resolved against the acting profile's own
-`.env` files — never another profile's, and never ambient process secrets. Three sources
-can register names:
-
-* skill frontmatter: `required_env: [EXAMPLE_API_KEY]` in `SKILL.md` (registered on `skill_view`),
-* operator config: `oswald tools set terminal --env-passthrough A,B` (per profile, restart to apply),
-* enabled plugins: their manifest `requires_env` (automatic on load).
-
-Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`, `OSWALD_*`)
-can never tunnel into a sandbox. Values are resolved per profile at spawn time and are never
-logged — list output shows only names and counts.
-
 ## Documentation
 
 Everything resides in [`AGENTS.md`](AGENTS.md).

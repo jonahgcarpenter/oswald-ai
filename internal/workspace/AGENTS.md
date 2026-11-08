@@ -52,7 +52,25 @@ the stdio aliases exempt.
 external modification (new files allowed; 2 MiB cap; syntax-checked). `search_files` skips
 `.git`/`node_modules`/`__pycache__` and files over 1 MiB. Never log workspace paths, contents,
 queries, or command output — native history carries 16 KiB args / 16,000 result runes per call
-within a 64 KiB aggregate trace.
+within a 64 KiB aggregate trace. Spawned children never inherit the server process
+environment: see Sandbox environment below.
+
+## Sandbox environment (terminal, execute_code, background)
+
+`runShell`, `execute_code`, and `process.Manager.Spawn` build every child env from a fixed
+base (`PATH`, `HOME`, `LANG`, `TMPDIR`, `OSWALD_*`, plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN`)
+plus a deny-by-default passthrough allowlist resolved against the acting profile's own
+dotenv pair (global overlaid with the profile's own; `os.Getenv` fallback only for declared
+names). Three sources register names: skill frontmatter `required_env` (on `skill_view`),
+operator config `tools.terminal.env_passthrough` (per profile, restart to apply, staged
+validation), and enabled plugins' manifest `requires_env` (automatic on load) — see
+`process/sandboxenv.go` (`SandboxEnvForProfile`, `ProfileSecretScope`, `RegisterEnvPassthrough`).
+
+Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`,
+`OSWALD_*`) can never tunnel into a sandbox; `ResolveEnvValue` skips refused and empty
+names silently. Values resolve per profile at spawn time and are never logged — only
+names and counts. `terminal` `PATH` stays fixed by design: plugin CLIs are invoked via
+their absolute `bin-path`, with API keys arriving through passthrough, not the command line.
 
 ## Pre-execution chain (order matters)
 
