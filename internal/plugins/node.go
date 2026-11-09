@@ -12,44 +12,29 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
-// Node dependency bounds. Sidecars install once globally under the shared
-// plugin home and never touch the terminal PATH.
+// Node dependency bounds. Sidecars install per profile under
+// <profile>/plugins/<name>/code/node_modules and never touch the terminal PATH.
 const (
 	nodeInstallTimeout   = 5 * time.Minute
 	maxNodeInstallOutput = 32 << 10
 )
 
-// SharedNodeDir returns the shared plugin home owning its node_modules tree:
-// <globalRoot>/plugins-available/<name>. The plugin argument is a canonical
-// key. Per-profile data stays under the profile plugins/ tree (see
-// Manager.StorageRoot); only code and its sidecar live here.
-func SharedNodeDir(globalRoot, plugin string) (string, error) {
+// NodeBinPath resolves the absolute plugin-local binary without executing it.
+// The binary must already be installed under the profile code
+// node_modules/.bin; the terminal PATH is never mutated. Callers invoke the
+// returned absolute path explicitly.
+func NodeBinPath(profileRoot, plugin, bin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	if strings.TrimSpace(globalRoot) == "" {
+	if strings.TrimSpace(profileRoot) == "" {
 		return "", fmt.Errorf("plugin home is unavailable")
 	}
-	return filepath.Join(UserPluginsDir(globalRoot), filepath.FromSlash(plugin)), nil
+	return nodeBinPathIn(PluginCodeDir(profileRoot, plugin), bin)
 }
 
-// NodeBinPath resolves the absolute plugin-local binary without executing it.
-// The binary must already be installed under the shared node_modules/.bin;
-// the terminal PATH is never mutated. Callers invoke the returned absolute
-// path explicitly.
-func NodeBinPath(globalRoot, plugin, bin string) (string, error) {
-	if !ValidPluginKey(plugin) {
-		return "", fmt.Errorf("invalid plugin key")
-	}
-	dir, err := SharedNodeDir(globalRoot, plugin)
-	if err != nil {
-		return "", err
-	}
-	return nodeBinPathIn(dir, bin)
-}
-
-// nodeBinPathIn resolves a binary inside an explicit plugin directory: the
-// shared home for live installs, a staged temp dir for updates.
+// nodeBinPathIn resolves a binary inside an explicit plugin code directory:
+// the profile code home for live installs, a staged temp dir for updates.
 func nodeBinPathIn(dir, bin string) (string, error) {
 	if strings.TrimSpace(bin) == "" || len(bin) > 64 || !npmBinRE.MatchString(bin) {
 		return "", fmt.Errorf("invalid plugin binary")
@@ -74,43 +59,49 @@ func nodeBinPathIn(dir, bin string) (string, error) {
 	return candidate, nil
 }
 
-// InstallNodeDeps installs the manifest's pinned npm package into the shared
-// plugin home. The explicit CLI invocation is the consent gate and requires
-// default scope; versions are exact pins so two installs resolve identically.
-// It never logs command output, only the plugin name and exit status.
-func InstallNodeDeps(ctx context.Context, globalRoot string, manifest Manifest, log *config.Logger) error {
+// InstallNodeDeps installs the manifest's pinned npm package into the profile
+// code home. The explicit CLI invocation is the consent gate; versions are
+// exact pins so two installs resolve identically. It never logs command
+// output, only the plugin name and exit status.
+func InstallNodeDeps(ctx context.Context, profileRoot string, manifest Manifest, log *config.Logger) error {
 	if err := ValidateNodeDeps(&manifest); err != nil {
 		return err
 	}
 	if strings.TrimSpace(manifest.NodePackage) == "" {
 		return fmt.Errorf("plugin %q declares no node dependencies", manifest.Name)
 	}
-	return InstallNodePackage(ctx, globalRoot, manifest.Name, DefaultNodeBin(manifest),
+	return InstallNodePackage(ctx, profileRoot, manifest.Name, DefaultNodeBin(manifest),
 		manifest.NodePackage+"@"+manifest.NodeVersion, "", log)
 }
 
-// InstallNodePackage installs one exact npm pin into the plugin directory:
-// the shared home when dir is "", a staged temp dir for updates. bin names
+// InstallNodePackage installs one exact npm pin into the plugin code directory:
+// the profile code home when dir is "", a staged temp dir for updates. bin names
 // the expected binary for post-install verification; empty skips it.
-func InstallNodePackage(ctx context.Context, globalRoot, key, bin, spec, dir string, log *config.Logger) error {
+func InstallNodePackage(ctx context.Context, profileRoot, key, bin, spec, dir string, log *config.Logger) error {
 	if !ValidPluginKey(key) {
 		return fmt.Errorf("invalid plugin key")
 	}
 	if strings.TrimSpace(spec) == "" {
 		return fmt.Errorf("plugin node spec is required")
 	}
-	if dir == "" {
-		var err error
-		dir, err = SharedNodeDir(globalRoot, key)
-		if err != nil {
-			return err
+	isLive := dir == ""
+	if isLive {
+		if strings.TrimSpace(profileRoot) == "" {
+			return fmt.Errorf("plugin home is unavailable")
 		}
+		dir = PluginCodeDir(profileRoot, key)
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create plugin home: %w", err)
 	}
 	_ = os.Chmod(dir, 0700)
-	cacheDir, tmpDir, err := prepareNodeCache(dir)
+	var cacheDir, tmpDir string
+	var err error
+	if isLive {
+		cacheDir, tmpDir, err = prepareProfileNodeCache(profileRoot, key)
+	} else {
+		cacheDir, tmpDir, err = prepareNodeCache(dir)
+	}
 	if err != nil {
 		return err
 	}
@@ -143,23 +134,30 @@ func InstallNodePackage(ctx context.Context, globalRoot, key, bin, spec, dir str
 }
 
 // InstallNodeLockfile installs a plugin's own pinned dependencies via npm ci
-// into the plugin directory: the shared home when dir is "", a staged temp
-// dir for updates. The directory must carry package.json with a lockfile.
-func InstallNodeLockfile(ctx context.Context, globalRoot, key, dir string, log *config.Logger) error {
+// into the plugin code directory: the profile code home when dir is "", a
+// staged temp dir for updates. The directory must carry package.json with a
+// lockfile.
+func InstallNodeLockfile(ctx context.Context, profileRoot, key, dir string, log *config.Logger) error {
 	if !ValidPluginKey(key) {
 		return fmt.Errorf("invalid plugin key")
 	}
-	if dir == "" {
-		var err error
-		dir, err = SharedNodeDir(globalRoot, key)
-		if err != nil {
-			return err
+	isLive := dir == ""
+	if isLive {
+		if strings.TrimSpace(profileRoot) == "" {
+			return fmt.Errorf("plugin home is unavailable")
 		}
+		dir = PluginCodeDir(profileRoot, key)
 	}
 	if !hasLockfileSidecar(dir) {
 		return fmt.Errorf("plugin %q carries no lockfile", key)
 	}
-	cacheDir, tmpDir, err := prepareNodeCache(dir)
+	var cacheDir, tmpDir string
+	var err error
+	if isLive {
+		cacheDir, tmpDir, err = prepareProfileNodeCache(profileRoot, key)
+	} else {
+		cacheDir, tmpDir, err = prepareNodeCache(dir)
+	}
 	if err != nil {
 		return err
 	}
@@ -185,7 +183,22 @@ func InstallNodeLockfile(ctx context.Context, globalRoot, key, dir string, log *
 	return nil
 }
 
-// prepareNodeCache creates the npm cache and temp dirs under the plugin dir.
+// prepareProfileNodeCache creates the npm cache and temp dirs under the plugin
+// data tree so build artifacts never pollute the immutable code copy.
+func prepareProfileNodeCache(profileRoot, key string) (cacheDir, tmpDir string, err error) {
+	base := filepath.Join(PluginDataDir(profileRoot, key), "cache", "node")
+	cacheDir = filepath.Join(base, "npm")
+	tmpDir = filepath.Join(base, "tmp")
+	for _, path := range []string{cacheDir, tmpDir} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return "", "", fmt.Errorf("create plugin cache: %w", err)
+		}
+	}
+	return cacheDir, tmpDir, nil
+}
+
+// prepareNodeCache creates the npm cache and temp dirs under a staged dir for
+// updates, where no profile data tree exists yet.
 func prepareNodeCache(dir string) (cacheDir, tmpDir string, err error) {
 	cacheDir = filepath.Join(dir, "cache", "npm")
 	tmpDir = filepath.Join(dir, "cache", "tmp")

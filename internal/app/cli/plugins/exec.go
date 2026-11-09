@@ -7,14 +7,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
 // execCmd runs one installed plugin binary for the calling profile. The child
 // gets the fixed sandbox base plus that profile's passthrough allowlist, and
-// HOME pointed at the per-profile plugin home so CLI config files land on the
-// persisted volume. Stdin is closed: only non-interactive flags work.
+// HOME pointed at the per-profile plugin data home so CLI config files land
+// on the persisted volume. Stdin is closed: only non-interactive flags work.
+// Presence means enabled.
 func execCmd(ctx context.Context, root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
 	var names []string
 	var bin string
@@ -61,22 +61,17 @@ func execCmd(ctx context.Context, root, flagProfile string, rest []string, stdou
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	if !pluginEnabledFor(mustAbs(root), profileName, key) {
-		fmt.Fprintf(stderr, "oswald: plugin %q is not enabled for profile %q\n", key, profileName)
-		return exitError
-	}
-	globalRoot := mustAbs(root)
-	winners := discoverForList(globalRoot)
+	winners := discoverForList(profileRoot)
 	manifest, ok := winners[key]
 	if !ok {
-		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", names[0])
+		fmt.Fprintf(stderr, "oswald: plugin %q is not installed for profile %q\n", names[0], profileName)
 		return exitError
 	}
-	meta, _ := plugins.ReadInstallMetadata(globalRoot, key)
+	meta, _ := plugins.ReadInstallMetadata(profileRoot, key)
 	if bin == "" {
 		bin = plugins.EffectiveNodeBin(manifest, meta, "")
 	}
-	output, err := plugins.ExecPluginBinary(ctx, globalRoot, profileRoot, key, bin, args, timeout, nil)
+	output, err := plugins.ExecPluginBinary(ctx, profileRoot, key, bin, args, timeout, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -91,23 +86,4 @@ func parseTimeout(raw string) int {
 		return 0
 	}
 	return n
-}
-
-// pluginEnabledFor reports whether key may run for a profile: listed in
-// enabled and not in disabled.
-func pluginEnabledFor(globalRoot, profile, key string) bool {
-	cfg, err := config.Validate(globalRoot)
-	if err != nil {
-		return false
-	}
-	var profileCfg *config.Config
-	if profile == "" || profile == "default" {
-		profileCfg = cfg
-	} else {
-		profileCfg = cfg.Profiles[profile]
-		if profileCfg == nil {
-			return false
-		}
-	}
-	return profileCfg.PluginEnabledForProfile(key)
 }

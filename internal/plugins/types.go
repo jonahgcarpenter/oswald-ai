@@ -1,7 +1,8 @@
-// Package plugins owns the profile-scoped plugin host: manifest contracts,
-// directory discovery, and per-profile registration tracking. Code is shared
-// across profiles; enablement, config, and storage stay fenced to one profile
-// root, mirroring the mcp_servers island rule.
+// Package plugins owns the per-profile plugin host: manifest contracts,
+// directory discovery, and per-profile registration tracking. Code, config,
+// and storage all live under one profile root, mirroring the profile island
+// rule: installing a plugin writes everything into
+// <profileRoot>/plugins/<name>/{code,data}. Presence means enabled.
 package plugins
 
 import (

@@ -75,29 +75,29 @@ func installFixture(t *testing.T, dir, name, extra string) {
 }
 
 func TestInstallFromLocalDir(t *testing.T) {
-	global := t.TempDir()
+	profile := t.TempDir()
 	src := filepath.Join(t.TempDir(), "src-plugin")
 	installFixture(t, src, "local-widget", "")
 	log := config.NewLogger(config.LevelWarn)
-	result, err := InstallFromURL(t.Context(), global, src, InstallOptions{}, log)
+	result, err := InstallFromURL(t.Context(), profile, src, InstallOptions{}, log)
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	if result.Key != "local-widget" || result.Pinned {
 		t.Fatalf("result = %+v", result)
 	}
-	dest := filepath.Join(global, "plugins-available", "local-widget")
+	dest := PluginCodeDir(profile, "local-widget")
 	if _, err := os.Stat(filepath.Join(dest, "plugin.yaml")); err != nil {
 		t.Fatalf("published files missing: %v", err)
 	}
-	meta, err := ReadInstallMetadata(global, "local-widget")
+	meta, err := ReadInstallMetadata(profile, "local-widget")
 	if err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
 	if meta.Source != "local" || meta.URL != src || meta.Pinned {
 		t.Fatalf("meta = %+v", meta)
 	}
-	again, err := InstallFromURL(t.Context(), global, src, InstallOptions{}, log)
+	again, err := InstallFromURL(t.Context(), profile, src, InstallOptions{}, log)
 	if err != nil {
 		t.Fatalf("idempotent reinstall: %v", err)
 	}
@@ -106,24 +106,24 @@ func TestInstallFromLocalDir(t *testing.T) {
 	}
 	other := filepath.Join(t.TempDir(), "other-plugin")
 	installFixture(t, other, "local-widget", "")
-	if _, err := InstallFromURL(t.Context(), global, other, InstallOptions{}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, other, InstallOptions{}, log); err == nil {
 		t.Fatal("conflicting source accepted")
 	} else if !strings.Contains(err.Error(), "different source") {
 		t.Fatalf("wrong conflict: %v", err)
 	}
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{Ref: "0123456789abcdef0123456789abcdef01234567"}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{Ref: "0123456789abcdef0123456789abcdef01234567"}, log); err == nil {
 		t.Fatal("local ref accepted")
 	}
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{Force: true}, log); err != nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{Force: true}, log); err != nil {
 		t.Fatalf("force reinstall: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(global, "plugins-backup")); err != nil {
+	if _, err := os.Stat(filepath.Join(profile, "plugins-backup")); err != nil {
 		t.Fatalf("backup missing: %v", err)
 	}
 }
 
 func TestInstallRejectsBadManifest(t *testing.T) {
-	global := t.TempDir()
+	profile := t.TempDir()
 	src := filepath.Join(t.TempDir(), "bad-plugin")
 	if err := os.MkdirAll(src, 0755); err != nil {
 		t.Fatal(err)
@@ -132,55 +132,55 @@ func TestInstallRejectsBadManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := config.NewLogger(config.LevelWarn)
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{}, log); err == nil {
 		t.Fatal("bad manifest accepted")
 	}
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{Ref: "main"}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{Ref: "main"}, log); err == nil {
 		t.Fatal("bad ref accepted")
 	}
 }
 
 func TestExistingInstallState(t *testing.T) {
-	global := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(global, "plugins-available", "widgets"), 0755); err != nil {
+	profile := t.TempDir()
+	if err := os.MkdirAll(PluginCodeDir(profile, "widgets"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	url := "https://github.com/acme/widgets.git"
 	rev := "0123456789abcdef0123456789abcdef01234567"
 	other := "fedcba9876543210fedcba9876543210fedcba98"
-	if err := WriteInstallMetadata(filepath.Join(global, "plugins-available", "widgets"),
+	if err := WriteInstallMetadata(PluginCodeDir(profile, "widgets"),
 		InstallMetadata{Source: "git", URL: url, Ref: rev, Revision: rev, Pinned: true}); err != nil {
 		t.Fatal(err)
 	}
 	src := InstallSource{Kind: "git", URL: url}
-	if result, done, err := existingInstallState(global, "widgets", src, "", "", NodeSpec{}); err != nil || !done || !result.AlreadyInstalled {
+	if result, done, err := existingInstallState(profile, "widgets", src, "", "", NodeSpec{}); err != nil || !done || !result.AlreadyInstalled {
 		t.Fatalf("same source = %+v %v %v", result, done, err)
 	}
-	if _, done, err := existingInstallState(global, "widgets", src, "", rev, NodeSpec{}); err != nil || !done {
+	if _, done, err := existingInstallState(profile, "widgets", src, "", rev, NodeSpec{}); err != nil || !done {
 		t.Fatalf("same ref = %v %v", done, err)
 	}
-	if _, _, err := existingInstallState(global, "widgets", src, "", other, NodeSpec{}); err == nil {
+	if _, _, err := existingInstallState(profile, "widgets", src, "", other, NodeSpec{}); err == nil {
 		t.Fatal("moved pin accepted")
 	} else if !strings.Contains(err.Error(), "update") {
 		t.Fatalf("wrong moved-pin error: %v", err)
 	}
 	otherSrc := InstallSource{Kind: "git", URL: "https://github.com/other/widgets.git"}
-	if _, _, err := existingInstallState(global, "widgets", otherSrc, "", "", NodeSpec{}); err == nil {
+	if _, _, err := existingInstallState(profile, "widgets", otherSrc, "", "", NodeSpec{}); err == nil {
 		t.Fatal("different source accepted")
 	} else if !strings.Contains(err.Error(), "different source") {
 		t.Fatalf("wrong source error: %v", err)
 	}
-	if _, _, err := existingInstallState(global, "widgets", src, "sub", "", NodeSpec{}); err == nil {
+	if _, _, err := existingInstallState(profile, "widgets", src, "sub", "", NodeSpec{}); err == nil {
 		t.Fatal("different subdir accepted")
 	}
 	// Hand-placed tree without metadata refuses without --force.
-	plain := filepath.Join(global, "plugins-available", "plain")
+	plain := PluginCodeDir(profile, "plain")
 	if err := os.MkdirAll(plain, 0755); err != nil {
 		t.Fatal(err)
 	}
 	plainSrc := filepath.Join(t.TempDir(), "plain")
 	installFixture(t, plainSrc, "plain", "")
-	if _, err := InstallFromURL(t.Context(), global, plainSrc, InstallOptions{}, config.NewLogger(config.LevelWarn)); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, plainSrc, InstallOptions{}, config.NewLogger(config.LevelWarn)); err == nil {
 		t.Fatal("unmanaged overwrite accepted")
 	} else if !strings.Contains(err.Error(), "unmanaged") {
 		t.Fatalf("wrong unmanaged error: %v", err)
@@ -188,11 +188,44 @@ func TestExistingInstallState(t *testing.T) {
 }
 
 func TestRemoveInstallUnknown(t *testing.T) {
-	if err := RemoveInstall(t.TempDir(), "ghost"); err == nil {
+	if err := RemoveInstall(t.TempDir(), "ghost", false); err == nil {
 		t.Fatal("unknown remove accepted")
 	}
-	if err := RemoveInstall(t.TempDir(), "nope!"); err == nil {
+	if err := RemoveInstall(t.TempDir(), "nope!", false); err == nil {
 		t.Fatal("bad key accepted")
+	}
+}
+
+func TestRemoveInstallKeepsData(t *testing.T) {
+	profile := t.TempDir()
+	src := filepath.Join(t.TempDir(), "src-plugin")
+	installFixture(t, src, "keepme", "")
+	log := config.NewLogger(config.LevelWarn)
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{}, log); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	dataHome := filepath.Join(PluginDataDir(profile, "keepme"), "home")
+	if err := os.MkdirAll(dataHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dataHome, "session.txt")
+	if err := os.WriteFile(marker, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveInstall(profile, "keepme", false); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := os.Stat(PluginCodeDir(profile, "keepme")); !os.IsNotExist(err) {
+		t.Fatal("code not removed")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("data not preserved: %v", err)
+	}
+	if err := RemoveInstall(profile, "keepme", true); err != nil {
+		t.Fatalf("full remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ProfilePluginsDir(profile), "keepme")); !os.IsNotExist(err) {
+		t.Fatal("full remove left directory")
 	}
 }
 
@@ -200,7 +233,7 @@ func TestUpdateFromLocalGitRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git unavailable")
 	}
-	global := t.TempDir()
+	profile := t.TempDir()
 	repo := filepath.Join(t.TempDir(), "plugin-repo")
 	manifest := "name: widget\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n"
 	if err := os.MkdirAll(repo, 0755); err != nil {
@@ -225,7 +258,7 @@ func TestUpdateFromLocalGitRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := InstallFromURL(t.Context(), global, repo, InstallOptions{}, nil)
+	result, err := InstallFromURL(t.Context(), profile, repo, InstallOptions{}, nil)
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -241,21 +274,21 @@ func TestUpdateFromLocalGitRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := UpdateFromURL(t.Context(), global, "widget", "", nil)
+	updated, err := UpdateFromURL(t.Context(), profile, "widget", "", nil)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if updated.Revision != second || updated.AlreadyInstalled {
 		t.Fatalf("updated = %+v want %s", updated, second)
 	}
-	if _, err := os.Stat(filepath.Join(global, "plugins-available", "widget", "extra.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(PluginCodeDir(profile, "widget"), "extra.txt")); err != nil {
 		t.Fatalf("updated tree missing file: %v", err)
 	}
-	pinned, err := UpdateFromURL(t.Context(), global, "widget", second, nil)
+	pinned, err := UpdateFromURL(t.Context(), profile, "widget", second, nil)
 	if err != nil || !pinned.Pinned {
 		t.Fatalf("pin = %+v %v", pinned, err)
 	}
-	if _, err := UpdateFromURL(t.Context(), global, "widget", "", nil); err == nil {
+	if _, err := UpdateFromURL(t.Context(), profile, "widget", "", nil); err == nil {
 		t.Fatal("pinned update without ref accepted")
 	}
 }
@@ -273,11 +306,11 @@ func gitHead(t *testing.T, dir string) (string, error) {
 }
 
 func TestInstallNodeFlagsRecordedWithoutInstall(t *testing.T) {
-	global := t.TempDir()
+	profile := t.TempDir()
 	src := filepath.Join(t.TempDir(), "flagged")
 	installFixture(t, src, "flagged", "")
 	log := config.NewLogger(config.LevelWarn)
-	result, err := InstallFromURL(t.Context(), global, src, InstallOptions{
+	result, err := InstallFromURL(t.Context(), profile, src, InstallOptions{
 		NodePackage: "agent-data", NodeVersion: "0.13.0", NoDeps: true,
 	}, log)
 	if err != nil {
@@ -286,7 +319,7 @@ func TestInstallNodeFlagsRecordedWithoutInstall(t *testing.T) {
 	if result.DepsInstalled {
 		t.Fatalf("deps installed despite --no-deps: %+v", result)
 	}
-	meta, err := ReadInstallMetadata(global, "flagged")
+	meta, err := ReadInstallMetadata(profile, "flagged")
 	if err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
@@ -294,7 +327,7 @@ func TestInstallNodeFlagsRecordedWithoutInstall(t *testing.T) {
 		t.Fatalf("meta = %+v", meta)
 	}
 	// Idempotent reinstall with the same flags is a no-op that skips repair.
-	again, err := InstallFromURL(t.Context(), global, src, InstallOptions{
+	again, err := InstallFromURL(t.Context(), profile, src, InstallOptions{
 		NodePackage: "agent-data", NodeVersion: "0.13.0", NoDeps: true,
 	}, log)
 	if err != nil || !again.AlreadyInstalled || again.DepsInstalled {
@@ -302,7 +335,7 @@ func TestInstallNodeFlagsRecordedWithoutInstall(t *testing.T) {
 	}
 	// Different node flags name a different request: --force required.
 	other := InstallOptions{NodePackage: "agent-data", NodeVersion: "0.14.0", NoDeps: true}
-	if _, err := InstallFromURL(t.Context(), global, src, other, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, other, log); err == nil {
 		t.Fatal("node mismatch accepted")
 	} else if !strings.Contains(err.Error(), "different node dependencies") {
 		t.Fatalf("wrong mismatch error: %v", err)
@@ -310,32 +343,32 @@ func TestInstallNodeFlagsRecordedWithoutInstall(t *testing.T) {
 }
 
 func TestInstallNodeFlagsValidation(t *testing.T) {
-	global := t.TempDir()
+	profile := t.TempDir()
 	src := filepath.Join(t.TempDir(), "half-flagged")
 	installFixture(t, src, "half-flagged", "")
 	log := config.NewLogger(config.LevelWarn)
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{NodePackage: "agent-data", NoDeps: true}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{NodePackage: "agent-data", NoDeps: true}, log); err == nil {
 		t.Fatal("half flags accepted")
 	}
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{NodePackage: "not a package!", NodeVersion: "0.13.0", NoDeps: true}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{NodePackage: "not a package!", NodeVersion: "0.13.0", NoDeps: true}, log); err == nil {
 		t.Fatal("bad package accepted")
 	}
 	// Flags conflicting with a manifest declaration fail closed.
 	declared := filepath.Join(t.TempDir(), "declared")
 	installFixture(t, declared, "declared", "node_package: shipped\nnode_version: 1.2.3\n")
-	if _, err := InstallFromURL(t.Context(), global, declared, InstallOptions{NodePackage: "other", NodeVersion: "9.9.9", NoDeps: true}, log); err == nil {
+	if _, err := InstallFromURL(t.Context(), profile, declared, InstallOptions{NodePackage: "other", NodeVersion: "9.9.9", NoDeps: true}, log); err == nil {
 		t.Fatal("flag/manifest conflict accepted")
 	} else if !strings.Contains(err.Error(), "conflict") {
 		t.Fatalf("wrong conflict error: %v", err)
 	}
 	// Matching flags with a manifest declaration succeed.
-	if _, err := InstallFromURL(t.Context(), global, declared, InstallOptions{NodePackage: "shipped", NodeVersion: "1.2.3", NoDeps: true}, log); err != nil {
+	if _, err := InstallFromURL(t.Context(), profile, declared, InstallOptions{NodePackage: "shipped", NodeVersion: "1.2.3", NoDeps: true}, log); err != nil {
 		t.Fatalf("matching flags: %v", err)
 	}
 }
 
 func TestInstallLockfileFallbackRecorded(t *testing.T) {
-	global := t.TempDir()
+	profile := t.TempDir()
 	src := filepath.Join(t.TempDir(), "locked")
 	installFixture(t, src, "locked", "")
 	if err := os.WriteFile(filepath.Join(src, "package.json"), []byte("{\"name\":\"locked\",\"version\":\"1.0.0\"}\n"), 0644); err != nil {
@@ -345,10 +378,10 @@ func TestInstallLockfileFallbackRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := config.NewLogger(config.LevelWarn)
-	if _, err := InstallFromURL(t.Context(), global, src, InstallOptions{NoDeps: true}, log); err != nil {
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{NoDeps: true}, log); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	meta, err := ReadInstallMetadata(global, "locked")
+	meta, err := ReadInstallMetadata(profile, "locked")
 	if err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
@@ -361,10 +394,10 @@ func TestInstallLockfileFallbackRecorded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bare, "package.json"), []byte("{\"name\":\"bare\"}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstallFromURL(t.Context(), global, bare, InstallOptions{NoDeps: true}, log); err != nil {
+	if _, err := InstallFromURL(t.Context(), profile, bare, InstallOptions{NoDeps: true}, log); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	bareMeta, err := ReadInstallMetadata(global, "bare")
+	bareMeta, err := ReadInstallMetadata(profile, "bare")
 	if err != nil {
 		t.Fatalf("metadata: %v", err)
 	}

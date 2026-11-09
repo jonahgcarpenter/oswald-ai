@@ -252,22 +252,34 @@ func EffectiveNodeBin(manifest Manifest, meta InstallMetadata, explicit string) 
 
 // sidecarMissing reports whether the installed sidecar binary (or, for
 // lockfile-only installs with no known bin, the node_modules tree) is absent.
-func sidecarMissing(globalRoot, key, bin string) bool {
+func sidecarMissing(profileRoot, key, bin string) bool {
 	if bin != "" {
-		_, err := NodeBinPath(globalRoot, key, bin)
+		_, err := NodeBinPath(profileRoot, key, bin)
 		return err != nil
 	}
-	info, err := os.Stat(filepath.Join(UserPluginsDir(globalRoot), filepath.FromSlash(key), "node_modules"))
+	info, err := os.Stat(filepath.Join(PluginCodeDir(profileRoot, key), "node_modules"))
 	return err != nil || !info.IsDir()
 }
 
-// InstallFromURL clones or copies a plugin into the shared plugins-available
-// tree and records provenance metadata. Code writes require default scope;
-// callers check RequireDefaultScope before invoking. Force replaces an
-// existing install, backing up the previous tree first. The node sidecar
-// installs as part of the invocation unless NoDeps opts out; a sidecar
-// failure rolls the published tree back so installs stay atomic.
-func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOptions, log *config.Logger) (InstallResult, error) {
+// ProfileHasPlugin reports whether a profile has a code install for key.
+func ProfileHasPlugin(profileRoot, key string) bool {
+	if !ValidPluginKey(key) || strings.TrimSpace(profileRoot) == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(PluginCodeDir(profileRoot, key), "plugin.yaml"))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return true
+}
+
+// InstallFromURL clones or copies a plugin into the profile
+// <profileRoot>/plugins/<name>/code tree and records provenance metadata.
+// Presence means enabled; there is no separate enable step. Force replaces
+// the code tree, backing up the previous code first; data/ is never touched.
+// The node sidecar installs as part of the invocation unless NoDeps opts out;
+// a sidecar failure rolls the code tree back so installs stay atomic.
+func InstallFromURL(ctx context.Context, profileRoot, raw string, opts InstallOptions, log *config.Logger) (InstallResult, error) {
 	source, err := ParseInstallSource(raw)
 	if err != nil {
 		return InstallResult{}, err
@@ -289,8 +301,11 @@ func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOpt
 			return InstallResult{}, fmt.Errorf("plugin --ref applies to git sources only")
 		}
 	}
-	available := UserPluginsDir(globalRoot)
-	if err := os.MkdirAll(available, 0755); err != nil {
+	if strings.TrimSpace(profileRoot) == "" {
+		return InstallResult{}, fmt.Errorf("plugin home is unavailable")
+	}
+	available := ProfilePluginsDir(profileRoot)
+	if err := os.MkdirAll(available, 0700); err != nil {
 		return InstallResult{}, fmt.Errorf("prepare plugin directory: %w", err)
 	}
 	staging, err := os.MkdirTemp("", "oswald-plugin-*")
@@ -320,7 +335,7 @@ func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOpt
 	if cleanSubdir != "" {
 		pluginDir = filepath.Join(checkout, filepath.FromSlash(cleanSubdir))
 	}
-	manifest, err := ParseManifestFile(pluginDir, "user")
+	manifest, err := ParseManifestFile(pluginDir, "profile")
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -330,13 +345,13 @@ func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOpt
 	}
 	// The published directory is always the manifest name so the key stays
 	// canonical: the repo or local path is only a transport.
-	dest := filepath.Join(available, manifest.Name)
+	dest := PluginCodeDir(profileRoot, manifest.Name)
 	if _, err := os.Lstat(dest); err == nil {
 		if !opts.Force {
-			if result, done, err := existingInstallState(globalRoot, manifest.Name, source, cleanSubdir, ref, spec); err != nil {
+			if result, done, err := existingInstallState(profileRoot, manifest.Name, source, cleanSubdir, ref, spec); err != nil {
 				return InstallResult{}, err
 			} else if done {
-				if repaired, err := repairSidecar(ctx, globalRoot, manifest, spec, opts.NoDeps, log); err != nil {
+				if repaired, err := repairSidecar(ctx, profileRoot, manifest, spec, opts.NoDeps, log); err != nil {
 					return InstallResult{}, err
 				} else if repaired {
 					result.DepsInstalled = true
@@ -344,7 +359,7 @@ func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOpt
 				return result, nil
 			}
 		}
-		backup, err := backupInstall(globalRoot, manifest.Name)
+		backup, err := backupInstall(profileRoot, manifest.Name)
 		if err != nil {
 			return InstallResult{}, err
 		}
@@ -359,7 +374,7 @@ func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOpt
 	depsInstalled := false
 	if spec.Present() && !opts.NoDeps {
 		bin := EffectiveNodeBin(*manifest, InstallMetadata{NodePackage: spec.Package}, "")
-		if err := installSidecarInto(ctx, globalRoot, manifest.Name, bin, spec, dest, log); err != nil {
+		if err := installSidecarInto(ctx, profileRoot, manifest.Name, bin, spec, dest, log); err != nil {
 			_ = os.RemoveAll(dest)
 			return InstallResult{}, err
 		}
@@ -388,44 +403,44 @@ func InstallFromURL(ctx context.Context, globalRoot, raw string, opts InstallOpt
 }
 
 // installSidecarInto installs the resolved sidecar into an already-published
-// plugin directory: an exact npm pin, or npm ci for lockfile fallbacks.
-// dir is the install target (the published tree, or staged temp on update).
-func installSidecarInto(ctx context.Context, globalRoot, key, bin string, spec NodeSpec, dir string, log *config.Logger) error {
+// plugin code directory: an exact npm pin, or npm ci for lockfile fallbacks.
+// dir is the install target (the published code tree, or staged temp on update).
+func installSidecarInto(ctx context.Context, profileRoot, key, bin string, spec NodeSpec, dir string, log *config.Logger) error {
 	if spec.Lockfile {
-		return InstallNodeLockfile(ctx, globalRoot, key, dir, log)
+		return InstallNodeLockfile(ctx, profileRoot, key, dir, log)
 	}
-	return InstallNodePackage(ctx, globalRoot, key, bin, spec.Package+"@"+spec.Version, dir, log)
+	return InstallNodePackage(ctx, profileRoot, key, bin, spec.Package+"@"+spec.Version, dir, log)
 }
 
 // repairSidecar verifies the sidecar on the idempotent path and installs it
 // when the binary (or lockfile tree) is missing. It reports whether a repair
 // ran. With NoDeps the missing sidecar stays missing: the operator opted out.
-func repairSidecar(ctx context.Context, globalRoot string, manifest *Manifest, spec NodeSpec, noDeps bool, log *config.Logger) (bool, error) {
+func repairSidecar(ctx context.Context, profileRoot string, manifest *Manifest, spec NodeSpec, noDeps bool, log *config.Logger) (bool, error) {
 	if !spec.Present() || noDeps {
 		return false, nil
 	}
-	meta, err := ReadInstallMetadata(globalRoot, manifest.Name)
+	meta, err := ReadInstallMetadata(profileRoot, manifest.Name)
 	if err != nil {
 		meta = InstallMetadata{}
 	}
-	if !sidecarMissing(globalRoot, manifest.Name, EffectiveNodeBin(*manifest, meta, "")) {
+	if !sidecarMissing(profileRoot, manifest.Name, EffectiveNodeBin(*manifest, meta, "")) {
 		return false, nil
 	}
-	dest := filepath.Join(UserPluginsDir(globalRoot), manifest.Name)
+	dest := PluginCodeDir(profileRoot, manifest.Name)
 	bin := EffectiveNodeBin(*manifest, InstallMetadata{NodePackage: spec.Package}, "")
-	if err := installSidecarInto(ctx, globalRoot, manifest.Name, bin, spec, dest, log); err != nil {
+	if err := installSidecarInto(ctx, profileRoot, manifest.Name, bin, spec, dest, log); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
 // existingInstallState compares a staged install request against the
-// published tree. It returns done=true with an AlreadyInstalled result when
+// published code tree. It returns done=true with an AlreadyInstalled result when
 // the published tree already satisfies the request (no copy needed).
 // Otherwise it returns a guiding error: conflicting sources or node sidecars
 // must be replaced with --force, and revision moves go through update.
-func existingInstallState(globalRoot, name string, source InstallSource, subdir, ref string, spec NodeSpec) (InstallResult, bool, error) {
-	meta, err := ReadInstallMetadata(globalRoot, name)
+func existingInstallState(profileRoot, name string, source InstallSource, subdir, ref string, spec NodeSpec) (InstallResult, bool, error) {
+	meta, err := ReadInstallMetadata(profileRoot, name)
 	if err != nil {
 		return InstallResult{}, false, fmt.Errorf("plugin %q is already installed but unmanaged (use --force to replace)", name)
 	}
@@ -444,12 +459,16 @@ func existingInstallState(globalRoot, name string, source InstallSource, subdir,
 	return InstallResult{Key: name, Revision: meta.Revision, Pinned: meta.Pinned, AlreadyInstalled: true}, true, nil
 }
 
-// MetadataPath returns the provenance file for one installed plugin key.
-func MetadataPath(globalRoot, key string) (string, error) {
+// MetadataPath returns the provenance file for one installed plugin key,
+// inside the profile code tree.
+func MetadataPath(profileRoot, key string) (string, error) {
 	if !ValidPluginKey(key) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	return filepath.Join(UserPluginsDir(globalRoot), filepath.FromSlash(key), ".install-metadata.json"), nil
+	if strings.TrimSpace(profileRoot) == "" {
+		return "", fmt.Errorf("plugin home is unavailable")
+	}
+	return filepath.Join(PluginCodeDir(profileRoot, key), ".install-metadata.json"), nil
 }
 
 // WriteInstallMetadata records provenance beside installed code, owner-only.
@@ -469,8 +488,8 @@ func WriteInstallMetadata(dest string, meta InstallMetadata) error {
 
 // ReadInstallMetadata loads provenance for one installed key. Unmanaged
 // directories (hand-placed code) report os.ErrNotExist.
-func ReadInstallMetadata(globalRoot, key string) (InstallMetadata, error) {
-	path, err := MetadataPath(globalRoot, key)
+func ReadInstallMetadata(profileRoot, key string) (InstallMetadata, error) {
+	path, err := MetadataPath(profileRoot, key)
 	if err != nil {
 		return InstallMetadata{}, err
 	}
@@ -488,15 +507,15 @@ func ReadInstallMetadata(globalRoot, key string) (InstallMetadata, error) {
 	return meta, nil
 }
 
-// backupInstall moves the previous tree aside. Edits to tracked files are
-// preserved in place by the move; nothing is merged.
-func backupInstall(globalRoot, name string) (string, error) {
-	backupRoot := filepath.Join(globalRoot, "plugins-backup")
-	if err := os.MkdirAll(backupRoot, 0755); err != nil {
+// backupInstall moves the previous code tree aside. Data/ is never touched;
+// nothing is merged.
+func backupInstall(profileRoot, name string) (string, error) {
+	backupRoot := filepath.Join(profileRoot, "plugins-backup")
+	if err := os.MkdirAll(backupRoot, 0700); err != nil {
 		return "", fmt.Errorf("prepare plugin backup: %w", err)
 	}
 	dest := filepath.Join(backupRoot, name+"-"+time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.Rename(filepath.Join(UserPluginsDir(globalRoot), name), dest); err != nil {
+	if err := os.Rename(PluginCodeDir(profileRoot, name), dest); err != nil {
 		return "", fmt.Errorf("back up plugin install: %w", err)
 	}
 	return dest, nil
@@ -656,19 +675,19 @@ func gitLsRemote(ctx context.Context, url string) (string, error) {
 }
 
 // UpdateFromURL refreshes one managed install by re-cloning its recorded
-// source and publishing the result over the installed tree. Published trees
-// carry no git metadata (only provenance), so in-place fetch is impossible.
-// Pinned installs need an explicit --ref; unpinned installs follow the remote
-// HEAD.
-func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config.Logger) (InstallResult, error) {
-	if !ValidPluginKey(key) || strings.Contains(key, "/") {
+// source and publishing the result over the installed code tree. Published
+// trees carry no git metadata (only provenance), so in-place fetch is
+// impossible. Pinned installs need an explicit --ref; unpinned installs follow
+// the remote HEAD. Data/ is never touched.
+func UpdateFromURL(ctx context.Context, profileRoot, key, ref string, log *config.Logger) (InstallResult, error) {
+	if !ValidPluginKey(key) {
 		return InstallResult{}, fmt.Errorf("invalid plugin key")
 	}
 	if err := ValidateInstallRef(ref); err != nil {
 		return InstallResult{}, err
 	}
 	ref = strings.TrimSpace(ref)
-	meta, err := ReadInstallMetadata(globalRoot, key)
+	meta, err := ReadInstallMetadata(profileRoot, key)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("plugin %q has no install provenance; remove and reinstall it", key)
 	}
@@ -702,14 +721,14 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 	if meta.Subdir != "" {
 		pluginDir = filepath.Join(cloneDir, filepath.FromSlash(meta.Subdir))
 	}
-	manifest, err := ParseManifestFile(pluginDir, "user")
+	manifest, err := ParseManifestFile(pluginDir, "profile")
 	if err != nil {
 		return InstallResult{}, err
 	}
 	if manifest.Name != key {
 		return InstallResult{}, fmt.Errorf("plugin update changed its name to %q", manifest.Name)
 	}
-	dest := filepath.Join(UserPluginsDir(globalRoot), key)
+	dest := PluginCodeDir(profileRoot, key)
 	fresh, err := os.MkdirTemp(filepath.Dir(dest), ".plugin-update-*.tmp")
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("stage plugin update: %w", err)
@@ -722,7 +741,7 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 	depsInstalled := false
 	if spec.Present() {
 		bin := EffectiveNodeBin(*manifest, InstallMetadata{NodePackage: spec.Package}, "")
-		if err := installSidecarInto(ctx, globalRoot, key, bin, spec, fresh, log); err != nil {
+		if err := installSidecarInto(ctx, profileRoot, key, bin, spec, fresh, log); err != nil {
 			return InstallResult{}, err
 		}
 		depsInstalled = true
@@ -756,15 +775,24 @@ func UpdateFromURL(ctx context.Context, globalRoot, key, ref string, log *config
 	return InstallResult{Key: key, Revision: revision, Pinned: meta.Pinned, DepsInstalled: depsInstalled}, nil
 }
 
-// RemoveInstall deletes shared code for one plugin key. Config cleanup is the
-// caller's job per profile, and callers refuse first when other profiles still
-// reference the key. Per-profile storage removal is also the caller's job
-// (--full); this removes code only.
-func RemoveInstall(globalRoot, key string) error {
-	if !ValidPluginKey(key) || strings.Contains(key, "/") {
+// RemoveInstall deletes one profile plugin. By default only the code tree is
+// removed so data/home logins survive; full also removes data/ and the whole
+// plugin directory.
+func RemoveInstall(profileRoot, key string, full bool) error {
+	if !ValidPluginKey(key) {
 		return fmt.Errorf("invalid plugin key")
 	}
-	dir := filepath.Join(UserPluginsDir(globalRoot), key)
+	if strings.TrimSpace(profileRoot) == "" {
+		return fmt.Errorf("plugin home is unavailable")
+	}
+	if full {
+		dir := filepath.Join(ProfilePluginsDir(profileRoot), filepath.FromSlash(key))
+		if _, err := os.Lstat(dir); err != nil {
+			return fmt.Errorf("unknown plugin %q", key)
+		}
+		return os.RemoveAll(dir)
+	}
+	dir := PluginCodeDir(profileRoot, key)
 	if _, err := os.Lstat(dir); err != nil {
 		return fmt.Errorf("unknown plugin %q", key)
 	}

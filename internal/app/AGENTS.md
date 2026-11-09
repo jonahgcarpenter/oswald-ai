@@ -28,14 +28,14 @@ mediated write path (staged validation, last-known-good, atomic replace); `gatew
 Scoped groups mirror the top-level `config.yaml` keys one-to-one: `providers` → `providers.*`,
 `model` → `model.*`, `api` → `api.key`, `gateway` → `gateway.*`, `platforms` → `platforms.*`,
 `tools` → `tools.*`, `runtime` → `runtime.*`, `mcp` → `mcp_servers.*`, `plugins` →
-`plugins.*` (code install requires the default scope; enable/disable are profile-fenced). `--profile` is accepted
+`plugins.entries.*` (per-profile installs, presence means enabled). `--profile` is accepted
 (in any position) only where profiles may override (`providers`, `model`, `api`, `tools`, `mcp`, `plugins`);
 `gateway`, `platforms`, and `runtime` are global-only. Scoping is read-vs-mutate: reads
 (`show`, `get`, `list`, `validate`, `test`) may name another existing profile, while every
 mutation stays fenced to the calling scope (`OSWALD_HOME` profile) and fails closed on
-contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`, plugin code
-`install`/`update`/`remove`) and profile lifecycle (`profile create|rename|delete`) additionally
-require the default scope. `commands/` holds the `Definition/Request/Result/Handler` contract and
+contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`) and profile
+lifecycle (`profile create|rename|delete`) additionally require the default scope.
+`commands/` holds the `Definition/Request/Result/Handler` contract and
 `/name` parsing; `builtin/` registers the seven public handlers (`/help`, `/new`, `/stop`,
 `/approve`, `/deny`, `/compact`, `/queue`).
 

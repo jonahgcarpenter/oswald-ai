@@ -3,7 +3,6 @@ package plugins
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
@@ -17,34 +16,23 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", raw)
 		return exitUsage
 	}
-	profileCfg, profileName, profileRoot, err := resolveScope(root, flagProfile, false)
+	profileCfg, _, profileRoot, err := resolveScope(root, flagProfile, false)
 	if err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	winners := discoverForList(globalRootFor(profileRoot, profileName))
+	winners := discoverForList(profileRoot)
 	key := name
 	manifest, ok := winners[key]
 	if !ok {
 		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", raw)
 		return exitError
 	}
-	state := "not enabled"
-	if profileCfg.PluginEnabledForProfile(key) {
-		state = "enabled"
-	} else {
-		for _, denied := range profileCfg.PluginDisabled {
-			if denied == key {
-				state = "disabled"
-				break
-			}
-		}
-	}
 	version := manifest.Version
 	if version == "" {
 		version = "-"
 	}
-	fmt.Fprintf(stdout, "name: %s\nkey: %s\nsource: %s\nversion: %s\nstate: %s\n", manifest.Name, key, manifest.Source, version, state)
+	fmt.Fprintf(stdout, "name: %s\nkey: %s\nsource: %s\nversion: %s\nstate: enabled\n", manifest.Name, key, manifest.Source, version)
 	if manifest.Description != "" {
 		fmt.Fprintf(stdout, "description: %s\n", manifest.Description)
 	}
@@ -57,7 +45,7 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	if len(manifest.RequiresPlugins) > 0 {
 		fmt.Fprintf(stdout, "requires: %s\n", strings.Join(manifest.RequiresPlugins, ", "))
 	}
-	if meta, err := plugins.ReadInstallMetadata(globalRootFor(profileRoot, profileName), key); err == nil {
+	if meta, err := plugins.ReadInstallMetadata(profileRoot, key); err == nil {
 		provenance := meta.Source
 		if meta.Pinned && meta.Revision != "" {
 			provenance += " pinned@" + shortSHA(meta.Revision)
@@ -76,6 +64,5 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "mcp_allowlist: 0 servers")
 		fmt.Fprintln(stdout, "settings: 0 keys")
 	}
-	_ = filepath.Join
 	return exitOK
 }

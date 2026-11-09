@@ -84,47 +84,21 @@ func ParseManifestFile(dir, source string) (*Manifest, error) {
 	return m, nil
 }
 
-// ManifestKey derives the canonical registry key. Subcategory dirs
-// (platforms/foo) qualify as platforms/foo; flat dirs key by manifest name.
-// Keys are exact: no bare-name aliases exist, so enablement, config, and
-// storage all use this key verbatim.
+// ManifestKey derives the canonical registry key. Keys are flat manifest
+// names: no category qualification, no bare-name aliases.
 func ManifestKey(m *Manifest, dir string) string {
-	base := filepath.Base(filepath.Dir(dir))
-	if base != "" && base != "plugins" && base != "." && base != "/" {
-		leaf := filepath.Base(dir)
-		// Only qualify when nested one level under a category dir; flat names win.
-		if isCategoryDir(base) {
-			return base + "/" + leaf
-		}
-	}
 	return m.Name
-}
-
-// isCategoryDir reports known nesting buckets that qualify keys.
-func isCategoryDir(name string) bool {
-	switch name {
-	case "platforms", "image_gen", "delegation", "memory", "context_engine", "model-providers":
-		return true
-	default:
-		return false
-	}
 }
 
 // ManifestKeyForLookup is intentionally absent: keys are canonical and exact.
 // Enablement, config entries, storage, and dependency references all use the
 // ManifestKey verbatim with no bare-name aliases.
 
-// validPluginKey reports whether a canonical plugin key (flat name or
-// single-level category/name) is well-formed.
+// validPluginKey reports whether a canonical plugin key (flat name only)
+// is well-formed.
 func ValidPluginKey(key string) bool {
-	parts := strings.Split(key, "/")
-	if len(parts) < 1 || len(parts) > 2 {
+	if !pluginNameRE.MatchString(key) || key == "soul" {
 		return false
-	}
-	for _, part := range parts {
-		if !pluginNameRE.MatchString(part) || part == "soul" {
-			return false
-		}
 	}
 	return true
 }

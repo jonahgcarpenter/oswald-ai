@@ -37,48 +37,20 @@ type pluginsYAML struct {
 }
 
 // applyPlugins validates the plugins section into the effective config.
-// Disabled always wins at runtime; listing a name in both fails closed so the
-// operator resolves the contradiction explicitly.
+// Presence means enabled: plugins.enabled/disabled were removed with the move
+// to per-profile installs. Any use fails closed so the operator removes the
+// keys explicitly; nothing is migrated automatically.
 func applyPlugins(cfg *Config, doc documentYAML) error {
 	raw := doc.Plugins
 	if raw == nil {
-		cfg.PluginEnabled = nil
-		cfg.PluginDisabled = nil
 		cfg.PluginEntries = nil
 		return nil
 	}
-	if len(raw.Enabled) > 32 || len(raw.Disabled) > 32 {
+	if len(raw.Enabled) > 0 || len(raw.Disabled) > 0 {
 		return configErr("config_plugin_invalid", "plugins")
 	}
 	if raw.Entries != nil && len(raw.Entries) > 32 {
 		return configErr("config_plugin_invalid", "plugins.entries")
-	}
-	enabled := make([]string, 0, len(raw.Enabled))
-	seenEnabled := map[string]bool{}
-	for _, name := range raw.Enabled {
-		if !ValidPluginName(name) {
-			return configErr("config_plugin_invalid", "plugins.enabled")
-		}
-		if !seenEnabled[name] {
-			seenEnabled[name] = true
-			enabled = append(enabled, name)
-		}
-	}
-	disabled := make([]string, 0, len(raw.Disabled))
-	seenDisabled := map[string]bool{}
-	for _, name := range raw.Disabled {
-		if !ValidPluginName(name) {
-			return configErr("config_plugin_invalid", "plugins.disabled")
-		}
-		if !seenDisabled[name] {
-			seenDisabled[name] = true
-			disabled = append(disabled, name)
-		}
-	}
-	for _, name := range enabled {
-		if seenDisabled[name] {
-			return configErr("config_plugin_invalid", "plugins")
-		}
 	}
 	entries := map[string]PluginEntry{}
 	for name, entry := range raw.Entries {
@@ -120,33 +92,9 @@ func applyPlugins(cfg *Config, doc documentYAML) error {
 		}
 		entries[name] = PluginEntry{AllowToolOverride: allow, MCPAllowlist: allowlist, Settings: settings}
 	}
-	sort.Strings(enabled)
-	sort.Strings(disabled)
-	cfg.PluginEnabled = enabled
-	cfg.PluginDisabled = disabled
 	if len(entries) == 0 {
 		entries = nil
 	}
 	cfg.PluginEntries = entries
 	return nil
-}
-
-// PluginEnabledForProfile reports whether a plugin may load for the profile:
-// listed in enabled and not in disabled. Missing enabled list means nothing is
-// enabled yet (opt-in); explicit empty means intentionally none.
-func (c *Config) PluginEnabledForProfile(name string) bool {
-	if c == nil {
-		return false
-	}
-	for _, blocked := range c.PluginDisabled {
-		if blocked == name {
-			return false
-		}
-	}
-	for _, allowed := range c.PluginEnabled {
-		if allowed == name {
-			return true
-		}
-	}
-	return false
 }

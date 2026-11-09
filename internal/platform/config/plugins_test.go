@@ -31,17 +31,14 @@ func pluginFixture(t *testing.T, body string) string {
 	return root
 }
 
-func TestPluginsEnabledValidation(t *testing.T) {
-	root := pluginFixture(t, "plugins:\n  enabled: [demo-one]\n  disabled: []\n")
-	cfg, err := Validate(root)
-	if err != nil {
-		t.Fatalf("validate: %v", err)
+func TestPluginsEnabledRemoved(t *testing.T) {
+	root := pluginFixture(t, "plugins:\n  enabled: [demo-one]\n")
+	if _, err := Validate(root); err == nil {
+		t.Fatal("expected enabled reject")
 	}
-	if !cfg.PluginEnabledForProfile("demo-one") {
-		t.Fatal("expected enabled")
-	}
-	if cfg.PluginEnabledForProfile("other") {
-		t.Fatal("expected other disabled")
+	root = pluginFixture(t, "plugins:\n  disabled: [demo-one]\n")
+	if _, err := Validate(root); err == nil {
+		t.Fatal("expected disabled reject")
 	}
 }
 
@@ -53,7 +50,7 @@ func TestPluginsBothListsReject(t *testing.T) {
 }
 
 func TestPluginsEntriesValidation(t *testing.T) {
-	root := pluginFixture(t, "plugins:\n  enabled: [demo]\n  entries:\n    demo:\n      allow_tool_override: true\n      mcp_allowlist: [files]\n      settings:\n        region: us\n")
+	root := pluginFixture(t, "plugins:\n  entries:\n    demo:\n      allow_tool_override: true\n      mcp_allowlist: [files]\n      settings:\n        region: us\n")
 	cfg, err := Validate(root)
 	if err != nil {
 		t.Fatalf("validate: %v", err)
@@ -68,7 +65,7 @@ func TestPluginsEntriesValidation(t *testing.T) {
 }
 
 func TestPluginsInvalidNameReject(t *testing.T) {
-	root := pluginFixture(t, "plugins:\n  enabled: [Soul]\n")
+	root := pluginFixture(t, "plugins:\n  entries:\n    Soul:\n      settings: {}\n")
 	if _, err := Validate(root); err == nil {
 		t.Fatal("expected invalid name reject")
 	}
