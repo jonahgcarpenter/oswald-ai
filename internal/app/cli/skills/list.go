@@ -13,7 +13,7 @@ import (
 )
 
 // listCmd prints one line per installed skill: load name, category, and the
-// first-line description. Bundled plugin skills (read-through for enabled
+// first-line description. Installed plugin skills (read-through for present
 // plugins) are marked with their plugin key.
 func listCmd(root, flagProfile string, stdout, stderr io.Writer) int {
 	name, profileRoot, err := resolveScope(root, flagProfile, false)

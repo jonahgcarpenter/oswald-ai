@@ -95,7 +95,7 @@ func (a *Agent) SetPluginHooks(hooks plugins.HookInvoker) {
 	}
 }
 
-// SetPluginSkills installs the read-only bundled plugin skills roots bound
+// SetPluginSkills installs the read-only installed plugin skills roots bound
 // into the prompt skill index. It mirrors the roots bound into the
 // skill_manage tool handler so the index and the tool resolve the same set.
 // Enablement is restart-classified, so construction-time roots never go stale.

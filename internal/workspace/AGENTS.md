@@ -64,7 +64,7 @@ allowlist resolved against the acting profile's own dotenv pair (global overlaid
 profile's own; `os.Getenv` fallback only for declared names). Three sources register names:
 skill frontmatter `required_env` (on `skill_view`), operator config
 `tools.terminal.env_passthrough` (per profile, restart to apply, staged validation), and
-enabled plugins' manifest `requires_env` (automatic on load) — see
+installed plugins' manifest `requires_env` (automatic on load) — see
 `process/sandboxenv.go` (`SandboxEnvForProfile`, `ProfileSecretScope`, `RegisterEnvPassthrough`,
 `WithNodeOnPath`).
 

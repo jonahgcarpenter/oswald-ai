@@ -8,7 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
-// publishPluginEnvPassthrough registers every enabled plugin's declared
+// publishPluginEnvPassthrough registers every installed plugin's declared
 // requires_env names for sandbox passthrough so the plugin's CLIs receive
 // them in terminal, execute_code, and background children from the profile
 // dotenv scope. Refused credential names are skipped and reported by count

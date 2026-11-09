@@ -27,8 +27,8 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   leaf package; catalog/index/reads owned by `internal/skills/`): `list` (compact
   name/description/category index, 200-row cap), `view` (full body or one supporting file),
   `create` (slug-validated new `SKILL.md`), `update` (exact unique `old_text`, same contract as
-  memory edits). Bundled plugin skill views carry a plugin-runtime footer (sidecar
-  binary dir, per-profile home, other-systems-docs disclaimer); profile skills and
+  memory edits). Installed plugin skill views carry a plugin-runtime footer (sidecar
+  binary dir, per-profile data/home, other-systems-docs disclaimer); profile skills and
   supporting-file reads carry none. Unknown arguments rejected; authenticated principal required.
   Metadata-only history with hashed bodies: never searchable.
 - `session_search` — full searchable history with four inferred shapes: `query` (FTS5 discovery,
