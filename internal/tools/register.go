@@ -24,6 +24,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
+	tooldelegate "github.com/jonahgcarpenter/oswald-ai/internal/tools/delegate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -131,6 +132,13 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}, registry.Handler(toolclarify.NewHandler())); err != nil {
 		return fmt.Errorf("register clarify tool: %w", err)
+	}
+
+	// The live delegate handler needs the per-profile delegation manager,
+	// which startup installs after the registry exists; until then the tool
+	// is visible but fails closed instead of dispatching half-wired.
+	if err := reg.RegisterHandler(tooldelegate.Name, toolPolicy(normalizeDelegateArgs), registry.Handler(tooldelegate.PlaceholderHandler())); err != nil {
+		return fmt.Errorf("register delegate tool: %w", err)
 	}
 
 	if profileStore != nil {
@@ -553,6 +561,52 @@ func normalizeProcessManageArgs(args map[string]interface{}) interface{} {
 	if data, ok := args["data"].(string); ok {
 		sum := sha256.Sum256([]byte(data))
 		normalized["data_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+// normalizeDelegateArgs canonicalizes delegate calls to counts and labels so
+// repeated identical dispatches collapse. Prompts, contexts, messages, and
+// schemas never survive normalization — only counts and names.
+func normalizeDelegateArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["action"].(string); ok {
+		normalized["action"] = strings.Join(strings.Fields(value), " ")
+	}
+	if value, ok := args["role"].(string); ok {
+		normalized["role"] = strings.Join(strings.Fields(value), " ")
+	}
+	if value, ok := args["subagent_id"].(string); ok {
+		normalized["subagent_id"] = strings.TrimSpace(value)
+	}
+	if tasks, ok := args["tasks"].([]interface{}); ok {
+		normalized["task_count"] = len(tasks)
+		imageCount := 0
+		hasSchema := false
+		for _, raw := range tasks {
+			entry, _ := raw.(map[string]interface{})
+			if entry == nil {
+				continue
+			}
+			if images, ok := entry["images"].([]interface{}); ok {
+				imageCount += len(images)
+			}
+			if _, ok := entry["output_schema"]; ok {
+				hasSchema = true
+			}
+		}
+		normalized["image_count"] = imageCount
+		normalized["has_output_schema"] = hasSchema
+	} else {
+		if _, ok := args["goal"]; ok {
+			normalized["task_count"] = 1
+		}
+		if images, ok := args["images"].([]interface{}); ok {
+			normalized["image_count"] = len(images)
+		}
+		if _, ok := args["output_schema"]; ok {
+			normalized["has_output_schema"] = true
+		}
 	}
 	return normalized
 }

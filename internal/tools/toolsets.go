@@ -38,6 +38,7 @@ var coreTools = []string{
 	"browser_vault_enter_code",
 	"browser_vault_rm",
 	"clarify",
+	"delegate",
 	"read_file",
 	"write_file",
 	"patch",
