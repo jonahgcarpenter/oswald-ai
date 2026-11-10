@@ -14,10 +14,34 @@ const (
 	principalKey   contextKey = "principal"
 	toolExposeKey  contextKey = "tool_exposer"
 	inputImagesKey contextKey = "input_images"
+	parentScopeKey contextKey = "parent_tool_scope"
 )
 
 // ToolExposer records request-local tool discovery, not lasting authorization.
 type ToolExposer interface{ ExposeTools([]string) }
+
+// ParentToolScope carries the calling turn's tool visibility for delegated
+// children so a child never exceeds what the parent could call. The delegate
+// manager reads it from the tool context and narrows the child catalog.
+type ParentToolScope struct {
+	Toolsets   []string
+	MCPServers []string
+}
+
+// WithParentToolScope attaches the calling turn's tool visibility.
+func WithParentToolScope(ctx context.Context, toolsets, mcpServers []string) context.Context {
+	return context.WithValue(ctx, parentScopeKey, ParentToolScope{
+		Toolsets:   append([]string(nil), toolsets...),
+		MCPServers: append([]string(nil), mcpServers...),
+	})
+}
+
+// ParentToolScopeFromContext extracts the calling turn's tool visibility.
+// The second result reports whether a scope was attached.
+func ParentToolScopeFromContext(ctx context.Context) (ParentToolScope, bool) {
+	scope, ok := ctx.Value(parentScopeKey).(ParentToolScope)
+	return scope, ok
+}
 
 // Metadata carries trusted request correlation and current-turn context.
 type Metadata struct {

@@ -322,6 +322,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		toolExposure.HideBuiltins(toolclarify.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
+	// Delegated children inherit the calling turn's tool visibility (and
+	// narrow it further) so a child can never exceed what the parent may
+	// call. The delegate manager reads this scope from the tool context.
+	ctx = requestctx.WithParentToolScope(ctx, request.EnabledToolsets, request.MCPServers)
 	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
 	// Parked approval asks surface while the tool call blocks: keep a
 	// gateway-provided asker (real message on transports without live
