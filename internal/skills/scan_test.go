@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,22 @@ func TestScanEmptyRoots(t *testing.T) {
 	}
 	if entries := scanRoots("/nonexistent-oswald-test-dir"); len(entries) != 0 {
 		t.Fatalf("expected no entries, got %+v", entries)
+	}
+}
+
+func TestScanLoadsForeignFrontmatterVerbatim(t *testing.T) {
+	root := t.TempDir()
+	long := strings.Repeat("d", maxDescriptionRunes+40)
+	writeSkillMD(t, filepath.Join(root, "ship"),
+		"---\nname: ship\ndescription: "+long+"\nversion: 1.0\nwhen_to_use: Use when shipping\nallowed-tools: terminal\nplatforms: [linux]\nmetadata:\n  vendor:\n    tags: [ship]\n---\nShip body.\n")
+	found := resolveCatalog(scanRoots(root), "")
+	if len(found) != 1 {
+		t.Fatalf("foreign skill not loaded: %+v", found)
+	}
+	if got := len([]rune(found[0].Description)); got > maxDescriptionRunes+3 {
+		t.Fatalf("description not clipped: %d runes", got)
+	}
+	if found[0].Name != "ship" {
+		t.Fatalf("name = %q", found[0].Name)
 	}
 }

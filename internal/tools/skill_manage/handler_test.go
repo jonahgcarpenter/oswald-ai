@@ -249,3 +249,75 @@ func TestBundledSkillFileViewOmitsRuntimeNote(t *testing.T) {
 		t.Fatalf("file content missing:\n%s", viewed.Content)
 	}
 }
+
+func TestSupportingFileActionsEndToEnd(t *testing.T) {
+	process.ClearEnvPassthrough()
+	defer process.ClearEnvPassthrough()
+	root := seedManaged(t)
+	handler := NewHandler(root)
+	if _, err := handler(skillContext(), map[string]interface{}{
+		"action": "create", "name": "review", "file_path": "references/api.md", "content": "# API\nUse v2.\n",
+	}); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	viewed, err := handler(skillContext(), map[string]interface{}{
+		"action": "view", "name": "review", "file_path": "references/api.md",
+	})
+	if err != nil || !strings.Contains(viewed.Content, "Use v2.") {
+		t.Fatalf("view file = %+v %v", viewed, err)
+	}
+	if _, err := handler(skillContext(), map[string]interface{}{
+		"action": "update", "name": "review", "file_path": "references/api.md", "old_text": "Use v2.", "content": "Use v3.",
+	}); err != nil {
+		t.Fatalf("update file: %v", err)
+	}
+	if _, err := handler(skillContext(), map[string]interface{}{
+		"action": "remove", "name": "review", "file_path": "references/api.md",
+	}); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+	if _, err := handler(skillContext(), map[string]interface{}{
+		"action": "view", "name": "review", "file_path": "references/api.md",
+	}); err == nil {
+		t.Fatal("removed file still readable")
+	}
+	// SKILL.md itself is never removable here.
+	if _, err := handler(skillContext(), map[string]interface{}{
+		"action": "remove", "name": "review", "file_path": "SKILL.md",
+	}); err == nil {
+		t.Fatal("SKILL.md remove accepted")
+	}
+	// Plugin skills stay read-only for every write shape.
+	pluginDir := filepath.Join(t.TempDir(), "demo", "skills", "shipped")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "SKILL.md"), []byte("---\nname: shipped\ndescription: Synthetic bundled skill\n---\n\nBundled body.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bound := NewHandlerWithPlugins(root, []skills.PluginRoot{{Key: "demo", Dir: filepath.Dir(pluginDir)}})
+	for _, args := range []map[string]interface{}{
+		{"action": "create", "name": "demo/shipped", "file_path": "references/a.md", "content": "x"},
+		{"action": "update", "name": "demo/shipped", "file_path": "references/a.md", "old_text": "x", "content": "y"},
+		{"action": "remove", "name": "demo/shipped", "file_path": "references/a.md"},
+		{"action": "remove", "name": "demo/shipped"},
+	} {
+		if _, err := bound(skillContext(), args); err == nil {
+			t.Fatalf("plugin write accepted: %v", args["action"])
+		} else if !strings.Contains(err.Error(), "read-only") {
+			t.Fatalf("wrong read-only error: %v", err)
+		}
+	}
+	// create with both category and file_path is contradictory.
+	if _, err := handler(skillContext(), map[string]interface{}{
+		"action": "create", "name": "review", "file_path": "references/b.md", "content": "x", "category": "code",
+	}); err == nil {
+		t.Fatal("category with file_path accepted")
+	}
+	// Unknown action still fails closed with the full verb list.
+	if _, err := handler(skillContext(), map[string]interface{}{"action": "dance"}); err == nil {
+		t.Fatal("unknown action accepted")
+	} else if !strings.Contains(err.Error(), "remove") {
+		t.Fatalf("action error missing remove: %v", err)
+	}
+}
