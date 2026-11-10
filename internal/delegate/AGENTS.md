@@ -30,9 +30,9 @@ narrowed. Model routing mirrors the parent unless `delegation.model`,
 `delegation.provider`, or `delegation.base_url` override it.
 
 `finishUnit` is the single-winner commit: the worker and the stall monitor
-race for the live-set transition, and the loser drops its result. `/new`
-marks live units dropped (recorded honestly, marked delivered without
-enqueueing); `/stop` leaves them running. Stall thresholds are 450s idle and
+race for the live-set transition, and the loser drops its result. `/new` and
+`/stop` mark live units dropped (recorded honestly, marked delivered without
+enqueueing); units already terminal before the cancel still deliver. Stall thresholds are 450s idle and
 1200s in-tool with a 120s grace window; handoff retries cap at 20 attempts
 before parking as failed. Recovery reaps rows whose owner died as `unknown` —
 never retried as new work. Prune bounds the ledger (7-day retention, 1000-row

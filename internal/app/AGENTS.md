@@ -67,8 +67,9 @@ files, and a stable fingerprint never fires twice, so rapid successive writes co
 - `/new` ends the open session (`end_reason='new_session'`), bumps generation, denies pending
   approvals, and interrupts live delegated children (their partial results are
   dropped, never delivered) — history stays searchable under the old generation.
-- `/stop` cancels active agent work in the conversation and preserves queued prompts; `/stop all`
-  is rejected. Steered follow-ups survive `/stop` as queued next turns. Commands outlive transport cancellation.
+- `/stop` cancels active agent work in the conversation and its live delegated children
+  (their partial results are dropped, never delivered), and preserves queued prompts; `/stop all`
+  is rejected. Steered follow-ups survive `/stop` as queued next turns; commands outlive transport cancellation.
 - `/queue <prompt>` forces FIFO queueing for the next turn. Plain messages steer into the running
   turn by default (text-only, consumed after the next tool result); unconsumed steers auto-run
   as the next turn.

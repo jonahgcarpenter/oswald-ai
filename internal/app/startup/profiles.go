@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/builtin"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/session"
+	stopcommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/stop"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	managerdelegate "github.com/jonahgcarpenter/oswald-ai/internal/delegate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
@@ -82,6 +83,30 @@ func (s *newSessionCanceller) NewSessionContext(ctx context.Context, owner, key 
 		s.delegate.CancelSession(s.profile, key)
 	}
 	return nil
+}
+
+// stopWithDelegate stops the active parent turn, then interrupts the
+// profile's live delegated children. Killed units record honestly but their
+// results are dropped: a stopped conversation spawns no follow-up turns.
+type stopWithDelegate struct {
+	broker   *broker.Broker
+	profile  string
+	delegate sessionChildCanceller
+}
+
+// sessionChildCanceller interrupts live delegated children owned by one
+// session. *managerdelegate.Manager satisfies it; tests substitute fakes.
+type sessionChildCanceller interface {
+	CancelSession(profile, sessionKey string) int
+}
+
+// CancelActiveAgentWork implements stopcommands.Canceler.
+func (s *stopWithDelegate) CancelActiveAgentWork(canonicalUserID, sessionID string) broker.CancelReport {
+	report := s.broker.CancelActiveAgentWork(canonicalUserID, sessionID)
+	if s.delegate != nil {
+		s.delegate.CancelSession(s.profile, sessionID)
+	}
+	return report
 }
 
 // brokerWorkerCount bounds concurrent agent turns. Lanes stay strictly FIFO
@@ -343,6 +368,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		profile, _ := directory.Config(name)
 		worker := compaction.NewProfileService(store)
 		delegateStarter := sessioncommands.Starter(store)
+		stopCanceler := stopcommands.Canceler(requestBroker)
 		if rt := runtimes[name]; rt != nil {
 			dmgr := managerdelegate.NewManager(managerdelegate.Deps{
 				Profile:     name,
@@ -369,8 +395,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			dmgr.Start(ctx)
 			delegates = append(delegates, dmgr)
 			delegateStarter = &newSessionCanceller{Starter: store, profile: name, delegate: dmgr}
+			stopCanceler = &stopWithDelegate{broker: requestBroker, profile: name, delegate: dmgr}
 		}
-		commands, err := commandbuiltin.NewProfileService(delegateStarter, requestBroker, profile.ProfileRoot, summarizers[name], store, requestBroker)
+		commands, err := commandbuiltin.NewProfileService(delegateStarter, stopCanceler, profile.ProfileRoot, summarizers[name], store, requestBroker)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}

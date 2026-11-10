@@ -86,8 +86,9 @@ func (m *Manager) controlStop(_ context.Context, profile, session, id string) (g
 }
 
 // CancelSession interrupts every live child owned by a session whose
-// conversation is ending (/new). Their partial results are dropped rather
-// than delivered: the session they belonged to is gone.
+// conversation is ending (/new) or stopped (/stop). Their partial results
+// are dropped rather than delivered: the owning turn is gone, so there is
+// nowhere to deliver to.
 func (m *Manager) CancelSession(profile, sessionKey string) int {
 	if m == nil || strings.TrimSpace(sessionKey) == "" {
 		return 0
