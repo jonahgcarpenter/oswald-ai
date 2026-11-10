@@ -272,3 +272,58 @@ func TestUpdateSkillGates(t *testing.T) {
 		t.Fatal("bad name accepted")
 	}
 }
+
+func TestUpdateSkillDetectsSupportingFileEdit(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git unavailable")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(repo, "references"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	hubFixture(t, repo, "gitskill", "")
+	if err := os.WriteFile(filepath.Join(repo, "references", "api.md"), []byte("# API\nv1.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=synth", "GIT_AUTHOR_EMAIL=synth@example.com", "GIT_COMMITTER_NAME=synth", "GIT_COMMITTER_EMAIL=synth@example.com")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	run("init", "-q", "-b", "main")
+	run("add", "-A")
+	run("commit", "-qm", "synthetic")
+	root := t.TempDir()
+	if _, err := InstallSkill(t.Context(), root, repo, "", "", false); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	installed := filepath.Join(root, "skills", "gitskill", "references", "api.md")
+	data, err := os.ReadFile(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, append(data, "operator edit\n"...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateSkill(t.Context(), root, "gitskill", "", false); err == nil {
+		t.Fatal("supporting-file edit accepted without force")
+	} else if !strings.Contains(err.Error(), "modified") {
+		t.Fatalf("wrong edit error: %v", err)
+	}
+	if _, err := UpdateSkill(t.Context(), root, "gitskill", "", true); err != nil {
+		t.Fatalf("force update: %v", err)
+	}
+	refreshed, err := os.ReadFile(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(refreshed), "operator edit") {
+		t.Fatal("force update kept the operator edit")
+	}
+}

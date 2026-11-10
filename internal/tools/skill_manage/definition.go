@@ -15,19 +15,20 @@ func Definition() llm.ToolDefinition {
 		Name: Name,
 		Description: `Load and maintain reusable procedural skills. Skills hold per-task how-to knowledge (procedures, pitfalls, conventions, proven workflows) that does not belong in memory: memory is injected into every turn and must stay small, while skills load on demand.
 
-FOUR shapes, picked by action:
+FIVE shapes, picked by action:
 - list: the compact name + description (+ category) index. Start here when you need a procedure you don't have.
 - view: load one skill's full body by name (as listed). Load a skill whenever it matches or is even partially relevant to your task, and follow its instructions — err on the side of loading. Pass file_path to read one of its supporting files instead.
-- create: add a new skill (name, description, body) after a difficult or iterative task worth reusing, or when the user teaches you a lasting procedure. Pass an optional single-word category (e.g. "code", "writing") to organize it; omit it for the general category.
-- update: fix a skill whose steps were missing, wrong, or incomplete (old_text must match exactly once; it locates the text, content is the replacement). Name and description lines are editable the same way (description max 60 chars, one line). A successful update auto-bumps the patch version, so never hand-edit version:.
+- create: add a new skill (name, description, body) after a difficult or iterative task worth reusing, or when the user teaches you a lasting procedure. Pass an optional single-word category (e.g. "code", "writing") to organize it; omit it for the general category. Pass file_path with content to add a supporting file (references/, templates/, scripts/, assets/) to an existing skill instead — category must be omitted then.
+- update: fix a skill whose steps were missing, wrong, or incomplete (old_text must match exactly once; it locates the text, content is the replacement). Name and description lines are editable the same way (description max 60 chars, one line). A successful update auto-bumps the patch version, so never hand-edit version:. Pass file_path to fix a supporting file instead — same exact-match contract, no version bump.
+- remove: delete one supporting file from a skill (name + file_path). SKILL.md itself is never removable here; plugin skills are read-only for every write shape.
 
-RULES: reusable procedures live in skills, never in memory. If a loaded skill was missing steps, had wrong commands, or needed pitfalls you discovered, update it before finishing.`,
+RULES: reusable procedures live in skills, never in memory. If a loaded skill was missing steps, had wrong commands, or needed pitfalls you discovered, update it before finishing. Supporting files (references, templates, scripts, assets) live beside SKILL.md — create and update them the same way, and remove them when they rot.`,
 		Parameters: llm.ToolParameters{Type: "object", Required: []string{"action"}, Properties: map[string]llm.ToolParameterProperty{
-			"action":      {Type: "string", Enum: []string{"list", "view", "create", "update"}, Description: "list the index, view one skill body, create a new skill, or update an existing skill."},
-			"name":        {Type: "string", Description: "Skill name as listed (view/update). Required for create (new skill name) and update."},
-			"file_path":   {Type: "string", Description: "View shape only: one supporting file inside the skill (e.g. 'references/api.md'). Omit to read the main body."},
-			"description": {Type: "string", Description: "Create shape only: one-line description of when to load the skill. Max 60 characters."},
-			"content":     {Type: "string", Description: "Create shape: the full skill body. Update shape: the replacement text for old_text."},
+			"action":      {Type: "string", Enum: []string{"list", "view", "create", "update", "remove"}, Description: "list the index, view one skill body, create a new skill or supporting file, update a skill or supporting file, or remove a supporting file."},
+			"name":        {Type: "string", Description: "Skill name as listed (view/update/remove). Required for create (new skill name), update, and remove."},
+			"file_path":   {Type: "string", Description: "Supporting-file shape: one file directly under the skill's references/, templates/, scripts/, or assets/ (e.g. 'references/api.md'). View reads it; create writes a new one (content required, category must be omitted); update replaces one exact unique old_text match (no version bump); remove deletes it. Omit for the main SKILL.md body. Plugin skills are read-only."},
+			"description": {Type: "string", Description: "Create shape only (new skills): one-line description of when to load the skill. Max 60 characters. Omit when creating a supporting file."},
+			"content":     {Type: "string", Description: "Create shape: the full skill body, or the new supporting-file content with file_path. Update shape: the replacement text for old_text."},
 			"category":    {Type: "string", Description: "Create shape only: optional single-level category grouping the skill (e.g. 'code'). Omit for the general category."},
 			"old_text":    {Type: "string", Description: "Update shape only: exact unique substring of the skill file to replace — it locates the text, it is not spliced out."},
 		}},

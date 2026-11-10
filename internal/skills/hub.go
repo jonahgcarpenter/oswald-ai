@@ -481,14 +481,49 @@ func RemoveSkill(profileRoot, name string, full bool) error {
 	return nil
 }
 
-// skillContentHash digests the installed SKILL.md for operator-edit detection.
+// skillContentHash digests the installed skill tree for operator-edit
+// detection. Every regular file contributes its relative path and bytes, so
+// model edits to supporting files trip the same guard as SKILL.md edits.
 func skillContentHash(dir string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
-	if err != nil || len(data) == 0 {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("installed skill is unreadable")
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	if err != nil {
 		return "", fmt.Errorf("installed skill is unreadable")
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	sort.Strings(files)
+	seenSkill := false
+	h := sha256.New()
+	for _, rel := range files {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil || (rel == "SKILL.md" && len(data) == 0) {
+			return "", fmt.Errorf("installed skill is unreadable")
+		}
+		if rel == "SKILL.md" {
+			seenSkill = true
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", rel, len(data))
+		h.Write(data)
+	}
+	if !seenSkill {
+		return "", fmt.Errorf("installed skill is unreadable")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // backupSkill moves the previous tree aside before a forced replace.
