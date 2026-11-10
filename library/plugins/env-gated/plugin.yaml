@@ -1,0 +1,6 @@
+name: env-gated
+version: "1.0"
+description: Seed plugin showing requires_env fail-closed gating per profile.
+manifest_version: 2
+api_version: "1"
+requires_env: [SYNTH_LIBRARY_TOKEN]

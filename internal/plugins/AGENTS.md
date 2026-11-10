@@ -108,7 +108,9 @@ Old shared `plugins-available/` trees are orphaned and never read; operators may
 delete them by hand. Foreign ecosystems (OpenCode, Hermes, Claude bundles) are
 not installed directly: convert first with the `plugin-convert` skill
 (`skills/plugin-convert/`, markdown-only, runtimes never transfer), then
-`oswald plugins install` the staged source.
+`oswald plugins install` the staged source. The operator-maintained library
+seed lives in `library/` (`catalog.json` + `plugins/<name>/`, intended to move
+to its own repository with reviewed pins).
 
 `plugin.yaml` shape (v1 or v2 contract, unknown keys rejected):
 

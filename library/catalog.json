@@ -1,0 +1,19 @@
+{
+  "plugins": [
+    {
+      "name": "hello-skills",
+      "description": "Seed plugin carrying one skills-only example with no sidecar and no env.",
+      "path": "plugins/hello-skills"
+    },
+    {
+      "name": "cli-helper",
+      "description": "Seed plugin showing the pinned node sidecar convention.",
+      "path": "plugins/cli-helper"
+    },
+    {
+      "name": "env-gated",
+      "description": "Seed plugin showing requires_env fail-closed gating per profile.",
+      "path": "plugins/env-gated"
+    }
+  ]
+}
