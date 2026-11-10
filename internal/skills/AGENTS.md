@@ -18,6 +18,9 @@ surface: URL parsing (git shorthand/URLs, local paths), quarantine staging with
 manifest validation, atomic publish, and the per-profile `skills.lock.json`
 provenance sidecar. The model-facing tool
 adapter lives in `internal/tools/skill_manage/`; this package never imports it.
+Seed library content lives in `library/skills/` with `library/skills-catalog.json`
+(one installable bundle per directory; foreign skills arrive via the
+`skill-convert` skill, never by hand-copying).
 
 ## Catalog contract
 
