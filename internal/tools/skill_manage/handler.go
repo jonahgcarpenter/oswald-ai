@@ -59,14 +59,20 @@ func NewHandlerWithPlugins(profileRoot string, pluginSkills []skills.PluginRoot)
 			description, _ := args["description"].(string)
 			content, _ := args["content"].(string)
 			category, _ := args["category"].(string)
-			return create(store, name, description, content, category)
+			filePath, _ := args["file_path"].(string)
+			return create(store, name, description, content, category, filePath)
 		case "update":
 			name, _ := args["name"].(string)
 			oldText, _ := args["old_text"].(string)
 			content, _ := args["content"].(string)
-			return update(store, name, oldText, content)
+			filePath, _ := args["file_path"].(string)
+			return update(store, name, oldText, content, filePath)
+		case "remove":
+			name, _ := args["name"].(string)
+			filePath, _ := args["file_path"].(string)
+			return remove(store, name, filePath)
 		default:
-			return governance.Result{}, errors.New("skill_manage: action must be list, view, create or update")
+			return governance.Result{}, errors.New("skill_manage: action must be list, view, create, update or remove")
 		}
 	}
 }
@@ -168,7 +174,17 @@ func pluginRuntimeNote(profileRoot string, pluginSkills []skills.PluginRoot, sou
 	return sb.String()
 }
 
-func create(store *skills.Store, name, description, content, category string) (governance.Result, error) {
+func create(store *skills.Store, name, description, content, category, filePath string) (governance.Result, error) {
+	if strings.TrimSpace(filePath) != "" {
+		if strings.TrimSpace(category) != "" {
+			return governance.Result{}, fmt.Errorf("skill_manage: category applies to new skills only, not to supporting files")
+		}
+		skill, err := store.CreateFile(name, filePath, content)
+		if err != nil {
+			return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
+		}
+		return governance.Result{Content: fmt.Sprintf("File %q created in skill %q. It now loads with file_path on view.", filepath.ToSlash(filepath.Clean(filePath)), skill.LoadName), Outcome: governance.OutcomeProductive}, nil
+	}
 	skill, err := store.Create(name, description, content, category)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
@@ -176,10 +192,25 @@ func create(store *skills.Store, name, description, content, category string) (g
 	return governance.Result{Content: fmt.Sprintf("Skill %q created under category %q. It now appears in the skills index for future turns.", skill.LoadName, skill.Category), Outcome: governance.OutcomeProductive}, nil
 }
 
-func update(store *skills.Store, name, oldText, content string) (governance.Result, error) {
+func update(store *skills.Store, name, oldText, content, filePath string) (governance.Result, error) {
+	if strings.TrimSpace(filePath) != "" {
+		skill, err := store.UpdateFile(name, filePath, oldText, content)
+		if err != nil {
+			return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
+		}
+		return governance.Result{Content: fmt.Sprintf("File %q updated in skill %q.", filepath.ToSlash(filepath.Clean(filePath)), skill.LoadName), Outcome: governance.OutcomeProductive}, nil
+	}
 	skill, err := store.Update(name, oldText, content)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
 	}
 	return governance.Result{Content: fmt.Sprintf("Skill %q updated.", skill.LoadName), Outcome: governance.OutcomeProductive}, nil
+}
+
+func remove(store *skills.Store, name, filePath string) (governance.Result, error) {
+	skill, err := store.RemoveFile(name, filePath)
+	if err != nil {
+		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
+	}
+	return governance.Result{Content: fmt.Sprintf("File %q removed from skill %q.", filepath.ToSlash(filepath.Clean(filePath)), skill.LoadName), Outcome: governance.OutcomeProductive}, nil
 }

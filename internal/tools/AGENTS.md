@@ -26,8 +26,10 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
 - `skill_manage` — on-demand procedural skills over the profile `skills/` tree (`skill_manage/`
   leaf package; catalog/index/reads owned by `internal/skills/`): `list` (compact
   name/description/category index, 200-row cap), `view` (full body or one supporting file),
-  `create` (slug-validated new `SKILL.md`), `update` (exact unique `old_text`, same contract as
-  memory edits). Bundled plugin skill views carry a plugin-runtime footer (sidecar
+  `create` (slug-validated new `SKILL.md`, or `file_path` supporting file in an existing
+  skill), `update`/`remove` (supporting-file shapes via `file_path`; updates keep exact
+  unique `old_text` and never bump `version:`, `remove` never takes `SKILL.md` itself;
+  plugin skills read-only for every write shape). Bundled plugin skill views carry a plugin-runtime footer (sidecar
   binary dir, per-profile home, other-systems-docs disclaimer); profile skills and
   supporting-file reads carry none. Unknown arguments rejected; authenticated principal required.
   Metadata-only history with hashed bodies: never searchable.

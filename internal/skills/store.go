@@ -327,3 +327,187 @@ func (s *Store) Update(name, oldText, newContent string) (Skill, error) {
 	}
 	return view.Skill, nil
 }
+
+// resolveManagedSkill resolves a skill name to its managed-tree record.
+// Plugin-bundled skills fail closed with their origin: the model tool never
+// writes outside the profile tree.
+func (s *Store) resolveManagedSkill(name string) (Skill, error) {
+	if s == nil || strings.TrimSpace(s.managed) == "" {
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	resolved, err := viewCatalog(s.catalog(""), name, "")
+	if err != nil {
+		return Skill{}, err
+	}
+	if resolved.Source != "" {
+		return Skill{}, fmt.Errorf("skill %q is bundled with plugin %q and read-only", resolved.LoadName, resolved.Source)
+	}
+	return resolved.Skill, nil
+}
+
+// confineSupportPath resolves a supporting-file path inside one skill
+// directory for writing. Only single-level paths directly under the
+// conventional support directories are writable, mirroring what the index
+// lists. Escapes, absolute paths, hidden names, and symlinks fail closed.
+func confineSupportPath(dir, filePath string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(filePath))
+	if strings.ContainsRune(clean, 0) {
+		return "", fmt.Errorf("file_path must stay inside the skill directory")
+	}
+	if clean == "." || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return "", fmt.Errorf("file_path must stay inside the skill directory")
+	}
+	parts := strings.Split(clean, string(filepath.Separator))
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" ||
+		parts[0] == "." || parts[0] == ".." || parts[1] == "." || parts[1] == ".." {
+		return "", fmt.Errorf("file_path must name a file directly under references, templates, scripts, or assets")
+	}
+	allowed := false
+	for _, sub := range supportingDirs {
+		if parts[0] == sub {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Errorf("file_path must name a file directly under references, templates, scripts, or assets")
+	}
+	if strings.HasPrefix(parts[1], ".") {
+		return "", fmt.Errorf("file_path must not name a hidden file")
+	}
+	// Walk existing components, refusing symlinks so a planted link can
+	// never redirect a write outside the skill directory.
+	current := dir
+	for _, part := range parts {
+		next := filepath.Join(current, part)
+		if info, err := os.Lstat(next); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("file_path must stay inside the skill directory")
+			}
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("skill storage is unavailable")
+		} else {
+			break
+		}
+		current = next
+	}
+	base, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("skill storage is unavailable")
+	}
+	return filepath.Join(base, clean), nil
+}
+
+// CreateFile writes a new supporting file inside a managed skill. The skill
+// must already exist; the path must name a file directly under the
+// conventional support directories. An existing file errors instead of
+// overwriting; update it instead.
+func (s *Store) CreateFile(name, filePath, content string) (Skill, error) {
+	skill, err := s.resolveManagedSkill(name)
+	if err != nil {
+		return Skill{}, err
+	}
+	if strings.TrimSpace(content) == "" {
+		return Skill{}, fmt.Errorf("content is required")
+	}
+	if strings.ContainsRune(content, 0) {
+		return Skill{}, fmt.Errorf("content must be text")
+	}
+	if len(content) > maxSkillFileBytes {
+		return Skill{}, fmt.Errorf("content exceeds the 1 MiB file limit")
+	}
+	abs, err := confineSupportPath(skill.Dir, filePath)
+	if err != nil {
+		return Skill{}, err
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		return Skill{}, fmt.Errorf("file %q already exists in skill %q (update it instead)", filepath.ToSlash(filepath.Clean(filePath)), skill.LoadName)
+	}
+	if len(supportingFiles(skill.Dir)) >= maxSupportingFiles {
+		return Skill{}, fmt.Errorf("skill %q already lists %d supporting files", skill.LoadName, maxSupportingFiles)
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0700); err != nil {
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	if err := os.WriteFile(abs, []byte(content), 0600); err != nil {
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	return skill, nil
+}
+
+// UpdateFile replaces one substring of a managed skill's supporting file,
+// identified by an exact unique old_text match (the same contract as SKILL.md
+// edits). No version bump: version: describes the skill body, and SKILL.md
+// edits keep their own bump.
+func (s *Store) UpdateFile(name, filePath, oldText, newContent string) (Skill, error) {
+	skill, err := s.resolveManagedSkill(name)
+	if err != nil {
+		return Skill{}, err
+	}
+	if strings.TrimSpace(oldText) == "" {
+		return Skill{}, fmt.Errorf("old_text is required: the exact unique substring to replace")
+	}
+	abs, err := confineSupportPath(skill.Dir, filePath)
+	if err != nil {
+		return Skill{}, err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Skill{}, fmt.Errorf("file %q not found in skill %q", filepath.ToSlash(filepath.Clean(filePath)), skill.LoadName)
+		}
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	if !info.Mode().IsRegular() {
+		return Skill{}, fmt.Errorf("file %q is not a regular file", filepath.ToSlash(filepath.Clean(filePath)))
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil || len(raw) > maxSkillFileBytes {
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	content := string(raw)
+	if strings.Count(content, oldText) != 1 {
+		return Skill{}, fmt.Errorf("old_text must match exactly once in %q", filepath.ToSlash(filepath.Clean(filePath)))
+	}
+	updated := strings.Replace(content, oldText, newContent, 1)
+	if strings.ContainsRune(updated, 0) {
+		return Skill{}, fmt.Errorf("content must be text")
+	}
+	if len(updated) > maxSkillFileBytes {
+		return Skill{}, fmt.Errorf("content exceeds the 1 MiB file limit")
+	}
+	if err := os.WriteFile(abs, []byte(updated), info.Mode().Perm()); err != nil {
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	return skill, nil
+}
+
+// RemoveFile deletes one supporting file from a managed skill. SKILL.md
+// itself is never removable here: skill deletion stays a CLI operation.
+func (s *Store) RemoveFile(name, filePath string) (Skill, error) {
+	skill, err := s.resolveManagedSkill(name)
+	if err != nil {
+		return Skill{}, err
+	}
+	abs, err := confineSupportPath(skill.Dir, filePath)
+	if err != nil {
+		return Skill{}, err
+	}
+	if abs == skill.File {
+		return Skill{}, fmt.Errorf("skill %q itself is not removable here", skill.LoadName)
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Skill{}, fmt.Errorf("file %q not found in skill %q", filepath.ToSlash(filepath.Clean(filePath)), skill.LoadName)
+		}
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	if !info.Mode().IsRegular() {
+		return Skill{}, fmt.Errorf("file %q is not a regular file", filepath.ToSlash(filepath.Clean(filePath)))
+	}
+	if err := os.Remove(abs); err != nil {
+		return Skill{}, fmt.Errorf("skill storage is unavailable")
+	}
+	return skill, nil
+}

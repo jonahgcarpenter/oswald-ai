@@ -303,3 +303,90 @@ func TestBindPluginJobSearchShape(t *testing.T) {
 		t.Fatalf("supporting file: %v", err)
 	}
 }
+
+func TestCreateUpdateRemoveSupportingFile(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	skill, err := store.CreateFile("review", "references/api.md", "# API\nUse v2.\n")
+	if err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	if skill.LoadName != "review" {
+		t.Fatalf("load name = %q", skill.LoadName)
+	}
+	info, err := os.Stat(filepath.Join(managed, "review", "references", "api.md"))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("bad perms: %+v %v", info, err)
+	}
+	viewed, err := store.View("review", "references/api.md", "")
+	if err != nil || !strings.Contains(viewed.FileContent, "Use v2.") {
+		t.Fatalf("view file = %+v %v", viewed, err)
+	}
+	if _, err := store.CreateFile("review", "references/api.md", "dup"); err == nil {
+		t.Fatal("duplicate create accepted")
+	}
+	if _, err := store.UpdateFile("review", "references/api.md", "Use v2.", "Use v3."); err != nil {
+		t.Fatalf("update file: %v", err)
+	}
+	viewed, err = store.View("review", "references/api.md", "")
+	if err != nil || !strings.Contains(viewed.FileContent, "Use v3.") {
+		t.Fatalf("updated view = %+v %v", viewed, err)
+	}
+	if _, err := store.UpdateFile("review", "references/api.md", " ", "_"); err == nil {
+		t.Fatal("ambiguous old_text accepted")
+	}
+	if _, err := store.RemoveFile("review", "references/api.md"); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+	if _, err := store.View("review", "references/api.md", ""); err == nil {
+		t.Fatal("removed file still readable")
+	}
+	if _, err := store.RemoveFile("review", "SKILL.md"); err == nil {
+		t.Fatal("SKILL.md remove accepted")
+	}
+}
+
+func TestSupportFileWritesRefused(t *testing.T) {
+	managed := seedLibrary(t)
+	store := NewStore(managed)
+	for _, tc := range []struct {
+		name string
+		file string
+		op   string
+	}{
+		{"review", "../escape.md", "create"},
+		{"review", "/abs.md", "create"},
+		{"review", "SKILL.md", "create"},
+		{"review", "notes.md", "create"},
+		{"review", "references/../SKILL.md", "create"},
+		{"review", ".hidden.md", "create"},
+		{"review", "references/../../escape.md", "update"},
+		{"ghost", "references/a.md", "create"},
+	} {
+		var err error
+		switch tc.op {
+		case "create":
+			_, err = store.CreateFile(tc.name, tc.file, "content")
+		case "update":
+			_, err = store.UpdateFile(tc.name, tc.file, "x", "y")
+		}
+		if err == nil {
+			t.Fatalf("%s %s accepted", tc.op, tc.file)
+		}
+	}
+	bindPlugin(t, store, "acme")
+	for _, fn := range []func() error{
+		func() error { _, err := store.CreateFile("acme/shipped", "references/a.md", "x"); return err },
+		func() error { _, err := store.UpdateFile("acme/shipped", "references/a.md", "x", "y"); return err },
+		func() error { _, err := store.RemoveFile("acme/shipped", "references/a.md"); return err },
+	} {
+		if err := fn(); err == nil {
+			t.Fatal("plugin skill file write accepted")
+		} else if !strings.Contains(err.Error(), "read-only") {
+			t.Fatalf("wrong read-only error: %v", err)
+		}
+	}
+	if _, err := store.RemoveFile("review", "references/missing.md"); err == nil {
+		t.Fatal("missing remove accepted")
+	}
+}
