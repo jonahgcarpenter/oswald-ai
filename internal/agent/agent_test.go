@@ -2182,3 +2182,62 @@ func inputImageDimensions(t *testing.T, input llm.InputImage) image.Point {
 	}
 	return decoded.Bounds().Size()
 }
+
+func TestProcessMaxModelResponsesTruncates(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("call-1", "test.clock", map[string]interface{}{}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final summary"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	a, _ := newTestAgent(t, chat, nil, reg)
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.clock", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("twelve"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "what time?", Stateless: true, ClientToolChoice: ClientToolChoice{Mode: "allowed", Allowed: []string{"test.clock"}, AllowedMode: "auto"}, MaxModelResponses: 1}
+	resp, err := a.Process(context.Background(), request)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if !resp.Truncated {
+		t.Fatal("expected truncated response")
+	}
+	if resp.Response != "final summary" {
+		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	if calls := len(chat.requests); calls != 2 {
+		t.Fatalf("expected 1 capped call plus the closing call, got %d", calls)
+	}
+	if len(chat.requests[1].Tools) != 0 {
+		t.Fatalf("expected tools disabled after cap, got %+v", chat.requests[1].Tools)
+	}
+	if !strings.Contains(chat.requests[1].Messages[len(chat.requests[1].Messages)-1].Content, "iteration budget") {
+		t.Fatalf("closing call missing budget notice: %+v", chat.requests[1].Messages)
+	}
+}
+
+func TestProcessUnlimitedModelResponsesByDefault(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("call-1", "test.clock", map[string]interface{}{}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	a, _ := newTestAgent(t, chat, nil, reg)
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.clock", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("twelve"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "what time?", Stateless: true, ClientToolChoice: ClientToolChoice{Mode: "allowed", Allowed: []string{"test.clock"}, AllowedMode: "auto"}}
+	resp, err := a.Process(context.Background(), request)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Truncated {
+		t.Fatal("uncapped request marked truncated")
+	}
+	if resp.Response != "done" || len(chat.requests) != 2 {
+		t.Fatalf("response=%+v calls=%d", resp, len(chat.requests))
+	}
+}

@@ -27,12 +27,21 @@ type offeredToolCatalog struct {
 	Policies map[string]governance.ToolPolicy
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure, enabledToolsets []string, mcpServers []string) offeredToolCatalog {
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure, enabledToolsets []string, mcpServers []string, hide []string) offeredToolCatalog {
 	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
 	allowed := allowedBuiltins(enabledToolsets)
+	hidden := make(map[string]bool, len(hide))
+	for _, name := range hide {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			hidden[trimmed] = true
+		}
+	}
 	add := func(tool llm.Tool, policy governance.ToolPolicy) {
 		name := tool.Function.Name
 		if _, exists := catalog.Policies[name]; name == "" || exists {
+			return
+		}
+		if hidden[name] {
 			return
 		}
 		if allowed != nil && !allowed[name] {
@@ -67,6 +76,9 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	for _, tool := range bridge.BridgeTools(ctx, principal) {
 		name := tool.Function.Name
 		if _, exists := catalog.Policies[name]; name == "" || exists {
+			continue
+		}
+		if hidden[name] {
 			continue
 		}
 		catalog.Tools = append(catalog.Tools, tool)

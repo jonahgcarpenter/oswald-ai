@@ -111,6 +111,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		toolmemory.Name:    true,
 		toolskill.Name:     true,
 		"clarify":          true,
+		"delegate":         true,
 		"read_file":        true,
 		"write_file":       true,
 		"patch":            true,

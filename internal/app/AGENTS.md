@@ -9,7 +9,9 @@ signal handling → `Run`, logging a classified failure on the way out. `startup
 assembles everything per profile in sorted order (state store, maintenance, file/soul stores,
 builtin registry, model client, markdown summarizer, profile MCP manager, agent,
 image cache, shared prune worker with its image/scratch/process/unknown-children hooks), then the
-shared foreground broker, profile commands (including `/compact`), delivery markers, and the
+shared foreground broker, the per-profile delegation managers (built after the
+broker exists so delivery can submit; the live handler overwrites the registry
+placeholder and stops before broker shutdown), profile commands (including `/compact`), delivery markers, and the
 configured gateways with profile-selected dependencies. Shutdown runs the same list in reverse —
 outbound, prune, maintenance, broker, cron ticker, `process.StopAll`, MCP sessions, databases —
 with workers joined before stores close, and errors returned only after cleanup. Nothing in
@@ -17,7 +19,7 @@ with workers joined before stores close, and errors returned only after cleanup.
 logs, and listeners can outlive `Run` until process exit.
 
 `cli/cli.go` dispatches `setup | start | profile | mcp | gateway | platforms |
-providers | model | api | tools | plugins | skills | runtime | config | env | help` with exit codes 0/1/2 and injectable
+providers | model | delegation | api | tools | plugins | skills | runtime | config | env | help` with exit codes 0/1/2 and injectable
 stdio. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
 one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
 copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only
@@ -29,7 +31,8 @@ Scoped groups mirror the top-level `config.yaml` keys one-to-one: `providers` �
 `model` → `model.*`, `api` → `api.key`, `gateway` → `gateway.*`, `platforms` → `platforms.*`,
 `tools` → `tools.*`, `runtime` → `runtime.*`, `mcp` → `mcp_servers.*`, `plugins` →
 `plugins.entries.*` (per-profile installs, presence means enabled). `--profile` is accepted
-(in any position) only where profiles may override (`providers`, `model`, `api`, `tools`, `mcp`, `plugins`);
+(in any position) only where profiles may override (`providers`, `model`, `api`, `tools`, `mcp`, `plugins`,
+`delegation`);
 `gateway`, `platforms`, and `runtime` are global-only. Scoping is read-vs-mutate: reads
 (`show`, `get`, `list`, `validate`, `test`) may name another existing profile, while every
 mutation stays fenced to the calling scope (`OSWALD_HOME` profile) and fails closed on
@@ -61,10 +64,12 @@ files, and a stable fingerprint never fires twice, so rapid successive writes co
 
 ## Behaviors worth knowing cold
 
-- `/new` ends the open session (`end_reason='new_session'`), bumps generation, and denies pending
-  approvals — history stays searchable under the old generation.
-- `/stop` cancels active agent work in the conversation and preserves queued prompts; `/stop all`
-  is rejected. Steered follow-ups survive `/stop` as queued next turns. Commands outlive transport cancellation.
+- `/new` ends the open session (`end_reason='new_session'`), bumps generation, denies pending
+  approvals, and interrupts live delegated children (their partial results are
+  dropped, never delivered) — history stays searchable under the old generation.
+- `/stop` cancels active agent work in the conversation and its live delegated children
+  (their partial results are dropped, never delivered), and preserves queued prompts; `/stop all`
+  is rejected. Steered follow-ups survive `/stop` as queued next turns; commands outlive transport cancellation.
 - `/queue <prompt>` forces FIFO queueing for the next turn. Plain messages steer into the running
   turn by default (text-only, consumed after the next tool result); unconsumed steers auto-run
   as the next turn.

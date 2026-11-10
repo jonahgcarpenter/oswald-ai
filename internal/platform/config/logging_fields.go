@@ -49,6 +49,10 @@ var stringLogFields = map[string]bool{
 	// and MCP config ID (not its URL or remote client/account identity).
 	"challenge_id": true,
 	"server_id":    true,
+	// Delegation lifecycle IDs: the dispatch call ID and per-unit subagent
+	// ID (both random request IDs, never user text).
+	"delegation_id": true,
+	"subagent_id":   true,
 	// Operator configuration diagnostics: validated schema paths, artifact
 	// labels, and referenced environment variable names, never their values.
 	"config_path":     true,

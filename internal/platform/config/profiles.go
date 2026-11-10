@@ -144,6 +144,7 @@ type documentYAML struct {
 	} `yaml:"runtime"`
 	MCPServers map[string]mcpServerYAML `yaml:"mcp_servers"`
 	Plugins    *pluginsYAML             `yaml:"plugins"`
+	Delegation *delegationYAML          `yaml:"delegation"`
 }
 
 type mcpToolsYAML struct {
@@ -703,6 +704,10 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	if err := applyPlugins(cfg, doc); err != nil {
 		return err
 	}
+	if err := applyDelegation(cfg, doc, providers); err != nil {
+		return err
+	}
+	cfg.ProviderEndpoints = resolveProviderEndpoints(providers)
 	if doc.API.Key != nil {
 		key, err := credential(doc.API.Key, false)
 		if err != nil {

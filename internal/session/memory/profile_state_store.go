@@ -151,6 +151,10 @@ func (s *ProfileStore) measure(event string, started time.Time, err *error) {
 		log.Debug("memory.profile.turn.complete", "stored pending profile exchange", fields...)
 	case "memory.profile.delivery.complete":
 		log.Debug("memory.profile.delivery.complete", "recorded profile exchange delivery", fields...)
+	case "memory.profile.delegation.complete":
+		log.Debug("memory.profile.delegation.complete", "recorded delegation lifecycle transition", fields...)
+	case "memory.profile.delegation.delivery":
+		log.Debug("memory.profile.delegation.delivery", "recorded delegation handoff", fields...)
 	}
 }
 

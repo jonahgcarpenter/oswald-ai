@@ -132,6 +132,7 @@ Moving a symbol means fixing its docs in the same change.
 | `internal/app/`, `cmd/` | `internal/app/AGENTS.md` | composition root, startup/shutdown order, CLI dispatch, chat commands |
 | `internal/agent/` | `internal/agent/AGENTS.md` | turn loop, system prompt, budget, tool authorization, retries, MEDIA delivery |
 | `internal/broker/` | `internal/broker/AGENTS.md` | lanes, fences, admission, cancellation, foreground priority |
+| `internal/delegate/` | `internal/delegate/AGENTS.md` | subagent dispatch, lifecycle, delivery, stall handling |
 | `internal/session/` | `internal/session/AGENTS.md` | delivery gating, history, `state_meta`, `/new`, soul binding, compaction |
 | `internal/skills/` | `internal/skills/AGENTS.md` | skill catalog, prompt index, on-demand reads, create/update |
 | `internal/tools/` | `internal/tools/AGENTS.md` | registry, governance, toolsets, builtin inventory, history bounds |

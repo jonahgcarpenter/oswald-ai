@@ -54,6 +54,13 @@ const (
 	// toolStuckNotice tells the model progress signals halted the loop so it
 	// answers from gathered results instead of repeating unproductive calls.
 	toolStuckNotice = "Tool progress stalled: further calls are repeating without productive results, so no further tool calls are available. Review the results gathered so far and give your final answer now."
+	// iterationBudgetExhaustedNotice tells a subagent the per-request model
+	// iteration cap is spent: summarize gathered results now and flag the
+	// cutoff explicitly instead of starting new work.
+	iterationBudgetExhaustedNotice = "The subagent iteration budget for this request is exhausted (maximum model responses reached): no further tool calls are available. Review the results gathered so far and give your final answer now, stating clearly that results above may be partial."
+	// iterationBudgetStopReason marks a turn halted by the per-request model
+	// iteration cap rather than by governance progress signals.
+	iterationBudgetStopReason = "iteration_budget_exhausted"
 )
 
 // MarkdownSummarizer compacts a full session into markdown in one
@@ -315,6 +322,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		toolExposure.HideBuiltins(toolclarify.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
+	// Delegated children inherit the calling turn's tool visibility (and
+	// narrow it further) so a child can never exceed what the parent may
+	// call. The delegate manager reads this scope from the tool context.
+	ctx = requestctx.WithParentToolScope(ctx, request.EnabledToolsets, request.MCPServers)
 	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
 	// Parked approval asks surface while the tool call blocks: keep a
 	// gateway-provided asker (real message on transports without live
@@ -486,7 +497,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 
-	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers)
+	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers, request.HideTools)
 	mcpView := a.mcpProviderForRequest(request.MCPServers)
 	if request.Stateless {
 		var choiceErr error
@@ -764,7 +775,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// provider, and must not count as model calls in the usage ledger.
 		respSynthetic := false
 
-		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers)
+		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers, request.HideTools)
 		if request.Stateless {
 			var choiceErr error
 			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
@@ -829,6 +840,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
 			return &Response{Kind: "over_budget", Model: a.model}, nil
+		}
+		if request.MaxModelResponses > 0 && modelIterations >= request.MaxModelResponses {
+			toolGovernanceStopReason = iterationBudgetStopReason
+			reqLog.Debug("agent.tool_budget.iteration_cap", "model iteration cap reached",
+				config.F("reason_code", toolGovernanceStopReason),
+				config.F("iteration_count", modelIterations),
+				config.F("status", "degraded"))
+			break
 		}
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
@@ -1373,6 +1392,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		stopNotice := toolBudgetExhaustedNotice
 		if isProgressHaltReason(toolGovernanceStopReason) {
 			stopNotice = toolStuckNotice
+		} else if toolGovernanceStopReason == iterationBudgetStopReason {
+			stopNotice = iterationBudgetExhaustedNotice
 		}
 		messages = append(messages, llm.ChatMessage{Role: "user", Content: stopNotice})
 		finalReq := req
@@ -1611,6 +1632,7 @@ finalize:
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
 		ServiceTier:       request.ServiceTier,
+		Truncated:         toolGovernanceStopReason == iterationBudgetStopReason,
 	}
 	if lastResp != nil {
 		switch strings.TrimSpace(lastResp.DoneReason) {

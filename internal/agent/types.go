@@ -34,9 +34,12 @@ type Response struct {
 	// ServiceTier echoes the caller's validated service_tier request value
 	// in completion responses. Empty omits it.
 	ServiceTier string `json:"-"`
-	Model       string `json:"model"`
-	Response    string `json:"response,omitempty"`
-	Thinking    string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	// Truncated reports that the turn halted on the per-request model
+	// iteration cap: results above may be partial.
+	Truncated bool   `json:"-"`
+	Model     string `json:"model"`
+	Response  string `json:"response,omitempty"`
+	Thinking  string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
 	// the gateway reports finish_reason tool_calls and omits server execution.
 	ToolCalls []llm.ToolCall `json:"-"`
@@ -108,6 +111,11 @@ type Request struct {
 	// disables filtering; an empty list hides every builtin. The MCP bridge
 	// is governed independently by MCPServers.
 	EnabledToolsets []string
+	// HideTools removes named tools from the offered catalog for this
+	// request. It applies after toolset filtering and to bridge tools alike,
+	// letting callers narrow (never widen) visibility — e.g. subagent turns
+	// that must not see clarify, memory, or delegation itself.
+	HideTools []string
 	// MCPServers scopes the MCP bridge (tool_search/describe/call) for this
 	// request. Nil exposes every profile server; an empty list exposes none.
 	MCPServers []string
@@ -135,6 +143,11 @@ type Request struct {
 	// adds entries concurrently; the agent drains them at iteration
 	// boundaries. Nil disables steering. Stateless requests never steer.
 	Steer *SteerInbox
+	// MaxModelResponses caps model responses for this request (0 = unlimited).
+	// Hitting the cap halts the loop like a governance stop and marks the
+	// response truncated; the closing summary call still runs so gathered
+	// results are reported instead of dropped.
+	MaxModelResponses int
 }
 
 // ClientToolChoice constrains the merged Oswald and caller tool catalog for
