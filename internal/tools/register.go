@@ -137,7 +137,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 	// The live delegate handler needs the per-profile delegation manager,
 	// which startup installs after the registry exists; until then the tool
 	// is visible but fails closed instead of dispatching half-wired.
-	if err := reg.RegisterHandler(tooldelegate.Name, toolPolicy(normalizeDelegateArgs), registry.Handler(tooldelegate.PlaceholderHandler())); err != nil {
+	if err := reg.RegisterHandler(tooldelegate.Name, DelegatePolicy(), registry.Handler(tooldelegate.PlaceholderHandler())); err != nil {
 		return fmt.Errorf("register delegate tool: %w", err)
 	}
 
@@ -187,6 +187,14 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 		NormalizeArgs: normalize,
 		History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 	}
+}
+
+// DelegatePolicy returns the registry policy for the delegate tool: full
+// history with searchable results. Startup reuses it when installing the
+// live per-profile handler over the placeholder, so both registrations share
+// one policy definition.
+func DelegatePolicy() governance.ToolPolicy {
+	return toolPolicy(normalizeDelegateArgs)
 }
 
 // PluginSkillRoots collects read-only bundled skills dirs for installed
