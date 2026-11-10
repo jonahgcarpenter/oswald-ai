@@ -493,7 +493,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 
-	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers)
+	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers, request.HideTools)
 	mcpView := a.mcpProviderForRequest(request.MCPServers)
 	if request.Stateless {
 		var choiceErr error
@@ -771,7 +771,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// provider, and must not count as model calls in the usage ledger.
 		respSynthetic := false
 
-		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers)
+		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets, request.MCPServers, request.HideTools)
 		if request.Stateless {
 			var choiceErr error
 			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)

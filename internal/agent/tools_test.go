@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -259,5 +260,18 @@ func TestProcessStuckLoopHaltsWithStuckNotice(t *testing.T) {
 	notice := finalReq.Messages[len(finalReq.Messages)-1]
 	if notice.Role != "user" || notice.Content != toolStuckNotice {
 		t.Fatalf("stuck halt must announce stalled progress, got %+v", notice)
+	}
+}
+
+func TestToolsForRequestHideTools(t *testing.T) {
+	a := statelessTestAgent(t)
+	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}
+	full := a.toolsForRequest(context.Background(), principal, exposure.NewExposure(), nil, nil, nil)
+	if !catalogHas(full, "memory") {
+		t.Fatal("memory should be offered without hiding")
+	}
+	hidden := a.toolsForRequest(context.Background(), principal, exposure.NewExposure(), nil, nil, []string{"memory"})
+	if catalogHas(hidden, "memory") {
+		t.Fatal("hidden tool still offered")
 	}
 }

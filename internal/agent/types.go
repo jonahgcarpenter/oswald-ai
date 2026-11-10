@@ -111,6 +111,11 @@ type Request struct {
 	// disables filtering; an empty list hides every builtin. The MCP bridge
 	// is governed independently by MCPServers.
 	EnabledToolsets []string
+	// HideTools removes named tools from the offered catalog for this
+	// request. It applies after toolset filtering and to bridge tools alike,
+	// letting callers narrow (never widen) visibility — e.g. subagent turns
+	// that must not see clarify, memory, or delegation itself.
+	HideTools []string
 	// MCPServers scopes the MCP bridge (tool_search/describe/call) for this
 	// request. Nil exposes every profile server; an empty list exposes none.
 	MCPServers []string
