@@ -12,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/api"
 	cliconfig "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/delegation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/env"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
@@ -71,6 +72,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return providers.Run(ctx, root, rest[1:], stdout, stderr)
 	case "model":
 		return model.Run(ctx, root, rest[1:], stdout, stderr)
+	case "delegation":
+		return delegation.Run(ctx, root, rest[1:], stdout, stderr)
 	case "api":
 		return api.Run(ctx, root, rest[1:], stdout, stderr)
 	case "platforms":
@@ -118,6 +121,8 @@ commands:
   providers list|show|add|remove
                          manage LLM providers
   model show|set         manage model selection
+  delegation show|set|unset
+                          manage subagent model routing
   tools show|set|unset      manage tool backends
   plugins list|info           manage profile plugins (presence means enabled)
   plugins install|update|remove

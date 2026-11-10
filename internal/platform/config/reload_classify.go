@@ -42,6 +42,11 @@ func ClassifyReload(old, next *Config) (bool, []string) {
 		reflect.DeepEqual(old.TerminalEnvPassthrough, next.TerminalEnvPassthrough))
 	add("mcp_servers", reflect.DeepEqual(old.MCPServers, next.MCPServers))
 	add("plugins", reflect.DeepEqual(old.PluginEntries, next.PluginEntries))
+	add("delegation", old.DelegationModel == next.DelegationModel && old.DelegationProvider == next.DelegationProvider &&
+		old.DelegationBaseURL == next.DelegationBaseURL && old.DelegationMaxIterations == next.DelegationMaxIterations &&
+		old.DelegationMaxConcurrentChildren == next.DelegationMaxConcurrentChildren &&
+		old.DelegationMaxSpawnDepth == next.DelegationMaxSpawnDepth &&
+		old.DelegationOrchestratorEnabled == next.DelegationOrchestratorEnabled)
 	add("profiles", reflect.DeepEqual(old.Profiles, next.Profiles))
 	if len(classes) == 0 {
 		return true, nil

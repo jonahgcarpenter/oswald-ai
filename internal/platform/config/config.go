@@ -62,6 +62,27 @@ type Config struct {
 	// PluginEntries holds per-plugin operator options keyed by plugin id.
 	// Presence of a plugin directory means enabled; there is no enable list.
 	PluginEntries map[string]PluginEntry
+	// DelegationModel optionally pins the model for delegate subagent turns.
+	// Empty mirrors the profile's effective model.
+	DelegationModel string
+	// DelegationProvider optionally routes delegate turns to a named provider.
+	// Empty inherits the profile's effective provider and credentials.
+	DelegationProvider string
+	// DelegationBaseURL optionally overrides the delegate endpoint. Requires
+	// DelegationProvider (whose key authenticates it). Empty inherits.
+	DelegationBaseURL string
+	// DelegationMaxIterations caps one child turn's model responses.
+	DelegationMaxIterations int
+	// DelegationMaxConcurrentChildren caps one batch's live workers.
+	DelegationMaxConcurrentChildren int
+	// DelegationMaxSpawnDepth caps orchestrator nesting (1 = flat only).
+	DelegationMaxSpawnDepth int
+	// DelegationOrchestratorEnabled gates the orchestrator role; false forces leaf.
+	DelegationOrchestratorEnabled bool
+	// ProviderEndpoints retains every declared provider's resolved transport
+	// (normalized URL + interpolated key, memory only) so delegate dispatch
+	// can build a client for a non-default provider.
+	ProviderEndpoints map[string]ProviderEndpoint
 	// TerminalEnvPassthrough lists variable names forwarded into sandboxed
 	// children (terminal, execute_code, background processes) for this
 	// profile. Values resolve against the profile dotenv scope; provider
