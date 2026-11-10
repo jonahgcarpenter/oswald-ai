@@ -17,7 +17,7 @@ type Store struct {
 	plugins []PluginRoot
 }
 
-// PluginRoot is one enabled plugin's bundled skills directory, scanned
+// PluginRoot is one installed plugin's skills directory, scanned
 // read-only alongside the managed tree.
 type PluginRoot struct {
 	Key string

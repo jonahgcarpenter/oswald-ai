@@ -59,12 +59,8 @@ type Config struct {
 	// and also blocks legitimate DOM extraction.
 	BrowserRestrictEvaluate bool
 	LogLevel                Level
-	// PluginEnabled lists opt-in plugin ids for this profile. Discovery finds
-	// code; nothing with hooks or tools loads until listed here.
-	PluginEnabled []string
-	// PluginDisabled is a deny-list that always wins over enabled.
-	PluginDisabled []string
 	// PluginEntries holds per-plugin operator options keyed by plugin id.
+	// Presence of a plugin directory means enabled; there is no enable list.
 	PluginEntries map[string]PluginEntry
 	// TerminalEnvPassthrough lists variable names forwarded into sandboxed
 	// children (terminal, execute_code, background processes) for this

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
 const pluginsTestConfig = `providers:
@@ -42,7 +44,7 @@ func pluginsTestRoot(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	writePluginManifest(t, filepath.Join(root, "plugins-available", "demo"), "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n")
+	writePluginManifest(t, plugins.PluginCodeDir(root, "demo"), "name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n")
 	return root
 }
 
@@ -63,38 +65,26 @@ func pluginsRun(t *testing.T, root string, args ...string) (int, string, string)
 	return code, stdout.String(), stderr.String()
 }
 
-func TestListEmptyAndEnable(t *testing.T) {
+func TestListPresent(t *testing.T) {
 	root := pluginsTestRoot(t)
 	if code, out, _ := pluginsRun(t, root, "list"); code != 0 || !strings.Contains(out, "demo") {
 		t.Fatalf("list = %d %q", code, out)
 	}
-	if code, _, stderr := pluginsRun(t, root, "enable", "demo"); code != 0 {
-		t.Fatalf("enable = %d %s", code, stderr)
-	}
 	if code, out, _ := pluginsRun(t, root, "list"); code != 0 || !strings.Contains(out, "enabled") {
 		t.Fatalf("list enabled = %d %q", code, out)
 	}
-	if code, _, _ := pluginsRun(t, root, "enable", "ghost"); code == 0 {
-		t.Fatal("unknown enable accepted")
+	if code, _, _ := pluginsRun(t, root, "info", "ghost"); code == 0 {
+		t.Fatal("unknown info accepted")
 	}
 }
 
-func TestDisableWinsAndInfoRedacts(t *testing.T) {
+func TestInfoRedacts(t *testing.T) {
 	root := pluginsTestRoot(t)
-	if code, _, stderr := pluginsRun(t, root, "enable", "demo"); code != 0 {
-		t.Fatalf("enable = %d %s", code, stderr)
-	}
-	if code, _, stderr := pluginsRun(t, root, "disable", "demo"); code != 0 {
-		t.Fatalf("disable = %d %s", code, stderr)
-	}
-	if code, out, _ := pluginsRun(t, root, "list"); code != 0 || !strings.Contains(out, "disabled") {
-		t.Fatalf("list disabled = %d %q", code, out)
-	}
 	code, out, _ := pluginsRun(t, root, "info", "demo")
 	if code != 0 {
 		t.Fatalf("info = %d", code)
 	}
-	for _, want := range []string{"name: demo", "source: user", "state: disabled"} {
+	for _, want := range []string{"name: demo", "source: profile", "state: enabled"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("info missing %q: %q", want, out)
 		}
@@ -115,11 +105,12 @@ func TestBinPathAndInstallDepsGates(t *testing.T) {
 	if code, _, _ := pluginsRun(t, root, "install-deps", "demo"); code == 0 {
 		t.Fatal("install-deps without node deps accepted")
 	}
-	if code, _, _ := pluginsRun(t, root, "install-deps", "demo", "--profile", "alice"); code != 2 {
-		t.Fatalf("profile-scoped install-deps = %d, want usage", code)
+	// Per-profile reads: unknown plugin in another profile fails, not usage.
+	if code, _, _ := pluginsRun(t, root, "install-deps", "demo", "--profile", "alice"); code == 0 {
+		t.Fatal("alice install-deps accepted")
 	}
-	if code, _, _ := pluginsRun(t, root, "bin-path", "demo", "--profile", "alice"); code != 2 {
-		t.Fatalf("profile-scoped bin-path = %d, want usage", code)
+	if code, _, _ := pluginsRun(t, root, "bin-path", "demo", "--profile", "alice"); code == 0 {
+		t.Fatal("alice bin-path accepted")
 	}
 }
 
@@ -130,10 +121,10 @@ func installSourceFixture(t *testing.T, name string) string {
 	return dir
 }
 
-func TestInstallLocalWithEnable(t *testing.T) {
+func TestInstallLocal(t *testing.T) {
 	root := pluginsTestRoot(t)
 	src := installSourceFixture(t, "shipped")
-	if code, out, stderr := pluginsRun(t, root, "install", src, "--enable"); code != 0 {
+	if code, out, stderr := pluginsRun(t, root, "install", src); code != 0 {
 		t.Fatalf("install = %d %s %s", code, out, stderr)
 	}
 	if code, out, _ := pluginsRun(t, root, "list"); code != 0 || !strings.Contains(out, "shipped") || !strings.Contains(out, "enabled") {
@@ -154,15 +145,14 @@ func TestInstallLocalWithEnable(t *testing.T) {
 
 func TestInstallScopeFencing(t *testing.T) {
 	root := pluginsTestRoot(t)
-	bob := filepath.Join(root, "profiles", "bob")
-	if err := os.MkdirAll(bob, 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OSWALD_HOME", bob)
+	alice := filepath.Join(root, "profiles", "alice")
+	t.Setenv("OSWALD_HOME", alice)
 	src := installSourceFixture(t, "scoped")
-	if code, _, _ := pluginsRun(t, root, "install", src); code == 0 {
-		t.Fatal("named-scope install accepted")
+	// Calling scope (alice) installs into alice.
+	if code, _, stderr := pluginsRun(t, root, "install", src); code != 0 {
+		t.Fatalf("alice install = %d %s", code, stderr)
 	}
+	// Contradicting --profile flag fails closed.
 	if code, _, _ := pluginsRun(t, root, "install", src, "--profile", "default"); code == 0 {
 		t.Fatal("contradicting profile install accepted")
 	}
@@ -177,55 +167,52 @@ func TestInstallValidation(t *testing.T) {
 	if code, _, _ := pluginsRun(t, root, "install", src, "--ref", "main"); code == 0 {
 		t.Fatal("bad ref accepted")
 	}
-	if code, _, _ := pluginsRun(t, root, "install", src, "--enable", "--no-enable"); code == 0 {
-		t.Fatal("conflicting flags accepted")
+	if code, _, _ := pluginsRun(t, root, "install", src, "--bogus-flag"); code == 0 {
+		t.Fatal("bogus flag accepted")
 	}
 }
 
 func TestRemoveAndUpdateGates(t *testing.T) {
 	root := pluginsTestRoot(t)
 	src := installSourceFixture(t, "victim")
-	if code, _, stderr := pluginsRun(t, root, "install", src, "--enable"); code != 0 {
+	if code, _, stderr := pluginsRun(t, root, "install", src); code != 0 {
 		t.Fatalf("install = %d %s", code, stderr)
 	}
 	if code, _, _ := pluginsRun(t, root, "update", "victim"); code == 0 {
-		t.Fatal("update of unmanaged install accepted")
+		t.Fatal("update of local install accepted")
 	}
 	if code, _, _ := pluginsRun(t, root, "remove", "ghost"); code == 0 {
 		t.Fatal("unknown remove accepted")
 	}
-	// Reference from another profile blocks removal of shared code.
-	alice := filepath.Join(root, "profiles", "alice")
-	if err := os.MkdirAll(alice, 0700); err != nil {
+	// Data survives plain remove.
+	dataHome := filepath.Join(plugins.PluginDataDir(root, "victim"), "home")
+	if err := os.MkdirAll(dataHome, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(alice, "config.yaml"), []byte("plugins:\n  enabled: [victim]\n"), 0600); err != nil {
+	marker := filepath.Join(dataHome, "keep.txt")
+	if err := os.WriteFile(marker, []byte("synthetic"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, stderr := pluginsRun(t, root, "remove", "victim"); code == 0 {
-		t.Fatalf("referenced remove accepted: %s", stderr)
+	if code, _, stderr := pluginsRun(t, root, "remove", "victim"); code != 0 {
+		t.Fatalf("remove = %d %s", code, stderr)
 	}
-	if code, _, stderr := pluginsRun(t, root, "disable", "victim", "--profile", "alice"); code != 0 {
-		t.Fatalf("alice disable = %d %s", code, stderr)
-	}
-	storage := filepath.Join(root, "plugins", "victim")
-	if err := os.MkdirAll(storage, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if code, out, stderr := pluginsRun(t, root, "remove", "victim", "--full"); code != 0 {
-		t.Fatalf("remove = %d %s %s", code, out, stderr)
-	}
-	if _, err := os.Stat(filepath.Join(root, "plugins-available", "victim")); !os.IsNotExist(err) {
+	if _, err := os.Stat(plugins.PluginCodeDir(root, "victim")); !os.IsNotExist(err) {
 		t.Fatal("code dir survived remove")
 	}
-	if _, err := os.Stat(storage); !os.IsNotExist(err) {
-		t.Fatal("storage survived --full")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("data did not survive plain remove")
+	}
+	if code, _, stderr := pluginsRun(t, root, "remove", "victim", "--full"); code != 0 {
+		t.Fatalf("full remove = %d %s", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(root, "plugins", "victim")); !os.IsNotExist(err) {
+		t.Fatal("plugin dir survived --full")
 	}
 }
 
 func execFixture(t *testing.T, root, name string) {
 	t.Helper()
-	manifestDir := filepath.Join(root, "plugins-available", name)
+	manifestDir := plugins.PluginCodeDir(root, name)
 	writePluginManifest(t, manifestDir, "name: "+name+"\nversion: \"1.0\"\ndescription: synthetic exec plugin\nmanifest_version: 2\napi_version: \"1\"\n")
 	binDir := filepath.Join(manifestDir, "node_modules", ".bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
@@ -242,12 +229,6 @@ func TestExecGatesAndRuns(t *testing.T) {
 		t.Fatal("unknown exec accepted")
 	}
 	execFixture(t, root, "tool")
-	if code, _, stderr := pluginsRun(t, root, "exec", "tool", "--", "x"); code == 0 {
-		t.Fatalf("disabled exec accepted: %s", stderr)
-	}
-	if code, _, stderr := pluginsRun(t, root, "enable", "tool"); code != 0 {
-		t.Fatalf("enable = %d %s", code, stderr)
-	}
 	code, out, stderr := pluginsRun(t, root, "exec", "tool", "--bin", "tool", "--", "x")
 	if code != 0 || !strings.Contains(out, "exec-output") {
 		t.Fatalf("exec = %d %q %s", code, out, stderr)

@@ -76,6 +76,23 @@ func TestValidateManifestAcceptsV1(t *testing.T) {
 	}
 }
 
+func TestParseManifestRejectsUnknownKeys(t *testing.T) {
+	for _, body := range []string{
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nwhen_to_use: ship it\n",
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nconfig:\n  path: ~/data\n",
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nblueprint:\n  schedule: \"0 8 * * *\"\n",
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nautoinvoke: false\n",
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseManifestFile(dir, "profile"); err == nil {
+			t.Fatalf("unknown manifest key accepted in %q", body)
+		}
+	}
+}
+
 func TestParseManifestFileV1JobSearchShape(t *testing.T) {
 	dir := t.TempDir()
 	body := "name: job-search\nversion: \"0.9.0\"\ndescription: synthetic job search plugin\nmanifest_version: 1\nkind: standalone\n"
@@ -127,25 +144,25 @@ func TestResolveLoadOrderDependencies(t *testing.T) {
 	}
 }
 
-func TestDiscoveryPrecedenceAndImpostor(t *testing.T) {
-	root := t.TempDir()
-	bundled := filepath.Join(root, "bundled")
-	user := filepath.Join(root, "user")
-	writeManifest(t, filepath.Join(bundled, "kanban"), "kanban", "bundled")
-	writeManifest(t, filepath.Join(user, "kanban"), "kanban", "user")
-	// Impostor dir claiming the same manifest name as bundled but different dir.
-	writeManifest(t, filepath.Join(user, "impostor_dir"), "kanban", "user")
+func TestScanProfilePlugins(t *testing.T) {
+	profile := t.TempDir()
+	writeManifest(t, PluginCodeDir(profile, "kanban"), "kanban", "profile")
+	// Mismatched directory name never loads.
+	writeManifest(t, PluginCodeDir(profile, "impostor_dir"), "kanban", "profile")
 
-	found := CollectManifests(bundled, user, "", false)
-	if len(found) != 3 {
+	found := ScanProfilePlugins(profile)
+	if len(found) != 1 {
 		t.Fatalf("got %d manifests", len(found))
 	}
-	winners := ResolveWinners(found)
+	if found[0].Key != "kanban" || found[0].Source != "profile" {
+		t.Fatalf("got %+v", found[0])
+	}
+	winners := ScanProfileWinners(profile)
 	got, ok := winners["kanban"]
 	if !ok {
 		t.Fatal("missing kanban winner")
 	}
-	if got.Source != "user" {
+	if got.Source != "profile" {
 		t.Fatalf("got source %q", got.Source)
 	}
 }
@@ -210,6 +227,10 @@ func TestManagerStorageConfined(t *testing.T) {
 	root, err := m.StorageRoot("demo")
 	if err != nil {
 		t.Fatal(err)
+	}
+	want := PluginDataDir(home, "demo")
+	if root != want {
+		t.Fatalf("got %q want %q", root, want)
 	}
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {

@@ -3,7 +3,6 @@ package plugins
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -64,29 +63,9 @@ func resolveScope(root, flagProfile string, mutating bool) (*config.Config, stri
 	return selected, name, selected.ProfileRoot, nil
 }
 
-// discoverForList scans shared + opt-in project plugins for one global root.
-func discoverForList(globalRoot string) map[string]plugins.Manifest {
-	userDir := plugins.UserPluginsDir(globalRoot)
-	projectDir := ""
-	projectEnabled := plugins.ProjectPluginsEnabled()
-	if projectEnabled {
-		if cwd, err := os.Getwd(); err == nil {
-			projectDir = filepath.Join(cwd, ".oswald", "plugins")
-		} else {
-			projectEnabled = false
-		}
-	}
-	manifests := plugins.CollectManifests("", userDir, projectDir, projectEnabled)
-	return plugins.ResolveWinners(manifests)
-}
-
-func absCwd() (string, error) { return os.Getwd() }
-
-func globalRootFor(profileRoot, profile string) string {
-	if globalRoot, err := config.GlobalRootForProfile(profileRoot, profile); err == nil {
-		return globalRoot
-	}
-	return profileRoot
+// discoverForList scans installed profile plugins. Presence means enabled.
+func discoverForList(profileRoot string) map[string]plugins.Manifest {
+	return plugins.ScanProfileWinners(profileRoot)
 }
 
 func reportPluginsError(stderr io.Writer, err error) {

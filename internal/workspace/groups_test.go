@@ -67,7 +67,7 @@ func TestClassifyGroups(t *testing.T) {
 		// like any other file under profiles/.
 		{filepath.Join(root, "config.yaml"), GroupProtected},
 		{filepath.Join(root, "profiles", "bob", "config.yaml"), GroupProtected},
-		{filepath.Join(root, "profiles", "bob", "plugins", "job-search", "home", ".job-search", "config.yaml"), GroupSystem},
+		{filepath.Join(root, "profiles", "bob", "plugins", "job-search", "data", "home", ".job-search", "config.yaml"), GroupSystem},
 		{filepath.Join(root, "sub", "config.yaml"), GroupAgent},
 		// cache: scratch is agent same-profile, everything else system.
 		{filepath.Join(root, "cache", "scratch", "a.txt"), GroupAgent},
@@ -101,7 +101,7 @@ func TestClassifyOperatorConfigNamedRoot(t *testing.T) {
 		{filepath.Join(tree, "config.yaml"), GroupProtected},
 		{filepath.Join(alice, "config.yaml"), GroupProtected},
 		// Nested namesakes inside the profile stay agent-owned.
-		{filepath.Join(bob, "plugins", "demo", "home", ".job-search", "config.yaml"), GroupAgent},
+		{filepath.Join(bob, "plugins", "demo", "data", "home", ".job-search", "config.yaml"), GroupAgent},
 		{filepath.Join(bob, "sub", "config.yaml"), GroupAgent},
 	}
 	for _, tc := range cases {
@@ -115,7 +115,7 @@ func TestNestedWorkspaceConfigYamlAgentOwned(t *testing.T) {
 	tree, bob := fileTree(t)
 	// The incident path: a plugin workspace config.yaml nested deep inside
 	// the profile tree must read and write like any other agent-owned file.
-	nested := filepath.Join("plugins", "job-search", "home", ".job-search", "config.yaml")
+	nested := filepath.Join("plugins", "job-search", "data", "home", ".job-search", "config.yaml")
 	for _, ws := range []*Workspace{NewWorkspace(tree, "default"), NewWorkspace(bob, "bob")} {
 		full := filepath.Join(ws.Root(), nested)
 		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {

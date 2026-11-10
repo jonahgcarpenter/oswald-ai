@@ -24,7 +24,7 @@ type Skill struct {
 }
 
 // ScanResult is one loadable skill found by scanning an explicit root:
-// bundled plugin skills, local directories, or anything else shaped like the
+// installed plugin skills, local directories, or anything else shaped like the
 // managed tree. Keys are always load names as the catalog resolves them.
 type ScanResult struct {
 	LoadName    string

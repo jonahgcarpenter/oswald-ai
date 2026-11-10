@@ -119,10 +119,9 @@ commands:
                          manage LLM providers
   model show|set         manage model selection
   tools show|set|unset      manage tool backends
-  plugins list|enable|disable|info
-                          manage profile plugins
+  plugins list|info           manage profile plugins (presence means enabled)
   plugins install|update|remove
-                          install from URL, refresh, or remove shared plugin code
+                          install from URL, refresh, or remove per-profile plugin code
   plugins install-deps|bin-path
                           install pinned npm deps / print a plugin binary path
   skills list|info|install|update|remove

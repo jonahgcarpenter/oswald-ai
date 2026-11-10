@@ -4,32 +4,24 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
-// installCmd clones or copies a plugin into the shared plugins-available tree.
-// Code writes require default scope; --profile selects the enable target and
-// follows the same fencing as enable (contradictions fail closed). The node
+// installCmd clones or copies a plugin into the calling profile's
+// <profile>/plugins/<name>/code tree. Presence means enabled. The node
 // sidecar installs as part of the invocation unless --no-deps opts out;
 // --node-package with --node-version supplies it for repos whose manifest
 // predates the node_package convention.
 func installCmd(ctx context.Context, root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
-	const usage = "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--node-package PKG --node-version VER] [--no-deps] [--enable|--no-enable] [--force] [--profile NAME]"
+	const usage = "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--node-package PKG --node-version VER] [--no-deps] [--force] [--profile NAME]"
 	var source, ref, subdir, nodePackage, nodeVersion string
-	enable, noEnable, force, noDeps := false, false, false, false
+	force, noDeps := false, false
 	for i := 0; i < len(rest); i++ {
 		token := rest[i]
 		switch {
-		case token == "--enable":
-			enable = true
-		case token == "--no-enable":
-			noEnable = true
 		case token == "--force":
 			force = true
 		case token == "--no-deps":
@@ -65,38 +57,25 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 			source = token
 		}
 	}
-	if source == "" || (enable && noEnable) || (nodePackage == "") != (nodeVersion == "") {
+	if source == "" || (nodePackage == "") != (nodeVersion == "") {
 		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
-	if err := config.RequireDefaultScope(); err != nil {
-		reportPluginsError(stderr, err)
-		return exitError
-	}
-	target, err := config.ResolveProfile(flagProfile)
+	_, target, profileRoot, err := resolveScope(root, flagProfile, true)
 	if err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	globalRoot := mustAbs(root)
+	oldCfg, _ := config.Validate(mustAbs(root))
 	opts := plugins.InstallOptions{
 		Ref: ref, Subdir: subdir, Force: force,
 		NodePackage: strings.TrimSpace(nodePackage), NodeVersion: strings.TrimSpace(nodeVersion),
 		NoDeps: noDeps,
 	}
-	result, err := plugins.InstallFromURL(ctx, globalRoot, source, opts, nil)
+	result, err := plugins.InstallFromURL(ctx, profileRoot, source, opts, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
-	}
-	state := "not enabled"
-	if enable {
-		oldCfg, _ := config.Validate(globalRoot)
-		if err := setEnabledForProfile(globalRoot, target, result.Key, true); err != nil {
-			reportPluginsError(stderr, err)
-			return exitError
-		}
-		state = fmt.Sprintf("enabled for %s (%s)", target, effectForChange(globalRoot, oldCfg))
 	}
 	pin := "unpinned"
 	if result.Pinned {
@@ -112,13 +91,14 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 	if result.DepsInstalled {
 		deps = ", node deps installed"
 	}
-	fmt.Fprintf(stdout, "%s %s (%s, %s%s)\n", verb, result.Key, pin, state, deps)
+	fmt.Fprintf(stdout, "%s %s (%s, enabled for %s%s, %s)\n", verb, result.Key, pin, target, deps, effectForChange(mustAbs(root), oldCfg))
 	return exitOK
 }
 
-// updateCmd refreshes one managed install in place. Pinned installs need an
+// updateCmd refreshes one profile install in place. Pinned installs need an
 // explicit --ref; unpinned installs follow the remote HEAD.
-func updateCmd(ctx context.Context, root string, rest []string, stdout, stderr io.Writer) int {
+func updateCmd(ctx context.Context, root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
+	const usage = "usage: oswald plugins update <name> [--ref SHA] [--profile NAME]"
 	var name, ref string
 	for i := 0; i < len(rest); i++ {
 		token := rest[i]
@@ -129,11 +109,11 @@ func updateCmd(ctx context.Context, root string, rest []string, stdout, stderr i
 		case strings.HasPrefix(token, "--ref="):
 			ref = strings.TrimPrefix(token, "--ref=")
 		case strings.HasPrefix(token, "-"):
-			fmt.Fprintln(stderr, "usage: oswald plugins update <name> [--ref SHA]")
+			fmt.Fprintln(stderr, usage)
 			return exitUsage
 		default:
 			if name != "" {
-				fmt.Fprintln(stderr, "usage: oswald plugins update <name> [--ref SHA]")
+				fmt.Fprintln(stderr, usage)
 				return exitUsage
 			}
 			name = token
@@ -144,11 +124,12 @@ func updateCmd(ctx context.Context, root string, rest []string, stdout, stderr i
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", name)
 		return exitUsage
 	}
-	if err := config.RequireDefaultScope(); err != nil {
+	_, _, profileRoot, err := resolveScope(root, flagProfile, true)
+	if err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	result, err := plugins.UpdateFromURL(ctx, mustAbs(root), key, ref, nil)
+	result, err := plugins.UpdateFromURL(ctx, profileRoot, key, ref, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -161,10 +142,10 @@ func updateCmd(ctx context.Context, root string, rest []string, stdout, stderr i
 	return exitOK
 }
 
-// removeCmd drops one plugin for a target profile and deletes shared code.
-// It refuses when other profiles still reference the key. --full also removes
-// per-profile storage dirs.
+// removeCmd drops one profile plugin. By default only code/ is removed so
+// data/home logins survive; --full also removes data/.
 func removeCmd(root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
+	const usage = "usage: oswald plugins remove <name> [--full] [--profile NAME]"
 	var names []string
 	full := false
 	for _, token := range rest {
@@ -173,14 +154,14 @@ func removeCmd(root, flagProfile string, rest []string, stdout, stderr io.Writer
 			full = true
 		default:
 			if strings.HasPrefix(token, "-") {
-				fmt.Fprintln(stderr, "usage: oswald plugins remove <name> [--full] [--profile NAME]")
+				fmt.Fprintln(stderr, usage)
 				return exitUsage
 			}
 			names = append(names, token)
 		}
 	}
 	if len(names) != 1 {
-		fmt.Fprintln(stderr, "usage: oswald plugins remove <name> [--full] [--profile NAME]")
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	key := strings.ToLower(strings.TrimSpace(names[0]))
@@ -188,51 +169,49 @@ func removeCmd(root, flagProfile string, rest []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", names[0])
 		return exitUsage
 	}
-	if err := config.RequireDefaultScope(); err != nil {
-		reportPluginsError(stderr, err)
-		return exitError
-	}
-	target, err := config.ResolveProfile(flagProfile)
+	_, _, profileRoot, err := resolveScope(root, flagProfile, true)
 	if err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	globalRoot := mustAbs(root)
-	cfg, err := config.Validate(globalRoot)
-	if err != nil {
+	oldCfg, _ := config.Validate(mustAbs(root))
+	if err := clearPluginEntryForProfile(mustAbs(root), profileRoot, key); err != nil {
 		reportPluginsError(stderr, err)
 		return exitError
 	}
-	if others := referencingProfiles(cfg, target, key); len(others) > 0 {
-		fmt.Fprintf(stderr, "oswald: plugin %q is still referenced by profiles: %s\n", key, strings.Join(others, ", "))
-		return exitError
-	}
-	oldCfg := cfg
-	if err := clearPluginForProfile(globalRoot, target, key); err != nil {
-		reportPluginsError(stderr, err)
-		return exitError
-	}
-	if err := plugins.RemoveInstall(globalRoot, key); err != nil {
+	if err := plugins.RemoveInstall(profileRoot, key, full); err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	note := "directory kept"
+	note := "code removed, data kept"
 	if full {
-		for _, profileRoot := range allProfileRoots(cfg, globalRoot) {
-			_ = os.RemoveAll(filepath.Join(profileRoot, "plugins", filepath.FromSlash(key)))
-		}
-		note = "and its directory"
+		note = "code and data removed"
 	}
-	fmt.Fprintf(stdout, "removed %s %s (%s)\n", key, note, effectForChange(globalRoot, oldCfg))
+	fmt.Fprintf(stdout, "removed %s (%s, %s)\n", key, note, effectForChange(mustAbs(root), oldCfg))
 	return exitOK
 }
 
-// setEnabledForProfile adds key to enabled and drops it from disabled for one
-// profile through the mediated write path.
-func setEnabledForProfile(globalRoot, profile, key string, enable bool) error {
+// clearPluginEntryForProfile removes a plugin's entries row for one profile.
+// Missing leaves are skipped so remove is idempotent. The profile is
+// identified by root to avoid cross-profile mutation.
+func clearPluginEntryForProfile(globalRoot, profileRoot, key string) error {
 	cfg, err := config.Validate(globalRoot)
 	if err != nil {
 		return err
+	}
+	profile := "default"
+	if cfg.ProfileRoot != profileRoot {
+		found := ""
+		for name, pc := range cfg.Profiles {
+			if pc != nil && pc.ProfileRoot == profileRoot {
+				found = name
+				break
+			}
+		}
+		if found == "" {
+			return fmt.Errorf("unknown profile")
+		}
+		profile = found
 	}
 	var profileCfg *config.Config
 	if profile == "default" {
@@ -242,67 +221,6 @@ func setEnabledForProfile(globalRoot, profile, key string, enable bool) error {
 		if profileCfg == nil {
 			return fmt.Errorf("unknown profile %q", profile)
 		}
-	}
-	enabled := append([]string(nil), profileCfg.PluginEnabled...)
-	disabled := append([]string(nil), profileCfg.PluginDisabled...)
-	if enable {
-		seen := map[string]bool{}
-		for _, existing := range enabled {
-			seen[existing] = true
-		}
-		if !seen[key] {
-			enabled = append(enabled, key)
-		}
-		disabled = filterOut(disabled, key)
-	} else {
-		enabled = filterOut(enabled, key)
-		seen := map[string]bool{}
-		for _, denied := range disabled {
-			seen[denied] = true
-		}
-		if !seen[key] {
-			disabled = append(disabled, key)
-		}
-	}
-	sort.Strings(enabled)
-	sort.Strings(disabled)
-	if err := config.SetConfigValue(globalRoot, profile, []string{"plugins", "enabled"}, encodeStringList(enabled)); err != nil {
-		return err
-	}
-	return config.SetConfigValue(globalRoot, profile, []string{"plugins", "disabled"}, encodeStringList(disabled))
-}
-
-func filterOut(values []string, drop string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if value != drop {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
-// clearPluginForProfile removes a key from enabled, disabled, and entries for
-// one profile. Missing leaves are skipped so remove is idempotent.
-func clearPluginForProfile(globalRoot, profile, key string) error {
-	cfg, err := config.Validate(globalRoot)
-	if err != nil {
-		return err
-	}
-	var profileCfg *config.Config
-	if profile == "default" {
-		profileCfg = cfg
-	} else {
-		profileCfg = cfg.Profiles[profile]
-		if profileCfg == nil {
-			return fmt.Errorf("unknown profile %q", profile)
-		}
-	}
-	if err := config.SetConfigValue(globalRoot, profile, []string{"plugins", "enabled"}, encodeStringList(filterOut(profileCfg.PluginEnabled, key))); err != nil {
-		return err
-	}
-	if err := config.SetConfigValue(globalRoot, profile, []string{"plugins", "disabled"}, encodeStringList(filterOut(profileCfg.PluginDisabled, key))); err != nil {
-		return err
 	}
 	if _, ok := profileCfg.PluginEntries[key]; ok {
 		if err := config.UnsetConfigValue(globalRoot, profile, []string{"plugins", "entries", key}); err != nil {
@@ -310,52 +228,6 @@ func clearPluginForProfile(globalRoot, profile, key string) error {
 		}
 	}
 	return nil
-}
-
-// referencingProfiles lists profiles other than target whose enabled list or
-// entries reference key.
-func referencingProfiles(cfg *config.Config, target, key string) []string {
-	var out []string
-	check := func(name string, profileCfg *config.Config) {
-		if name == target || profileCfg == nil {
-			return
-		}
-		for _, enabled := range profileCfg.PluginEnabled {
-			if enabled == key {
-				out = append(out, name)
-				return
-			}
-		}
-		if _, ok := profileCfg.PluginEntries[key]; ok {
-			out = append(out, name)
-		}
-	}
-	check("default", cfg)
-	names := make([]string, 0, len(cfg.Profiles))
-	for name := range cfg.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		check(name, cfg.Profiles[name])
-	}
-	return out
-}
-
-// allProfileRoots returns default plus named profile roots for storage sweeps.
-func allProfileRoots(cfg *config.Config, globalRoot string) []string {
-	roots := []string{globalRoot}
-	names := make([]string, 0, len(cfg.Profiles))
-	for name := range cfg.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if cfg.Profiles[name] != nil && cfg.Profiles[name].ProfileRoot != "" {
-			roots = append(roots, cfg.Profiles[name].ProfileRoot)
-		}
-	}
-	return roots
 }
 
 func shortSHA(revision string) string {

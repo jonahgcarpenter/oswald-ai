@@ -100,6 +100,23 @@ func TestParseFrontmatterRequiredEnv(t *testing.T) {
 	}
 }
 
+func TestParseFrontmatterIgnoresForeignHarnessFields(t *testing.T) {
+	content := "---\nname: shipped\ndescription: Shipped skill\nversion: 1.0\nwhen_to_use: Use when shipping\nconfig:\n  path: ~/data\nautoinvoke: false\nblueprint:\n  schedule: \"0 8 * * *\"\nuser_invocable: false\nallowed_tools: terminal\n---\nbody\n"
+	front, body, ok := parseFrontmatter(content)
+	if !ok {
+		t.Fatal("expected ok parse")
+	}
+	if front.name != "shipped" || front.description != "Shipped skill" || front.version != "1.0" {
+		t.Fatalf("known keys lost: %+v", front)
+	}
+	if len(front.requiredEnv) != 0 {
+		t.Fatalf("foreign fields leaked env: %+v", front)
+	}
+	if body != "body" {
+		t.Fatalf("unexpected body %q", body)
+	}
+}
+
 func TestFallbackDescriptionSkipsHeadings(t *testing.T) {
 	if got := fallbackDescription("# Title\n\n\nFirst real line.\n"); got != "First real line." {
 		t.Fatalf("unexpected %q", got)

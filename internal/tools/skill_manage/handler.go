@@ -22,7 +22,7 @@ func NewHandler(profileRoot string) func(context.Context, map[string]interface{}
 	return NewHandlerWithPlugins(profileRoot, nil)
 }
 
-// NewHandlerWithPlugins binds the managed tree plus read-only bundled plugin
+// NewHandlerWithPlugins binds the managed tree plus read-only installed plugin
 // skills roots. Plugin skills load under "<key>/<load name>" and reject
 // create/update; view works unchanged, including required_env registration.
 func NewHandlerWithPlugins(profileRoot string, pluginSkills []skills.PluginRoot) func(context.Context, map[string]interface{}) (governance.Result, error) {
@@ -144,7 +144,7 @@ func view(store *skills.Store, profileRoot string, pluginSkills []skills.PluginR
 	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n") + refusedNote, Outcome: governance.OutcomeProductive}, nil
 }
 
-// pluginRuntimeNote orients the model for a bundled plugin skill view: where
+// pluginRuntimeNote orients the model for an installed plugin skill view: where
 // the sidecar binary lives, which HOME its commands run under, and that repo
 // install guides written for other agent systems do not apply here. Profile
 // skills (empty source) and supporting-file reads get no note.
@@ -167,7 +167,7 @@ func pluginRuntimeNote(profileRoot string, pluginSkills []skills.PluginRoot, sou
 	sb.WriteString(" Its CLI lives under " + filepath.Join(filepath.Dir(skillsDir), "node_modules", ".bin") + ";")
 	sb.WriteString(" add that directory to PATH for terminal calls instead of installing anything.")
 	if strings.TrimSpace(profileRoot) != "" {
-		sb.WriteString(" Run its commands with HOME set to " + filepath.Join(profileRoot, "plugins", filepath.FromSlash(source), "home") + ";")
+		sb.WriteString(" Run its commands with HOME set to " + filepath.Join(profileRoot, "plugins", filepath.FromSlash(source), "data", "home") + ";")
 		sb.WriteString(" credentials live in that home's config.")
 	}
 	sb.WriteString(" Setup guides in the repo written for other agent systems do not apply here.")

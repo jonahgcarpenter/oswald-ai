@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
+	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
@@ -180,30 +181,19 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 	}
 }
 
-// PluginSkillRoots collects read-only bundled skills dirs for enabled plugins.
-// Disabled entries never bind. Missing skills dirs bind harmlessly: the scan
-// reads them as empty. Shared with the agent prompt index so the tool catalog
-// and the system prompt resolve the same visible set.
+// PluginSkillRoots collects read-only bundled skills dirs for installed
+// profile plugins. Presence means enabled. Missing skills dirs bind
+// harmlessly: the scan reads them as empty. Shared with the agent prompt
+// index so the tool catalog and the system prompt resolve the same visible set.
 func PluginSkillRoots(cfg *config.Config) []skills.PluginRoot {
-	globalRoot, err := config.GlobalRootForProfile(cfg.ProfileRoot, cfg.ProfileName)
-	if err != nil {
+	if cfg == nil || strings.TrimSpace(cfg.ProfileRoot) == "" {
 		return nil
 	}
-	keys := append([]string(nil), cfg.PluginEnabled...)
-	sort.Strings(keys)
+	manifests := plugins.ScanProfilePlugins(cfg.ProfileRoot)
+	sort.Slice(manifests, func(i, j int) bool { return manifests[i].Key < manifests[j].Key })
 	var out []skills.PluginRoot
-	for _, key := range keys {
-		blocked := false
-		for _, denied := range cfg.PluginDisabled {
-			if denied == key {
-				blocked = true
-				break
-			}
-		}
-		if blocked {
-			continue
-		}
-		out = append(out, skills.PluginRoot{Key: key, Dir: filepath.Join(globalRoot, "plugins-available", filepath.FromSlash(key), "skills")})
+	for _, m := range manifests {
+		out = append(out, skills.PluginRoot{Key: m.Key, Dir: filepath.Join(plugins.PluginCodeDir(cfg.ProfileRoot, m.Key), "skills")})
 	}
 	return out
 }

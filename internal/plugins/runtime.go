@@ -5,71 +5,58 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
-// UserPluginsDir returns the shared install root for one global root:
-// <globalRoot>/plugins-available/<name>/plugin.yaml. Code is shared; enablement
-// stays per-profile via config.
-func UserPluginsDir(globalRoot string) string {
-	return filepath.Join(globalRoot, "plugins-available")
+// ProfilePluginsDir returns the per-profile install root:
+// <profileRoot>/plugins/<name>/{code,data}. Presence means enabled.
+func ProfilePluginsDir(profileRoot string) string {
+	return filepath.Join(profileRoot, "plugins")
+}
+
+// PluginCodeDir returns the immutable install tree for one profile plugin:
+// <profileRoot>/plugins/<name>/code. Code updates replace this tree only.
+func PluginCodeDir(profileRoot, plugin string) string {
+	return filepath.Join(ProfilePluginsDir(profileRoot), filepath.FromSlash(plugin), "code")
+}
+
+// PluginDataDir returns the mutable runtime tree for one profile plugin:
+// <profileRoot>/plugins/<name>/data. HOME and scratch live here and are
+// never touched by install or update.
+func PluginDataDir(profileRoot, plugin string) string {
+	return filepath.Join(ProfilePluginsDir(profileRoot), filepath.FromSlash(plugin), "data")
 }
 
 // RepairProfile ensures the per-profile plugins parent exists owner-only.
-// Per-plugin dirs are created on demand by StorageRoot. It never migrates or
-// deletes operator data.
+// Per-plugin dirs are created on demand. It never migrates or deletes
+// operator data.
 func RepairProfile(profileRoot string) {
-	dir := filepath.Join(profileRoot, "plugins")
+	dir := ProfilePluginsDir(profileRoot)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return
 	}
 	_ = os.Chmod(dir, 0700)
 }
 
-// LoadEnabledFromConfig discovers shared + opt-in project plugins and enables
-// those listed in cfg.PluginEnabled (unless disabled). Missing requires_env
-// entries fail closed for that plugin only with a recorded error.
-func (m *Manager) LoadEnabledFromConfig(cfg *config.Config, globalRoot string) {
-	if cfg == nil {
-		return
-	}
-	userDir := ""
-	if globalRoot != "" {
-		userDir = UserPluginsDir(globalRoot)
-	}
-	projectDir := ""
-	projectEnabled := false
-	if os.Getenv("OSWALD_ENABLE_PROJECT_PLUGINS") == "1" {
-		if cwd, err := os.Getwd(); err == nil {
-			projectDir = filepath.Join(cwd, ".oswald", "plugins")
-			projectEnabled = true
-		}
-	}
-	manifests := CollectManifests("", userDir, projectDir, projectEnabled)
-	winners := ResolveWinners(manifests)
+// LoadFromProfile discovers profile-local plugins and enables every present
+// one whose requires_env is satisfied. Missing variables fail closed for
+// that plugin only with a recorded error.
+func (m *Manager) LoadFromProfile(profileRoot string) {
+	winners := ScanProfileWinners(profileRoot)
 	m.Discover(winners)
-	ordered, err := ResolveLoadOrder(winners, cfg.PluginEnabled)
+	keys := make([]string, 0, len(winners))
+	for key := range winners {
+		keys = append(keys, key)
+	}
+	ordered, err := ResolveLoadOrder(winners, keys)
 	if err != nil {
 		m.log.Warn("plugin.manager.order_failed", "plugin dependency order failed", config.F("profile", m.profile))
 		return
 	}
 	for _, key := range ordered {
-		// Disabled always wins; config validation already rejects both-lists,
-		// but runtime re-checks for defense in depth.
-		blocked := false
-		for _, denied := range cfg.PluginDisabled {
-			if denied == key {
-				blocked = true
-				break
-			}
-		}
-		if blocked {
-			continue
-		}
 		loaded, ok := m.plugins[key]
 		if !ok {
 			continue
@@ -77,8 +64,6 @@ func (m *Manager) LoadEnabledFromConfig(cfg *config.Config, globalRoot string) {
 		missing := false
 		for _, variable := range loaded.Manifest.RequiresEnv {
 			if _, ok := os.LookupEnv(variable); !ok {
-				// Also allow dotenv-resolved values via process env only;
-				// config interpolation already fails closed for ${VAR} refs.
 				missing = true
 				break
 			}
@@ -92,7 +77,12 @@ func (m *Manager) LoadEnabledFromConfig(cfg *config.Config, globalRoot string) {
 			m.log.Warn("plugin.manager.missing_env", "plugin missing required environment", config.F("plugin", loaded.Manifest.Name), config.F("profile", m.profile))
 			continue
 		}
-		_ = m.SetEnabled(key, true)
+		m.mu.Lock()
+		loaded.Enabled = true
+		loaded.Error = ""
+		m.plugins[key] = loaded
+		m.mu.Unlock()
+		m.log.Debug("plugin.manager.enabled", "enabled profile plugin", config.F("plugin", key), config.F("profile", m.profile))
 	}
 }
 
@@ -166,9 +156,4 @@ func (m *Manager) RegisterIntoRegistry(reg *registry.Registry, allowOverride fun
 		}
 	}
 	return nil
-}
-
-// ProjectPluginsEnabled reports whether opt-in project-local plugins load.
-func ProjectPluginsEnabled() bool {
-	return strings.TrimSpace(os.Getenv("OSWALD_ENABLE_PROJECT_PLUGINS")) == "1"
 }

@@ -22,17 +22,21 @@ const (
 	maxExecOutput      = 100 << 10
 )
 
-// ExecPluginBinary runs one installed plugin binary for a profile. The child
+// ExecPluginBinary runs one profile-installed plugin binary. The child
 // gets a fixed base (PATH with the server-resolved node dir, locale, scratch
 // TMPDIR), the profile's passthrough allowlist resolved against the profile
-// dotenv scope, and HOME pointed at the per-profile plugin home so CLIs that
-// persist config files land on the PVC instead of the ephemeral OS home.
+// dotenv scope, and HOME pointed at the per-profile plugin data home so CLIs
+// that persist config files land on the persisted volume.
 // Stdin is closed: interactive prompts fail closed, so callers pass flags.
-func ExecPluginBinary(ctx context.Context, globalRoot, profileRoot, key, bin string, args []string, timeoutSecs int, log *config.Logger) (string, error) {
+// Presence means enabled: callers verify the plugin directory exists.
+func ExecPluginBinary(ctx context.Context, profileRoot, key, bin string, args []string, timeoutSecs int, log *config.Logger) (string, error) {
 	if !ValidPluginKey(key) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	binary, err := NodeBinPath(globalRoot, key, bin)
+	if strings.TrimSpace(profileRoot) == "" {
+		return "", fmt.Errorf("plugin home is unavailable")
+	}
+	binary, err := NodeBinPath(profileRoot, key, bin)
 	if err != nil {
 		return "", err
 	}
@@ -97,7 +101,8 @@ func ExecPluginBinary(ctx context.Context, globalRoot, profileRoot, key, bin str
 }
 
 // StorageRootForProfile resolves the per-profile plugin data dir without a
-// Manager, creating it owner-only on first use.
+// Manager, creating it owner-only on first use. Code lives in the sibling
+// code/ tree and is never touched here.
 func StorageRootForProfile(profileRoot, plugin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
@@ -105,7 +110,7 @@ func StorageRootForProfile(profileRoot, plugin string) (string, error) {
 	if strings.TrimSpace(profileRoot) == "" {
 		return "", fmt.Errorf("plugin home is unavailable")
 	}
-	root := filepath.Join(profileRoot, "plugins", filepath.FromSlash(plugin))
+	root := PluginDataDir(profileRoot, plugin)
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", fmt.Errorf("create plugin storage: %w", err)
 	}

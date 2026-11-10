@@ -29,8 +29,8 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   `create` (slug-validated new `SKILL.md`, or `file_path` supporting file in an existing
   skill), `update`/`remove` (supporting-file shapes via `file_path`; updates keep exact
   unique `old_text` and never bump `version:`, `remove` never takes `SKILL.md` itself;
-  plugin skills read-only for every write shape). Bundled plugin skill views carry a plugin-runtime footer (sidecar
-  binary dir, per-profile home, other-systems-docs disclaimer); profile skills and
+  plugin skills read-only for every write shape). Installed plugin skill views carry a plugin-runtime footer (sidecar
+  binary dir, per-profile data/home, other-systems-docs disclaimer); profile skills and
   supporting-file reads carry none. Unknown arguments rejected; authenticated principal required.
   Metadata-only history with hashed bodies: never searchable.
 - `session_search` — full searchable history with four inferred shapes: `query` (FTS5 discovery,

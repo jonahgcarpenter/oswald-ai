@@ -235,11 +235,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		shutdownClosers = append(shutdownClosers, registry.Close)
 		pluginManager := plugins.NewManager(profile.ProfileRoot, name, rootLog)
-		if globalRoot, err := config.GlobalRootForProfile(profile.ProfileRoot, name); err == nil {
-			pluginManager.LoadEnabledFromConfig(profile, globalRoot)
-		} else {
-			pluginManager.LoadEnabledFromConfig(profile, cfg.ProfileRoot)
-		}
+		pluginManager.LoadFromProfile(profile.ProfileRoot)
 		if err := pluginManager.RegisterIntoRegistry(registry, func(plugin string) bool {
 			entry, ok := profile.PluginEntries[plugin]
 			return ok && entry.AllowToolOverride

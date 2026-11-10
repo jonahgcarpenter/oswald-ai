@@ -5,13 +5,15 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	pluginspkg "github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	skillpkg "github.com/jonahgcarpenter/oswald-ai/internal/skills"
 )
 
 // listCmd prints one line per installed skill: load name, category, and the
-// first-line description. Bundled plugin skills (read-through for enabled
+// first-line description. Installed plugin skills (read-through for present
 // plugins) are marked with their plugin key.
 func listCmd(root, flagProfile string, stdout, stderr io.Writer) int {
 	name, profileRoot, err := resolveScope(root, flagProfile, false)
@@ -47,8 +49,9 @@ type bundledSkill struct {
 	Source      string
 }
 
-// bundledSkills lists read-through skills from enabled plugins for the
-// profile. A broken config never blocks the profile's own skills listing.
+// bundledSkills lists read-through skills from installed profile plugins.
+// Presence means enabled. A broken config never blocks the profile's own
+// skills listing.
 func bundledSkills(globalRoot, profile string) []bundledSkill {
 	cfg, err := config.Validate(globalRoot)
 	if err != nil {
@@ -63,23 +66,14 @@ func bundledSkills(globalRoot, profile string) []bundledSkill {
 			return nil
 		}
 	}
+	if profileCfg == nil || strings.TrimSpace(profileCfg.ProfileRoot) == "" {
+		return nil
+	}
 	var out []bundledSkill
-	keys := append([]string(nil), profileCfg.PluginEnabled...)
-	sort.Strings(keys)
-	for _, key := range keys {
-		blocked := false
-		for _, denied := range profileCfg.PluginDisabled {
-			if denied == key {
-				blocked = true
-				break
-			}
-		}
-		if blocked {
-			continue
-		}
-		dir := filepath.Join(globalRoot, "plugins-available", filepath.FromSlash(key), "skills")
+	for _, m := range pluginspkg.ScanProfilePlugins(profileCfg.ProfileRoot) {
+		dir := filepath.Join(pluginspkg.PluginCodeDir(profileCfg.ProfileRoot, m.Key), "skills")
 		for _, entry := range skillpkg.ScanDir(dir) {
-			out = append(out, bundledSkill{LoadName: key + "/" + entry.LoadName, Category: entry.Category, Description: entry.Description, Source: key})
+			out = append(out, bundledSkill{LoadName: m.Key + "/" + entry.LoadName, Category: entry.Category, Description: entry.Description, Source: m.Key})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LoadName < out[j].LoadName })

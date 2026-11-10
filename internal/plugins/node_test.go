@@ -34,12 +34,12 @@ func TestValidateNodeDepsPins(t *testing.T) {
 }
 
 func TestNodeBinPathConfinement(t *testing.T) {
-	global := t.TempDir()
-	binDir := filepath.Join(global, "plugins-available", "demo", "node_modules", ".bin")
+	profile := t.TempDir()
+	binDir := filepath.Join(PluginCodeDir(profile, "demo"), "node_modules", ".bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(global, "plugins-available", "demo", "node_modules", "demo", "bin.js")
+	target := filepath.Join(PluginCodeDir(profile, "demo"), "node_modules", "demo", "bin.js")
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -50,17 +50,17 @@ func TestNodeBinPathConfinement(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	got, err := NodeBinPath(global, "demo", "demo")
+	got, err := NodeBinPath(profile, "demo", "demo")
 	if err != nil {
 		t.Fatalf("bin path: %v", err)
 	}
 	if got != target {
 		t.Fatalf("got %q want %q", got, target)
 	}
-	if _, err := NodeBinPath(global, "demo", "../escape"); err == nil {
+	if _, err := NodeBinPath(profile, "demo", "../escape"); err == nil {
 		t.Fatal("expected escape reject")
 	}
-	if _, err := NodeBinPath(global, "demo", "missing"); err == nil {
+	if _, err := NodeBinPath(profile, "demo", "missing"); err == nil {
 		t.Fatal("expected missing reject")
 	}
 }

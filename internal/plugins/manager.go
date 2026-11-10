@@ -325,13 +325,14 @@ func (m *Manager) Unload(key string) {
 	m.plugins[key] = loaded
 }
 
-// StorageRoot returns the per-plugin dir, creating it owner-only on first use.
+// StorageRoot returns the per-plugin data dir, creating it owner-only on
+// first use. Code lives in the sibling code/ tree.
 // The tree stays workspace-protected like mcp/.
 func (m *Manager) StorageRoot(plugin string) (string, error) {
 	if !ValidPluginKey(plugin) {
 		return "", fmt.Errorf("invalid plugin key")
 	}
-	root := filepath.Join(m.homePath, "plugins", filepath.FromSlash(plugin))
+	root := PluginDataDir(m.homePath, plugin)
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", fmt.Errorf("create plugin storage: %w", err)
 	}
