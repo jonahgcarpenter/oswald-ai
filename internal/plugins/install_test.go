@@ -229,6 +229,58 @@ func TestRemoveInstallKeepsData(t *testing.T) {
 	}
 }
 
+func TestUpdatePreservesData(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	profile := t.TempDir()
+	repo := filepath.Join(t.TempDir(), "plugin-repo")
+	manifest := "name: keeper\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\n"
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "plugin.yaml"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=synth", "GIT_AUTHOR_EMAIL=synth@example.com", "GIT_COMMITTER_NAME=synth", "GIT_COMMITTER_EMAIL=synth@example.com")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("add", "plugin.yaml")
+	runGit("commit", "-qm", "synthetic")
+	if _, err := InstallFromURL(t.Context(), profile, repo, InstallOptions{}, nil); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	dataHome := filepath.Join(PluginDataDir(profile, "keeper"), "home")
+	if err := os.MkdirAll(dataHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dataHome, "session.txt")
+	if err := os.WriteFile(marker, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "extra.txt"), []byte("more\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "extra.txt")
+	runGit("commit", "-qm", "synthetic two")
+	if _, err := UpdateFromURL(t.Context(), profile, "keeper", "", nil); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(PluginCodeDir(profile, "keeper"), "extra.txt")); err != nil {
+		t.Fatalf("updated code missing file: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("data not preserved across update: %v", err)
+	}
+}
+
 func TestUpdateFromLocalGitRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git unavailable")

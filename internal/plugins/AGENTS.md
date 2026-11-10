@@ -2,6 +2,21 @@
 
 Applies on top of the root `AGENTS.md` (operator-state, persisted-contract, and never-log rules).
 
+## Frozen (do not extend without operator approval)
+
+The adapter is minimal and frozen: manifest keys are exactly `name, version,
+description, entry, requires_env, capabilities, allow_tool_override,
+node_package, node_version, node_bin, manifest_version, api_version,
+requires_plugins, kind` (unknown keys reject); skill frontmatter keys are exactly
+`name, description, version, required_env` (unknown keys ignored); layout is
+exactly `<profile>/plugins/<name>/{code,data}` with presence meaning enabled.
+Explicitly unsupported, now and by design: autoinvoke/visibility flags, skill
+permissions, per-skill tool/model scoping, subagent fork, template variables,
+inline shell, blueprints/cron mapping, credential-file mounts, non-secret config
+maps, HTTP catalogs, compat-dir search, options objects, and any TS/Python
+runtime hosting. Foreign plugins needing those are converted markdown-only with
+the gap reported — the adapter does not grow to absorb them.
+
 ## Shape
 
 One `Manager` per profile (`scope_key` is the absolute profile root). Code,

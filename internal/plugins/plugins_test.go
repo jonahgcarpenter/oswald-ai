@@ -76,6 +76,23 @@ func TestValidateManifestAcceptsV1(t *testing.T) {
 	}
 }
 
+func TestParseManifestRejectsUnknownKeys(t *testing.T) {
+	for _, body := range []string{
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nwhen_to_use: ship it\n",
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nconfig:\n  path: ~/data\n",
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nblueprint:\n  schedule: \"0 8 * * *\"\n",
+		"name: demo\nversion: \"1.0\"\ndescription: synthetic test plugin\nmanifest_version: 2\napi_version: \"1\"\nautoinvoke: false\n",
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseManifestFile(dir, "profile"); err == nil {
+			t.Fatalf("unknown manifest key accepted in %q", body)
+		}
+	}
+}
+
 func TestParseManifestFileV1JobSearchShape(t *testing.T) {
 	dir := t.TempDir()
 	body := "name: job-search\nversion: \"0.9.0\"\ndescription: synthetic job search plugin\nmanifest_version: 1\nkind: standalone\n"

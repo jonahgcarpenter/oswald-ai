@@ -6,9 +6,10 @@ Applies on top of the root `AGENTS.md` (operator-state and never-log-rules).
 
 One root feeds one catalog: the profile-managed `<profileRoot>/skills/` tree, scanned
 fresh on every call — no cache, so tool edits are visible on the next turn with
-nothing to invalidate. `frontmatter.go` parses the `SKILL.md` subset (`name`,
-`description`, `version`, `platforms`, `prerequisites`, `required_env`, tags;
-unknown keys ignored), `scan.go` walks it (dot-dirs skipped, directory symlinks unfollowed, files over
+nothing to invalidate. `frontmatter.go` parses the frozen `SKILL.md` subset (`name`,
+`description`, `version`, `required_env`; unknown keys ignored — including
+`platforms`, `prerequisites`, `tags`, `metadata`, `when_to_use`, `config`,
+`blueprint`, and any foreign-harness fields), `scan.go` walks it (dot-dirs skipped, directory symlinks unfollowed, files over
 1 MiB skipped, malformed/unclosed fences skipped — a scan never fails for one file),
 `catalog.go` resolves it, `index.go` renders the prompt block, `read.go` loads
 bodies, `store.go` binds roots and owns create/update. `hub.go` owns the install
@@ -19,8 +20,8 @@ adapter lives in `internal/tools/skill_manage/`; this package never imports it.
 
 ## Catalog contract
 
-`resolveCatalog` filters by the `platforms` gate (empty admits everything, otherwise
-exact case-insensitive gateway match), then settles each declared name: unique names
+`resolveCatalog` performs no platform gating (the platform argument is accepted
+but ignored: every skill is visible on every gateway), then settles each declared name: unique names
 load by name, same-named copies load by exact path relative to the skills root
 (`a/one`), and byte repeats in one directory collapse. Display category is the
 parent directory relative to the root (`general` at top level); output sorts by
@@ -29,7 +30,7 @@ tier: everything listed is loadable.
 
 ## Budgets (review every change against these)
 
-Descriptions clip to 200 runes, the rendered `## Skills` index caps at 6,000 runes
+Descriptions clip to 60 characters, the rendered `## Skills` index caps at 6,000 runes
 (head coaching preserved, rows trimmed tail-first, `""` when empty), bodies and
 supporting files cap at 16,000 runes with a truncation marker, at most 64
 supporting files listed from `references/`, `templates/`, `scripts/`, `assets/`.
@@ -45,6 +46,6 @@ names; `Update` needs an exact unique `old_text` match and keeps file permission
 ## Tests
 
 Synthetic temp dirs only, never live profiles. Cover frontmatter fallbacks (dir-name
-name, first-body-line description), scan skips, precedence/relpath/platform/category
+name, first-body-line description) and unknown-key tolerance, scan skips, relpath/category
 resolution, index bounds and coaching presence, view matching/ambiguity/confinement,
 and create/update validation — not rendered-prompt snapshots.
