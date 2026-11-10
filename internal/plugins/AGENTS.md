@@ -105,7 +105,10 @@ no-op that repairs a missing sidecar. Reads (`list`, `info`, `bin-path`) may nam
 another profile; mutations stay fenced to the calling scope
 (`OSWALD_HOME` mismatch fails closed). Everything plugins-related is restart-classified.
 Old shared `plugins-available/` trees are orphaned and never read; operators may
-delete them by hand.
+delete them by hand. Foreign ecosystems (OpenCode, Hermes, Claude bundles) are
+not installed directly: convert first with the `plugin-convert` skill
+(`skills/plugin-convert/`, markdown-only, runtimes never transfer), then
+`oswald plugins install` the staged source.
 
 `plugin.yaml` shape (v1 or v2 contract, unknown keys rejected):
 
