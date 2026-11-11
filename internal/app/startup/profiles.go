@@ -129,6 +129,22 @@ type cronGateway interface {
 	CronGatewayName() string
 }
 
+// wireDelegateSenders installs live gateway senders on every delegation
+// manager so background follow-ups can push to the origin conversation.
+func wireDelegateSenders(delegates []*managerdelegate.Manager, gateways []gateway.Service) {
+	senders := make(map[string]cron.Sender)
+	for _, service := range gateways {
+		if cg, ok := service.(cronGateway); ok {
+			senders[cg.CronGatewayName()] = cg.CronSender()
+		}
+	}
+	for _, dmgr := range delegates {
+		if dmgr != nil {
+			dmgr.SetSenders(senders)
+		}
+	}
+}
+
 // wireCronDispatchers attaches live agent dispatch and gateway senders to
 // every profile ticker after the broker and gateways exist.
 func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cronRunners map[string]*cron.Runner, stores map[string]*memory.ProfileStore, requestBroker *broker.Broker, gateways []gateway.Service, tickers []*cron.Ticker) {
@@ -412,6 +428,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		return &Error{Event: "app.gateways.init_failed", Message: "failed to initialize gateways", Cause: err}
 	}
 	wireCronDispatchers(names, cronStores, cronRunners, stores, requestBroker, gateways, cronTickers)
+	wireDelegateSenders(delegates, gateways)
 	for _, service := range gateways {
 		go func(service gateway.Service) {
 			if err := service.Start(requestBroker); err != nil {

@@ -326,6 +326,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// narrow it further) so a child can never exceed what the parent may
 	// call. The delegate manager reads this scope from the tool context.
 	ctx = requestctx.WithParentToolScope(ctx, request.EnabledToolsets, request.MCPServers)
+	// Background delivery routes its follow-up turn to the origin
+	// conversation; ownership still comes from the principal.
+	ctx = requestctx.WithTransportRouting(ctx, requestctx.TransportRouting{
+		ChatID: request.ChatID, ChatLabel: request.ChatLabel,
+		ChatDisplayName: request.ChatDisplayName, TransportProfile: request.TransportProfile,
+		PlatformMessage: request.PlatformMessageID, IsDirect: request.IsDirect,
+	})
 	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
 	// Parked approval asks surface while the tool call blocks: keep a
 	// gateway-provided asker (real message on transports without live

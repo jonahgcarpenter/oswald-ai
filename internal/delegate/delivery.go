@@ -84,6 +84,13 @@ func (m *Manager) deliverDue(ctx context.Context) {
 			_ = m.store.FailDelivery(ctx, row.ID, row.DeliveryAttempts+1, nowUnix())
 			continue
 		}
+		principal := originPrincipal(env)
+		// Defer while the origin lane is busy: the delivery turn snapshots
+		// persisted history, so running it mid-turn would miss the in-flight
+		// foreground messages. The next sweep retries after the lane drains.
+		if m.broker != nil && m.broker.LaneBusy(principal, env.SessionKey) {
+			continue
+		}
 		token := "delivery-" + row.ID + "-" + fmt.Sprint(row.DeliveryAttempts)
 		claimed, err := m.store.ClaimDelivery(ctx, row.ID, token, nowUnix())
 		if err != nil || !claimed {
@@ -99,13 +106,21 @@ func (m *Manager) deliverDue(ctx context.Context) {
 			continue
 		}
 		text := deliveryTurn(row.ID, firstLine(env.Goal), result)
+		respCh := make(chan broker.Result, 1)
 		err = m.broker.Submit(&broker.Request{
-			RequestID:   config.NewRequestID(),
-			Principal:   originPrincipal(env),
-			DisplayName: env.DisplayName,
-			SessionKey:  env.SessionKey,
-			ForceQueue:  true,
-			Prompt:      text,
+			RequestID:         config.NewRequestID(),
+			Principal:         principal,
+			DisplayName:       env.DisplayName,
+			SessionKey:        env.SessionKey,
+			ChatID:            env.ChatID,
+			ChatLabel:         env.ChatLabel,
+			ChatDisplayName:   env.ChatName,
+			TransportProfile:  env.Transport,
+			PlatformMessageID: env.PlatformMsg,
+			IsDirect:          env.IsDirect,
+			ForceQueue:        true,
+			Prompt:            text,
+			ResponseChan:      respCh,
 		})
 		if err != nil {
 			_ = m.store.NoteDeliveryAttempt(ctx, row.ID, row.DeliveryAttempts+1, nowUnix())
@@ -116,7 +131,53 @@ func (m *Manager) deliverDue(ctx context.Context) {
 			continue
 		}
 		_ = m.store.MarkDelivered(ctx, row.ID, nowUnix())
+		m.watchDelivery(row.ID, env, respCh)
 	}
+}
+
+// watchDelivery waits for the brokered follow-up turn, pushes its text to the
+// origin conversation, and marks the session turn delivered. The ledger row is
+// already marked delivered once handed to the broker; this only completes the
+// user-visible send that background delivery previously dropped.
+func (m *Manager) watchDelivery(unitID string, env dispatchEnvelope, respCh <-chan broker.Result) {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		var result broker.Result
+		select {
+		case result = <-respCh:
+		case <-time.After(10 * time.Minute):
+			m.log.Warn("delegate.delivery.send_timeout", "background follow-up timed out waiting for agent result", config.F("delegation_id", unitID), config.F("status", "degraded"))
+			return
+		}
+		if result.Err != nil || result.Response == nil {
+			m.log.Debug("delegate.delivery.no_result", "background follow-up produced no result", config.F("delegation_id", unitID), config.F("status", "degraded"))
+			return
+		}
+		turnID := result.Response.SourceTurnID
+		owner := env.Principal.UserID
+		text := result.Response.Response
+		if result.Response.Error != "" && text == "" {
+			text = result.Response.Error
+		}
+		sender, ok := m.senderFor(env.Principal.Gateway)
+		if !ok {
+			m.log.Debug("delegate.delivery.no_sender", "no transport sender for background follow-up", config.F("delegation_id", unitID), config.F("status", "degraded"))
+			return
+		}
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := sender.Deliver(sendCtx, owner, env.SessionKey, text, result.Response.Attachments); err != nil {
+			m.log.Warn("delegate.delivery.send_failed", "failed to send background follow-up", config.F("delegation_id", unitID), config.F("status", "degraded"), config.ErrorField(err))
+			if turnID > 0 {
+				_ = m.store.MarkSessionTurnDeliveryFailed(context.Background(), owner, turnID)
+			}
+			return
+		}
+		if turnID > 0 {
+			_ = m.store.MarkSessionTurnDelivered(context.Background(), owner, turnID)
+		}
+	}()
 }
 
 func originPrincipal(env dispatchEnvelope) identity.Principal {

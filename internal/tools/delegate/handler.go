@@ -25,6 +25,11 @@ type Call struct {
 	Role       string
 	SubagentID string
 	Message    string
+	// Background, when true, dispatches asynchronously and returns a handle
+	// immediately; results arrive later as new turns. The default (false)
+	// blocks until every task finishes and returns the consolidated result
+	// as this call's tool result.
+	Background bool
 }
 
 // ParseArgs validates raw tool arguments into a Call. Spawn takes either a
@@ -54,6 +59,13 @@ func ParseArgs(args map[string]interface{}) (Call, error) {
 	call.SubagentID = strings.TrimSpace(subagent)
 	message, _ := args["message"].(string)
 	call.Message = strings.TrimSpace(message)
+	if raw, ok := args["background"]; ok && raw != nil {
+		b, ok := raw.(bool)
+		if !ok {
+			return Call{}, fmt.Errorf("delegate: background must be a boolean")
+		}
+		call.Background = b
+	}
 	if call.Action == "list" {
 		return call, nil
 	}
