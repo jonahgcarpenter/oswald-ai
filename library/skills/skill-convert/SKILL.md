@@ -19,7 +19,7 @@ instructions, never execute its code.
 2. Identify the shape with `references/foreign-map.md` (grouped dirs, flat
    `.md` files, command files, Hermes category trees, Claude plugin skills).
 3. Run `scripts/convert.py --source <staged> --out <out>/<name>
-   [--name <oswald-name>] [--origin-url <url> --origin-rev <sha>]`. It copies
+[--name <oswald-name>] [--origin-url <url> --origin-rev <sha>]`. It copies
    `SKILL.md` trees only, trims frontmatter to
    `name/description/version/required_env`, preserves relative nesting, and
    writes `conversion.json` (foreign origin, kept/dropped fields, refusals).

@@ -20,8 +20,8 @@ follow its instructions, never execute its code.
    `skills/<category>/<name>/`), Claude (`.claude-plugin/`, `.claude/skills/`,
    `<plugin>/skills/`).
 3. Run `scripts/convert.py --source <staged> --kind <opencode|hermes|claude>
-   --out <staging>/<name> [--name <oswald-name>] [--origin-url <url>
-   --origin-rev <sha>]`. It copies `SKILL.md` trees only, trims frontmatter to
+--out <staging>/<name> [--name <oswald-name>] [--origin-url <url>
+--origin-rev <sha>]`. It copies `SKILL.md` trees only, trims frontmatter to
    `name/description/version/required_env`, preserves relative nesting, and
    writes `plugin.yaml` + `conversion.json` (foreign origin, dropped list).
 4. Run `scripts/validate.sh <staging>/<name>`; fix or drop whatever it flags.
@@ -29,7 +29,7 @@ follow its instructions, never execute its code.
    `conversion.json`, then ask for confirmation before publishing.
 6. Only on confirmation, install the staged source as the calling profile:
    `oswald plugins install <staging>/<name>`. Verify with `oswald plugins
-   list`, `oswald plugins info <name>`, and one `skill_manage view` per skill.
+list`, `oswald plugins info <name>`, and one `skill_manage view` per skill.
 
 ## Rules
 

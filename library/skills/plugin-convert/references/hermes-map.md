@@ -13,8 +13,8 @@
 - `skills/<category>/<name>/SKILL.md` (+ `scripts/`, `references/`).
 - Frontmatter: `name`, `description`, `version`, `author`, `license`,
   `platforms: [macos|linux|windows]`, `metadata.hermes.{tags, related_skills,
-  requires_toolsets, requires_tools, fallback_for_toolsets, fallback_for_tools,
-  config[], blueprint}`, `required_environment_variables[]` (each with
+requires_toolsets, requires_tools, fallback_for_toolsets, fallback_for_tools,
+config[], blueprint}`, `required_environment_variables[]` (each with
   `name`, `prompt`, `help`, `required_for`), `required_credential_files[]`.
 
 ## Skills out

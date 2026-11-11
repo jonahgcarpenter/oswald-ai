@@ -18,9 +18,9 @@ func converterPaths(t *testing.T) (script, stage, validate string) {
 		t.Fatal("runtime caller unavailable")
 	}
 	root := filepath.Dir(filepath.Dir(filepath.Dir(file)))
-	script = filepath.Join(root, "skills", "skill-convert", "scripts", "convert.py")
-	stage = filepath.Join(root, "skills", "skill-convert", "scripts", "stage.sh")
-	validate = filepath.Join(root, "skills", "skill-convert", "scripts", "validate.sh")
+	script = filepath.Join(root, "library", "skills", "skill-convert", "scripts", "convert.py")
+	stage = filepath.Join(root, "library", "skills", "skill-convert", "scripts", "stage.sh")
+	validate = filepath.Join(root, "library", "skills", "skill-convert", "scripts", "validate.sh")
 	for _, p := range []string{script, stage, validate} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("converter script missing: %s", p)

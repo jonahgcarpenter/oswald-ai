@@ -18,9 +18,11 @@ surface: URL parsing (git shorthand/URLs, local paths), quarantine staging with
 manifest validation, atomic publish, and the per-profile `skills.lock.json`
 provenance sidecar. The model-facing tool
 adapter lives in `internal/tools/skill_manage/`; this package never imports it.
-Seed library content lives in `library/skills/` with `library/skills-catalog.json`
-(one installable bundle per directory; foreign skills arrive via the
-`skill-convert` skill, never by hand-copying).
+`library/skills/<name>/` is a static holding area for Oswald-native skill
+sources (one installable bundle per directory; foreign skills arrive via the
+`library/skills/skill-convert` skill, never by hand-copying). Nothing
+auto-installs or seeds; the operator tells the agent to run
+`oswald skills install library/skills/<name>` explicitly.
 
 ## Catalog contract
 
