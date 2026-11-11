@@ -41,7 +41,10 @@ status codes — never names or IDs.
 iMessage group threads resolve the newest conversational message strictly before the incoming
 reply in the same chat/thread — including the root when no earlier reply exists — and neither
 cached authorship nor webhook `replyToGuid` associations override that chronological choice. An
-unmentioned group reply invokes only when that predecessor is an eligible bot message. Failed
+unmentioned group reply invokes only when that predecessor is an eligible bot message. The bot
+runs on a dedicated Apple ID — the only supported deployment — so a clean self-authored
+(`isFromMe`) record is bot authorship; the outbound GUID cache is a fast-path accelerator, never
+proof. Failed
 thread lookups expose no fallback root context: chronological continuation, not exact UI-target
 proof. New stored turns keep `[Replying to ...]` enrichment and `[Image attached at: ...]`
 annotations alongside incoming text, so history retains what was answered; quoted text stays

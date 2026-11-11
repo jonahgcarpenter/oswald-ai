@@ -53,9 +53,11 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 		}
 	}
 	for _, attachment := range attachments {
-		if err := r.gateway.sendCommandAttachment(r.chatGUID, r.selectedMessageGUID, attachment); err != nil {
+		guid, err := r.gateway.sendCommandAttachment(r.chatGUID, r.selectedMessageGUID, attachment)
+		if err != nil {
 			return err
 		}
+		r.gateway.rememberBotMessage(guid, r.sessionKey, r.chatGUID, r.senderID, attachment.Filename)
 	}
 	return nil
 }
@@ -87,9 +89,11 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 		}
 	}
 	for _, attachment := range response.Attachments {
-		if err := r.gateway.sendCommandAttachment(r.chatGUID, r.selectedMessageGUID, attachment); err != nil {
+		guid, err := r.gateway.sendCommandAttachment(r.chatGUID, r.selectedMessageGUID, attachment)
+		if err != nil {
 			return err
 		}
+		r.gateway.rememberBotMessage(guid, r.sessionKey, r.chatGUID, r.senderID, attachment.Filename)
 	}
 	if responseText == "" {
 		r.gateway.log().Debug("gateway.response.empty", "imessage agent returned empty response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("status", "degraded"))

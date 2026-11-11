@@ -3,6 +3,7 @@ package imessage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -89,6 +90,29 @@ func attachmentLabels(attachments []attachment) []string {
 		labels = append(labels, media.AttachmentLabel(attachment.TransferName, attachment.MimeType))
 	}
 	return labels
+}
+
+// dropAttachedLabels removes labels for files that were successfully
+// attached as documents, so one file is never both attached and reported
+// unreadable. Labels are matched with the same AttachmentLabel rendering
+// both lanes use.
+func dropAttachedLabels(labels []string, docs []media.DocumentRef) []string {
+	if len(labels) == 0 || len(docs) == 0 {
+		return labels
+	}
+	attached := make(map[string]int, len(docs))
+	for _, doc := range docs {
+		attached[media.AttachmentLabel(doc.Filename, doc.MIMEType)]++
+	}
+	kept := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if attached[label] > 0 {
+			attached[label]--
+			continue
+		}
+		kept = append(kept, label)
+	}
+	return kept
 }
 
 func (g *Gateway) fetchAttachmentImage(attachment attachment, scoped ...*config.Logger) (llm.InputImage, error) {
@@ -235,19 +259,20 @@ func (g *Gateway) fetchDocumentBytes(attachment attachment) ([]byte, error) {
 	return body, nil
 }
 
-// sendCommandAttachment sends one in-memory attachment through BlueBubbles.
+// sendCommandAttachment sends one in-memory attachment through BlueBubbles
+// and returns the created message GUID for the fast-path index.
 // When selectedMessageGUID is set and the private API is available the
 // attachment is threaded under the user's message, mirroring sendTextReply.
 // A failed threaded attempt falls back to a plain top-level send so delivery
 // does not hard-fail where threading is unsupported.
-func (g *Gateway) sendCommandAttachment(chatGUID, selectedMessageGUID string, attachment commands.Attachment) error {
+func (g *Gateway) sendCommandAttachment(chatGUID, selectedMessageGUID string, attachment commands.Attachment) (string, error) {
 	if err := attachment.Validate(); err != nil {
-		return err
+		return "", err
 	}
 	threadGUID := strings.TrimSpace(selectedMessageGUID)
 	if threadGUID != "" && g.blueBubblesPrivateAPIAvailable(g.log()) {
-		if err := g.postCommandAttachment(chatGUID, threadGUID, attachment); err == nil {
-			return nil
+		if guid, err := g.postCommandAttachment(chatGUID, threadGUID, attachment); err == nil {
+			return guid, nil
 		} else {
 			g.log().Warn("gateway.send.retry", "retrying imessage attachment send without private reply fields", config.F("default_method", defaultSendMethod), config.F("status", "retry"), config.ErrorField(err))
 		}
@@ -255,12 +280,13 @@ func (g *Gateway) sendCommandAttachment(chatGUID, selectedMessageGUID string, at
 	return g.postCommandAttachment(chatGUID, "", attachment)
 }
 
-// postCommandAttachment posts one attachment payload. A non-empty
-// selectedMessageGUID threads the send via the private API.
-func (g *Gateway) postCommandAttachment(chatGUID, selectedMessageGUID string, attachment commands.Attachment) error {
+// postCommandAttachment posts one attachment payload and returns the created
+// message GUID. A non-empty selectedMessageGUID threads the send via the
+// private API.
+func (g *Gateway) postCommandAttachment(chatGUID, selectedMessageGUID string, attachment commands.Attachment) (string, error) {
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/attachment", g.BlueBubblesPassword)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -275,7 +301,7 @@ func (g *Gateway) postCommandAttachment(chatGUID, selectedMessageGUID string, at
 	}
 	for name, value := range fields {
 		if err := writer.WriteField(name, value); err != nil {
-			return fmt.Errorf("write BlueBubbles attachment field: %w", err)
+			return "", fmt.Errorf("write BlueBubbles attachment field: %w", err)
 		}
 	}
 	header := make(textproto.MIMEHeader)
@@ -283,26 +309,30 @@ func (g *Gateway) postCommandAttachment(chatGUID, selectedMessageGUID string, at
 	header.Set("Content-Type", attachment.MIMEType)
 	part, err := writer.CreatePart(header)
 	if err != nil {
-		return fmt.Errorf("create BlueBubbles attachment part: %w", err)
+		return "", fmt.Errorf("create BlueBubbles attachment part: %w", err)
 	}
 	if _, err := part.Write(attachment.Data); err != nil {
-		return fmt.Errorf("write BlueBubbles attachment: %w", err)
+		return "", fmt.Errorf("write BlueBubbles attachment: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("close BlueBubbles attachment payload: %w", err)
+		return "", fmt.Errorf("close BlueBubbles attachment payload: %w", err)
 	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
 	if err != nil {
-		return fmt.Errorf("build BlueBubbles attachment send request: %w", err)
+		return "", fmt.Errorf("build BlueBubbles attachment send request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := g.httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("send BlueBubbles attachment request: %w", err)
+		return "", fmt.Errorf("send BlueBubbles attachment request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("BlueBubbles attachment send failed with status %d", resp.StatusCode)
+		return "", fmt.Errorf("BlueBubbles attachment send failed with status %d", resp.StatusCode)
 	}
-	return nil
+	var result sendTextResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, replyLookupBodyLimit)).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode BlueBubbles attachment response: %w", err)
+	}
+	return result.Data.GUID, nil
 }

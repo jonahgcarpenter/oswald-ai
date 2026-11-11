@@ -178,7 +178,12 @@ func isPreviewAttachment(att attachment) bool {
 	if strings.HasSuffix(att.TransferName, ".pluginPayloadAttachment") {
 		return true
 	}
-	return strings.TrimSpace(att.MimeType) == "" && strings.HasPrefix(strings.TrimSpace(att.UTI), "dyn.")
+	// Dynamic UTIs with no declared type and no usable filename are unfurl
+	// payloads, not files: a genuine file always carries the transfer name
+	// it was sent under, even when its extension maps to no known type
+	// (e.g. an LLVM IR file reported with an empty MIME and a dyn.* UTI).
+	return strings.TrimSpace(att.MimeType) == "" && strings.HasPrefix(strings.TrimSpace(att.UTI), "dyn.") &&
+		strings.TrimSpace(att.TransferName) == ""
 }
 
 // filterRealAttachments drops link-unfurl preview payloads, keeping the URL

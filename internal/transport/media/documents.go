@@ -107,19 +107,15 @@ func SniffDocument(name, declaredMIME string, data []byte) (string, string, erro
 	return base, mime, nil
 }
 
-// DocumentContextNote renders the current-turn prompt note for one document.
-// Text documents name the file; binary formats direct the model to extract.
+// DocumentContextNote renders the current-turn prompt note for one document,
+// mirroring the image annotation: a stable cache path plus the original
+// filename. No read instructions ride along; the tool catalog owns them.
 func DocumentContextNote(doc DocumentRef) string {
 	name := strings.TrimSpace(doc.Filename)
 	if name == "" {
 		name = "document"
 	}
-	path := strings.TrimSpace(doc.Path)
-	mime := strings.ToLower(strings.TrimSpace(doc.MIMEType))
-	if strings.HasPrefix(mime, "text/") {
-		return fmt.Sprintf("[The user sent a text document: '%s'. It is saved at: %s. Read it with read_file before answering when the request involves its contents.]", name, path)
-	}
-	return fmt.Sprintf("[The user sent a document: '%s'. It is saved at: %s. Its text is not inlined (binary format). Extract the document text with read_file before answering, instead of asking the user to paste the contents.]", name, path)
+	return fmt.Sprintf("[File attached at: %s ('%s')]", strings.TrimSpace(doc.Path), name)
 }
 
 // DocumentsNote joins per-document notes for the current turn.

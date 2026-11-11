@@ -704,10 +704,12 @@ func (s *discordStreamState) deliverAttachments(attachments []media.OutputAttach
 		if s.attachmentNonce == "" {
 			s.attachmentNonce = discordNonce()
 		}
-		if _, err := s.restGateway().sendAttachmentNonce(s.stream.responder.channelID, commands.Result{Attachments: attachments[i : i+1]}, replyToID, s.attachmentNonce); err != nil {
+		id, err := s.restGateway().sendAttachmentNonce(s.stream.responder.channelID, commands.Result{Attachments: attachments[i : i+1]}, replyToID, s.attachmentNonce)
+		if err != nil {
 			s.attachmentErr = err
 			return err
 		}
+		s.rememberAttachment(id, attachments[i])
 		s.replyUsed = true
 		s.attachmentNonce = ""
 		s.attachmentCount++
@@ -816,5 +818,22 @@ func (s *discordStreamState) remember(messageID, text string) {
 	r.gateway.rememberReply(messageID, replyContext{
 		SessionKey: r.sessionKey, ChannelID: r.channelID, SenderID: r.authorID,
 		DisplayName: "Oswald", Text: text, IsFromBot: true, CreatedAt: time.Now(),
+	})
+}
+
+// rememberAttachment caches an outbound attachment message so a reply to the
+// file bubble resolves as a bot reply even when the referenced payload is
+// thin. Only filename metadata survives the send; the bytes stay server-side,
+// so enrichment reports the label as unsupported rather than re-fetching.
+func (s *discordStreamState) rememberAttachment(messageID string, attachment media.OutputAttachment) {
+	if messageID == "" {
+		return
+	}
+	r := s.stream.responder
+	r.gateway.rememberReply(messageID, replyContext{
+		SessionKey: r.sessionKey, ChannelID: r.channelID, SenderID: r.authorID,
+		DisplayName: "Oswald", Text: "",
+		Attachments: []Attachment{{Filename: attachment.Filename, ContentType: attachment.MIMEType, Size: len(attachment.Data)}},
+		IsFromBot:   true, CreatedAt: time.Now(),
 	})
 }

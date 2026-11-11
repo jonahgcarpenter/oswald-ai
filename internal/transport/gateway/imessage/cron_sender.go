@@ -115,7 +115,7 @@ func (s cronSender) DeliverMention(ctx context.Context, profile, sessionKey stri
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.gateway.sendCommandAttachment(guid, "", attachment); err != nil {
+		if _, err := s.gateway.sendCommandAttachment(guid, "", attachment); err != nil {
 			return err
 		}
 	}
@@ -169,7 +169,7 @@ func (s cronSender) Deliver(ctx context.Context, _, sessionKey, text string, att
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.gateway.sendCommandAttachment(guid, "", attachment); err != nil {
+		if _, err := s.gateway.sendCommandAttachment(guid, "", attachment); err != nil {
 			return err
 		}
 	}

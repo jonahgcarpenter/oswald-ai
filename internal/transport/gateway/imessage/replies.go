@@ -133,14 +133,10 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	if !threaded {
 		result, found = g.replyContextFromMessage(data, chatGUID), true
 		directCount = 1
-		// BlueBubbles isFromMe is true for every message sent from the
-		// operator's own Apple ID, so it cannot distinguish a bot send from
-		// an operator-device send. Require outbound-cache proof for direct
-		// bot authorship; live turns are admitted via the broker in-flight
-		// set in inbound instead.
-		if result.IsFromBot && !g.isCachedBotMessage(data.GUID, chatGUID) {
-			result.IsFromBot = false
-		}
+		// The bot runs on a dedicated Apple ID, so a clean self-authored
+		// record is bot authorship: no other device shares the ID.
+		// The outbound cache stays as a fast path only; live turns are
+		// admitted via the broker in-flight set in inbound instead.
 		if !result.IsFromBot {
 			reasonCode = "not_eligible_bot"
 		}
@@ -231,13 +227,8 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	result, found = g.replyContextFromMessage(p, chatGUID), true
 	result.IsPredecessor = true
 	predecessorCount = 1
-	// Same authorship rule as the direct path: a self-authored predecessor
-	// (isFromMe) is only a bot predecessor when the outbound cache proves
-	// the bot sent that GUID. Otherwise a user's own image or text in the
-	// thread would falsely invoke the agent.
-	if result.IsFromBot && !g.isCachedBotMessage(p.GUID, chatGUID) {
-		result.IsFromBot = false
-	}
+	// Same authorship rule as the direct path: the dedicated Apple ID
+	// makes a clean self-authored predecessor a bot predecessor.
 	if !result.IsFromBot {
 		reasonCode = "not_eligible_bot"
 	} else {
@@ -401,7 +392,8 @@ func (g *Gateway) rememberBotMessage(messageGUID, sessionKey, chatGUID, senderID
 	})
 }
 
-// rememberMessage stores reply context in the in-memory message index.
+// rememberMessage stores reply context in the in-memory fast-path index,
+// bounded by TTL plus a byte budget with oldest-first eviction.
 func (g *Gateway) rememberMessage(messageGUID string, ctx messageContext) {
 	if messageGUID == "" {
 		return
@@ -410,6 +402,7 @@ func (g *Gateway) rememberMessage(messageGUID string, ctx messageContext) {
 	defer g.messageMu.Unlock()
 	g.pruneMessageIndexLocked()
 	g.messageIndex[messageGUID] = ctx
+	g.evictMessageIndexLocked()
 }
 
 // lookupMessage returns cached reply context for a prior message GUID.
@@ -424,10 +417,11 @@ func (g *Gateway) lookupMessage(messageGUID string) (messageContext, bool) {
 	return ctx, ok
 }
 
-// isCachedBotMessage reports whether the outbound cache proves the bot sent
-// the given GUID in this chat. BlueBubbles isFromMe cannot prove authorship
-// on its own, so thread and direct admission require this check for past
-// turns (live turns use the broker in-flight set instead).
+// isCachedBotMessage reports whether the outbound fast-path cache holds the
+// given bot GUID in this chat. Admission no longer requires it: the bot's
+// dedicated Apple ID makes a clean isFromMe record authoritative, so the
+// BlueBubbles lookup is the authority and the cache only skips the round
+// trip for recent sends.
 func (g *Gateway) isCachedBotMessage(messageGUID, chatGUID string) bool {
 	if messageGUID == "" || chatGUID == "" {
 		return false
@@ -443,6 +437,46 @@ func (g *Gateway) pruneMessageIndexLocked() {
 		if ctx.CreatedAt.Before(cutoff) {
 			delete(g.messageIndex, guid)
 		}
+	}
+}
+
+// messageContextSize approximates one fast-path entry's RAM footprint from
+// its stored strings. Exactness is unnecessary; the budget only needs to
+// stop unbounded growth.
+func messageContextSize(messageGUID string, ctx messageContext) int {
+	total := len(messageGUID) + len(ctx.SessionKey) + len(ctx.ChatGUID) +
+		len(ctx.SenderID) + len(ctx.DisplayName) + len(ctx.Text) + 64
+	for _, attachment := range ctx.Attachments {
+		total += len(attachment.GUID) + len(attachment.MimeType) +
+			len(attachment.TransferName) + len(attachment.UTI) + 16
+	}
+	return total
+}
+
+// evictMessageIndexLocked drops oldest-first while the fast-path index
+// exceeds its byte budget. The just-stored entry carries the newest
+// timestamp, so it survives unless it alone exceeds the budget.
+func (g *Gateway) evictMessageIndexLocked() {
+	for len(g.messageIndex) > 0 {
+		total := 0
+		for guid, ctx := range g.messageIndex {
+			total += messageContextSize(guid, ctx)
+		}
+		if total <= messageIndexMaxBytes {
+			return
+		}
+		oldest := ""
+		var oldestAt time.Time
+		first := true
+		for guid, ctx := range g.messageIndex {
+			if first || ctx.CreatedAt.Before(oldestAt) {
+				oldest, oldestAt, first = guid, ctx.CreatedAt, false
+			}
+		}
+		if oldest == "" {
+			return
+		}
+		delete(g.messageIndex, oldest)
 	}
 }
 
