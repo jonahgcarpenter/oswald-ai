@@ -24,7 +24,7 @@ Spawn shapes (omit action, or set it to "spawn"):
 - Single task: goal (what to achieve) + context (every fact, file path, error, and constraint it needs — the child knows nothing else).
 - Batch: tasks[] with 1-10 entries (each its own goal + context). All run in parallel; one consolidated result returns when every task finishes, in input order with TASK i/N labels. No single task runs twice and none is silently dropped.
 
-Set background:true to dispatch asynchronously: returns a handle immediately and results arrive later as new messages in this session. Track background work with delegate(action=list). Only background subagents are steerable/stoppable; synchronous calls cannot be steered mid-turn.
+Set background:true to dispatch asynchronously: returns a handle immediately and the result arrives later as a new message in this session. After a background dispatch, end your turn with a one-line acknowledgment; do not call list to poll. Only background subagents are steerable/stoppable; synchronous calls cannot be steered mid-turn.
 
 Optional per task: output_schema (a JSON object the final answer must validate as; the child retries once on validation failure, and unparseable answers come back raw marked schema_valid:false), images (up to 8 local paths or URLs the child must see; unreadable entries are skipped).
 

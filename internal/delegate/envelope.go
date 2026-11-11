@@ -61,6 +61,12 @@ func marshalTask(task tooldelegate.Task, role, unitID, callID string, index, tot
 		EnabledTools: append([]string(nil), origin.enabledTools...),
 		MCPServers:   append([]string(nil), origin.mcpServers...),
 		Stateless:    origin.stateless,
+		ChatID:       origin.chatID,
+		ChatLabel:    origin.chatLabel,
+		ChatName:     origin.chatDisplayName,
+		Transport:    origin.transportProfile,
+		PlatformMsg:  origin.platformMessage,
+		IsDirect:     origin.isDirect,
 	}
 	raw, err := json.Marshal(env)
 	if err != nil {

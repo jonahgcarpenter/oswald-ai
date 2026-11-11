@@ -42,6 +42,12 @@ type dispatchEnvelope struct {
 	EnabledTools []string        `json:"enabled_toolsets,omitempty"`
 	MCPServers   []string        `json:"mcp_servers,omitempty"`
 	Stateless    bool            `json:"stateless_origin"`
+	ChatID       string          `json:"chat_id,omitempty"`
+	ChatLabel    string          `json:"chat_label,omitempty"`
+	ChatName     string          `json:"chat_display_name,omitempty"`
+	Transport    string          `json:"transport_profile,omitempty"`
+	PlatformMsg  string          `json:"platform_message_id,omitempty"`
+	IsDirect     bool            `json:"is_direct,omitempty"`
 }
 
 type storedPrincipal struct {

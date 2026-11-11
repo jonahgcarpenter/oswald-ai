@@ -15,6 +15,7 @@ const (
 	toolExposeKey  contextKey = "tool_exposer"
 	inputImagesKey contextKey = "input_images"
 	parentScopeKey contextKey = "parent_tool_scope"
+	transportKey   contextKey = "transport_routing"
 )
 
 // ToolExposer records request-local tool discovery, not lasting authorization.
@@ -41,6 +42,29 @@ func WithParentToolScope(ctx context.Context, toolsets, mcpServers []string) con
 func ParentToolScopeFromContext(ctx context.Context) (ParentToolScope, bool) {
 	scope, ok := ctx.Value(parentScopeKey).(ParentToolScope)
 	return scope, ok
+}
+
+// TransportRouting carries the untrusted transport destination for a turn so
+// background delivery can route its follow-up to the origin conversation.
+// It never affects ownership: the principal still owns the session.
+type TransportRouting struct {
+	ChatID           string
+	ChatLabel        string
+	ChatDisplayName  string
+	TransportProfile string
+	PlatformMessage  string
+	IsDirect         bool
+}
+
+// WithTransportRouting attaches the turn's transport destination.
+func WithTransportRouting(ctx context.Context, routing TransportRouting) context.Context {
+	return context.WithValue(ctx, transportKey, routing)
+}
+
+// TransportRoutingFromContext extracts the turn's transport destination.
+func TransportRoutingFromContext(ctx context.Context) (TransportRouting, bool) {
+	routing, ok := ctx.Value(transportKey).(TransportRouting)
+	return routing, ok
 }
 
 // Metadata carries trusted request correlation and current-turn context.

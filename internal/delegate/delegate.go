@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
@@ -53,9 +54,10 @@ const (
 )
 
 // BrokerSubmitter is the slice of the conversation broker the manager needs:
-// fire-and-forget delivery turns into the origin lane.
+// lane-busy checks plus fire-and-forget delivery turns into the origin lane.
 type BrokerSubmitter interface {
 	Submit(req *broker.Request) error
+	LaneBusy(principal identity.Principal, sessionID string) bool
 }
 
 type spawnContextKey struct{}
@@ -105,6 +107,9 @@ type Manager struct {
 	newClient    func(url, key, virtualKey string, log *config.Logger) llm.Chatter
 	clientsMu    sync.Mutex
 	clients      map[string]llm.Chatter
+
+	sendersMu sync.Mutex
+	senders   map[string]cron.Sender
 
 	mu      sync.Mutex
 	live    map[string]*liveChild
@@ -169,6 +174,29 @@ func NewManager(deps Deps) *Manager {
 	}
 }
 
+// SetSenders installs the per-gateway delivery senders used to push
+// background follow-ups to the origin conversation. Called once after the
+// gateways exist; delivery without a sender still runs the agent turn but
+// cannot push it to transport.
+func (m *Manager) SetSenders(senders map[string]cron.Sender) {
+	if m == nil {
+		return
+	}
+	m.sendersMu.Lock()
+	defer m.sendersMu.Unlock()
+	m.senders = senders
+}
+
+func (m *Manager) senderFor(gateway string) (cron.Sender, bool) {
+	m.sendersMu.Lock()
+	defer m.sendersMu.Unlock()
+	if len(m.senders) == 0 {
+		return nil, false
+	}
+	sender, ok := m.senders[gateway]
+	return sender, ok && sender != nil
+}
+
 // liveChild tracks one running unit. Units of one batch share the call id;
 // each unit reports independently through the delivery loop.
 type liveChild struct {
@@ -199,14 +227,20 @@ type liveChild struct {
 }
 
 type originRef struct {
-	profile      string
-	sessionKey   string
-	principal    identity.Principal
-	displayName  string
-	gateway      string
-	enabledTools []string
-	mcpServers   []string
-	stateless    bool
+	profile          string
+	sessionKey       string
+	principal        identity.Principal
+	displayName      string
+	gateway          string
+	enabledTools     []string
+	mcpServers       []string
+	stateless        bool
+	chatID           string
+	chatLabel        string
+	chatDisplayName  string
+	transportProfile string
+	platformMessage  string
+	isDirect         bool
 }
 
 type acceptedSteer struct {

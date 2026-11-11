@@ -1136,3 +1136,17 @@ func deliverResult(ch chan Result, result Result) (delivered bool) {
 func laneKey(principal identity.Principal, sessionID string) LaneKey {
 	return LaneKey{CanonicalUserID: principal.CanonicalUserID, SessionID: sessionID}
 }
+
+// LaneBusy reports whether the lane for one user session currently holds
+// queued or running work. Background delivery consults it to avoid
+// snapshotting stale persisted history while a foreground turn is still
+// active; busy lanes defer delivery to the next sweep.
+func (b *Broker) LaneBusy(principal identity.Principal, sessionID string) bool {
+	if b == nil {
+		return false
+	}
+	key := laneKey(principal, sessionID)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.lanes[key]) > 0
+}

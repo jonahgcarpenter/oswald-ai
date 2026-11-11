@@ -109,14 +109,7 @@ func (m *Manager) dispatchSync(ctx context.Context, principal identity.Principal
 	if err != nil {
 		return governance.Result{}, err
 	}
-	origin := originRef{
-		profile:      m.profile,
-		sessionKey:   meta.SessionID,
-		principal:    principal,
-		gateway:      principal.Gateway,
-		enabledTools: enabledToolsFromContext(ctx),
-		mcpServers:   mcpServersFromContext(ctx),
-	}
+	origin := m.originFromContext(ctx, principal, meta.SessionID)
 	callID := config.NewRequestID()
 	results := make([]childResult, len(tasks))
 	var wg sync.WaitGroup
@@ -235,7 +228,9 @@ func syncResultBody(res childResult) string {
 }
 
 // dispatchBackground records one batch and returns a handle immediately.
-// Workers pick units up asynchronously; results arrive later as new turns.
+// Workers pick units up asynchronously; results arrive later as new turns
+// pushed to the origin conversation. End your turn after dispatching: do not
+// call list to poll unless the user asks for status.
 func (m *Manager) dispatchBackground(ctx context.Context, principal identity.Principal, call delegate.Call) (governance.Result, error) {
 	meta := requestctx.MetadataFromContext(ctx)
 	maxTasks := m.maxConcurrent()
@@ -250,14 +245,7 @@ func (m *Manager) dispatchBackground(ctx context.Context, principal identity.Pri
 	if err != nil {
 		return governance.Result{}, err
 	}
-	origin := originRef{
-		profile:      m.profile,
-		sessionKey:   meta.SessionID,
-		principal:    principal,
-		gateway:      principal.Gateway,
-		enabledTools: enabledToolsFromContext(ctx),
-		mcpServers:   mcpServersFromContext(ctx),
-	}
+	origin := m.originFromContext(ctx, principal, meta.SessionID)
 	callID := config.NewRequestID()
 	now := nowUnix()
 	subIDs := make([]string, 0, len(tasks))
@@ -280,11 +268,28 @@ func (m *Manager) dispatchBackground(ctx context.Context, principal identity.Pri
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Delegated %d task(s) as subagent %s", len(tasks), strings.Join(subIDs, ", "))
-	if len(tasks) == 1 {
-		sb.WriteString(" running in the background.")
-	} else {
-		sb.WriteString(" running in the background.")
-	}
-	sb.WriteString(" Results will arrive as new messages in this session. Track them with delegate(action=list).")
+	sb.WriteString(" running in the background.")
+	sb.WriteString(" End your turn with a one-line acknowledgment; the result will arrive as a new message in this session. Do not call list unless the user asks for status.")
 	return governance.Result{Content: sb.String(), Outcome: governance.OutcomeProductive}, nil
+}
+
+// originFromContext snapshots the calling turn's ownership plus its transport
+// destination so background delivery can route home. Ownership still comes
+// from the principal; routing never affects it.
+func (m *Manager) originFromContext(ctx context.Context, principal identity.Principal, sessionKey string) originRef {
+	routing, _ := requestctx.TransportRoutingFromContext(ctx)
+	return originRef{
+		profile:          m.profile,
+		sessionKey:       sessionKey,
+		principal:        principal,
+		gateway:          principal.Gateway,
+		enabledTools:     enabledToolsFromContext(ctx),
+		mcpServers:       mcpServersFromContext(ctx),
+		chatID:           routing.ChatID,
+		chatLabel:        routing.ChatLabel,
+		chatDisplayName:  routing.ChatDisplayName,
+		transportProfile: routing.TransportProfile,
+		platformMessage:  routing.PlatformMessage,
+		isDirect:         routing.IsDirect,
+	}
 }
