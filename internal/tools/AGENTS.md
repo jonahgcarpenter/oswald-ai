@@ -73,10 +73,11 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   intercepted pre-broker so they never start a turn; `/new` and `/stop` cancel the wait.
   Hidden on the stateless API and unattended transports (fail-closed `undelivered`).
 - `delegate` — scoped subagent turns: `spawn` (one goal or 1–10 parallel tasks,
-  each with goal/context plus optional output_schema/images) and `list`/`steer`/`stop`
-  over the caller's live session units only. Top-level dispatches always run
-  async with a handle receipt; nested orchestrator calls run inline. Full
-  history, searchable results.
+  each with goal/context plus optional output_schema/images, plus `background`
+  opt-in) and `list`/`steer`/`stop` over the caller's live background session
+  units only. Top-level dispatches run sync by default (blocking tool result);
+  `background:true` runs async with a handle receipt and later new-turn
+  delivery; nested orchestrator calls run inline. Full history, searchable results.
 
 History policy in one line: `memory`/`skill_manage`/`browser_vault_*` metadata-only, `session_search`/`web_search`
 searchable, image-tool and `clarify` text nonsearchable — with 16 KiB args and 16,000 result runes per call

@@ -56,9 +56,10 @@ func (m *Manager) controlList(_ context.Context, principalProfile, sessionKey st
 	return governance.Result{Content: strings.TrimSpace(sb.String()), Outcome: governance.OutcomeProductive}, nil
 }
 
-// controlSteer queues guidance into a running child at its next iteration
-// boundary. Acceptance only means the text was queued before completion —
-// the completion itself reports whether it landed.
+// controlSteer queues guidance into a running background child at its next
+// iteration boundary. Acceptance only means the text was queued before
+// completion — the completion itself reports whether it landed. Synchronous
+// dispatches block the calling turn and cannot be steered mid-turn.
 func (m *Manager) controlSteer(_ context.Context, profile, session, id, message string) (governance.Result, error) {
 	child, ok := m.findLive(profile, session, id)
 	if !ok {
@@ -73,8 +74,8 @@ func (m *Manager) controlSteer(_ context.Context, profile, session, id, message 
 	return governance.Result{Content: "Steer queued for subagent " + id + ". It applies at the child's next iteration boundary.", Outcome: governance.OutcomeProductive}, nil
 }
 
-// controlStop ends a child at its next iteration boundary. The partial
-// result still returns through the normal delivery path.
+// controlStop ends a background child at its next iteration boundary. The
+// partial result still returns through the normal background delivery path.
 func (m *Manager) controlStop(_ context.Context, profile, session, id string) (governance.Result, error) {
 	child, ok := m.findLive(profile, session, id)
 	if !ok {

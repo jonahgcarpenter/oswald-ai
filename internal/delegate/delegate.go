@@ -1,9 +1,11 @@
 // Package delegate owns subagent delegation: dispatching child turns with
 // isolated context, tracking their lifecycle, and delivering results back
-// into the originating conversation. Top-level dispatches always run
-// asynchronously; nested orchestrator children run inline in the calling
-// turn. Nothing here names any external agent system: the protocol is
-// Oswald-native (broker lanes, per-profile state, exact-token leases).
+// into the originating conversation. Top-level dispatches run synchronously
+// by default (blocking until every task finishes); background:true dispatches
+// run asynchronously with later delivery as new turns. Nested orchestrator
+// children run inline in the calling turn. Nothing here names any external
+// agent system: the protocol is Oswald-native (broker lanes, per-profile
+// state, exact-token leases).
 package delegate
 
 import (
@@ -81,7 +83,8 @@ func SpawnFromContext(ctx context.Context) Spawn {
 
 // Manager owns delegated subagent turns for one profile: dispatch, worker
 // pool, stall monitoring, delivery, transcripts, and prune/recovery of the
-// durable delegation ledger.
+// durable delegation ledger. Sync dispatches never touch the ledger; only
+// background dispatches do.
 type Manager struct {
 	profile     string
 	profileRoot string

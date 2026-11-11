@@ -80,12 +80,26 @@ func TestParseControl(t *testing.T) {
 	}
 }
 
+func TestParseBackground(t *testing.T) {
+	call, err := ParseArgs(map[string]interface{}{"goal": "x"})
+	if err != nil || call.Background {
+		t.Fatalf("default background should be false: %+v %v", call, err)
+	}
+	call, err = ParseArgs(map[string]interface{}{"goal": "x", "background": true})
+	if err != nil || !call.Background {
+		t.Fatalf("background:true not parsed: %+v %v", call, err)
+	}
+	if _, err := ParseArgs(map[string]interface{}{"goal": "x", "background": "yes"}); err == nil {
+		t.Fatal("non-boolean background accepted")
+	}
+}
+
 func TestDefinitionContract(t *testing.T) {
 	def := Definition()
 	if def.Name != Name || def.Parameters.Type != "object" {
 		t.Fatalf("definition = %+v", def)
 	}
-	for _, key := range []string{"action", "goal", "context", "tasks", "output_schema", "images", "role", "subagent_id", "message"} {
+	for _, key := range []string{"action", "goal", "context", "tasks", "output_schema", "images", "role", "background", "subagent_id", "message"} {
 		if _, ok := def.Parameters.Properties[key]; !ok {
 			t.Fatalf("missing property %q", key)
 		}
@@ -93,7 +107,7 @@ func TestDefinitionContract(t *testing.T) {
 	if got := def.Parameters.Properties["action"].Enum; len(got) != 4 {
 		t.Fatalf("action enum = %v", got)
 	}
-	for _, want := range []string{"goal", "context", "TASK i/N", "subagent_id"} {
+	for _, want := range []string{"goal", "context", "TASK i/N", "subagent_id", "background"} {
 		if !strings.Contains(def.Description, want) {
 			t.Fatalf("description missing %q", want)
 		}

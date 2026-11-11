@@ -6,8 +6,8 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract ru
 
 One package. `delegate.go` holds the per-profile `Manager`, the `BlockedTools`
 withholding list, and the `Spawn` depth/role carrier; `manager.go` is the
-registry entry point (`Execute`: dispatch, inline nested runs, list/steer/stop);
-`child.go` builds the child brief and runs one synchronous turn (output-schema
+registry entry point (`Execute`: sync/background dispatch, inline nested runs,
+list/steer/stop); `child.go` builds the child brief and runs one synchronous turn (output-schema
 validate plus one bounded correction, transcript streaming, orphan reporting);
 `worker.go` runs dispatched units through the pool with single-winner
 completion (`finishUnit`); `control.go` drives live-unit actions and
@@ -18,11 +18,13 @@ envelope; `lifecycle.go` resolves model/provider routing and owns Start/Stop.
 
 ## How it works
 
-Top-level dispatches always run asynchronously: one ledger row per unit
-(`async_delegations`, state running, delivery pending), an immediate handle
-receipt, and results arriving later as new turns in the origin session.
-Nested orchestrator calls run inline in the calling turn and never touch the
-ledger. Children are stateless, `SkipMemory`, and keep the parent principal
+Top-level dispatches run synchronously by default: `dispatchSync` blocks the
+calling turn and returns one consolidated tool result when every task
+finishes. With `background:true`, `dispatchBackground` writes one ledger row
+per unit (`async_delegations`, state running, delivery pending), returns an
+immediate handle receipt, and results arrive later as new turns in the origin
+session. Sync units never touch the ledger. Nested orchestrator calls run
+inline in the calling turn and never touch the ledger. Children are stateless, `SkipMemory`, and keep the parent principal
 unchanged; their catalog is the parent's toolsets minus `delegate` (unless
 nesting is enabled and allowed), `clarify`, `memory`, `session_search`,
 `cronjob_manage`, and `image_generate`, with the MCP allowlist inherited and
@@ -41,6 +43,7 @@ cap); live and pending rows are never touched.
 ## Tests
 
 `delegate_test.go` with fake chatter/broker/processes and a real profile
-store. Cover dispatch-to-delivery, steer/stop/list scoping (unknown ids report
+store. Cover sync dispatch-to-tool-result, background dispatch-to-delivery,
+steer/stop/list scoping (unknown ids report
 the same error as finished or foreign work), `/new` drop semantics, schema
 validation shapes, and the child block list.

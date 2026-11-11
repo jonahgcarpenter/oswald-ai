@@ -150,7 +150,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) 
 	t.Fatal(msg)
 }
 
-func TestDispatchDeliversResult(t *testing.T) {
+func TestSyncDispatchReturnsResult(t *testing.T) {
 	chat := &fakeChatter{}
 	br := &fakeBroker{}
 	m, store, cleanup := testManager(t, chat, br)
@@ -158,6 +158,34 @@ func TestDispatchDeliversResult(t *testing.T) {
 
 	result, err := m.Execute(dispatchContext(testPrincipal(), "discord:dm:1"), map[string]interface{}{
 		"goal": "Summarize synthetic topic", "context": "nothing else needed",
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if !strings.Contains(result.Content, "synthetic done") {
+		t.Fatalf("unexpected sync result: %q", result.Content)
+	}
+	if got := br.count(); got != 0 {
+		t.Fatalf("sync dispatch delivered %d turns, want 0", got)
+	}
+	due, err := store.ListDueDeliveries(context.Background(), 10)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("sync dispatch wrote ledger rows: %+v %v", due, err)
+	}
+	if n := len(m.liveForSession("alice", "discord:dm:1")); n != 0 {
+		t.Fatalf("sync unit still live: %d", n)
+	}
+}
+
+func TestBackgroundDispatchDeliversResult(t *testing.T) {
+	chat := &fakeChatter{}
+	br := &fakeBroker{}
+	m, store, cleanup := testManager(t, chat, br)
+	defer cleanup()
+
+	result, err := m.Execute(dispatchContext(testPrincipal(), "discord:dm:1"), map[string]interface{}{
+		"goal": "Summarize synthetic topic", "context": "nothing else needed",
+		"background": true,
 	})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -186,6 +214,29 @@ func TestDispatchDeliversResult(t *testing.T) {
 	}
 }
 
+func TestSyncBatchReturnsConsolidatedResult(t *testing.T) {
+	chat := &fakeChatter{}
+	br := &fakeBroker{}
+	m, _, cleanup := testManager(t, chat, br)
+	defer cleanup()
+
+	result, err := m.Execute(dispatchContext(testPrincipal(), "discord:dm:4"), map[string]interface{}{
+		"tasks": []interface{}{
+			map[string]interface{}{"goal": "First synthetic task"},
+			map[string]interface{}{"goal": "Second synthetic task"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if !strings.Contains(result.Content, "TASK 1/2") || !strings.Contains(result.Content, "TASK 2/2") {
+		t.Fatalf("batch missing TASK labels: %q", result.Content)
+	}
+	if got := br.count(); got != 0 {
+		t.Fatalf("sync batch delivered %d turns, want 0", got)
+	}
+}
+
 func TestSteerStopList(t *testing.T) {
 	chat := &fakeChatter{wait: make(chan struct{})}
 	br := &fakeBroker{}
@@ -195,7 +246,7 @@ func TestSteerStopList(t *testing.T) {
 	p := testPrincipal()
 	ctx := dispatchContext(p, "discord:dm:2")
 
-	if _, err := m.Execute(ctx, map[string]interface{}{"goal": "slow synthetic task"}); err != nil {
+	if _, err := m.Execute(ctx, map[string]interface{}{"goal": "slow synthetic task", "background": true}); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	waitFor(t, 10*time.Second, func() bool { return len(m.liveForSession("alice", "discord:dm:2")) == 1 }, "child never registered")
@@ -228,7 +279,7 @@ func TestCancelSessionDropsDelivery(t *testing.T) {
 	defer cleanup()
 	defer close(chat.wait)
 
-	if _, err := m.Execute(dispatchContext(testPrincipal(), "discord:dm:3"), map[string]interface{}{"goal": "cancelled task"}); err != nil {
+	if _, err := m.Execute(dispatchContext(testPrincipal(), "discord:dm:3"), map[string]interface{}{"goal": "cancelled task", "background": true}); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	waitFor(t, 10*time.Second, func() bool { return len(m.liveForSession("alice", "discord:dm:3")) == 1 }, "child never registered")
