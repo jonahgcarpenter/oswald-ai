@@ -107,10 +107,12 @@ another profile; mutations stay fenced to the calling scope
 Old shared `plugins-available/` trees are orphaned and never read; operators may
 delete them by hand. Foreign ecosystems (OpenCode, Hermes, Claude bundles) are
 not installed directly: convert first with the `plugin-convert` skill
-(`skills/plugin-convert/`, markdown-only, runtimes never transfer), then
-`oswald plugins install` the staged source. The operator-maintained library
-seed lives in `library/` (`catalog.json` + `plugins/<name>/`, intended to move
-to its own repository with reviewed pins).
+(`library/skills/plugin-convert/`, markdown-only, runtimes never transfer), then
+`oswald plugins install` the staged source. `library/plugins/<name>/` and
+`library/skills/<name>/` are a static holding area for Oswald-native sources —
+nothing auto-installs or seeds; the operator tells the agent to run
+`oswald plugins install library/plugins/<name>` or
+`oswald skills install library/skills/<name>` explicitly.
 
 `plugin.yaml` shape (v1 or v2 contract, unknown keys rejected):
 

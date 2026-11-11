@@ -1,5 +1,0 @@
-name: hello-skills
-version: "1.0"
-description: Seed plugin carrying one skills-only example with no sidecar and no env.
-manifest_version: 2
-api_version: "1"

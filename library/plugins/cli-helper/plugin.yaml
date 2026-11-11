@@ -1,7 +1,0 @@
-name: cli-helper
-version: "1.0"
-description: Seed plugin showing the pinned node sidecar convention.
-manifest_version: 2
-api_version: "1"
-node_package: prettier
-node_version: 3.1.0

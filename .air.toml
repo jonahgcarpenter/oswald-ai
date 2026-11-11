@@ -9,7 +9,7 @@ tmp_dir = "tmp"
   cmd = "go build -tags sqlite_fts5 -o ./tmp/oswald-server ./cmd/oswald-server && go build -tags sqlite_fts5 -o ./tmp/oswald ./cmd/oswald"
   bin = "./tmp/oswald-server"
 
-  exclude_dir = ["tmp", "vendor", "testdata"]
+  exclude_dir = ["tmp"]
 
   include_ext = ["go"]
   exclude_regex = ["_test.go"]
