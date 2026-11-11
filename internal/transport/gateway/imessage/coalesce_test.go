@@ -92,6 +92,21 @@ func TestFilterRealAttachments(t *testing.T) {
 	}
 }
 
+// TestFilterKeepsUnknownTypeFiles pins the file-bubble shape: a genuine
+// file whose extension maps to no known type arrives with an empty MIME and
+// a dynamic UTI, but unlike an unfurl payload it carries the transfer name
+// it was sent under — so it must survive filtering.
+func TestFilterKeepsUnknownTypeFiles(t *testing.T) {
+	file := attachment{GUID: "a1", TransferName: "report.llir", MimeType: "", UTI: "dyn.abcdef12", TotalBytes: 13607}
+	if isPreviewAttachment(file) {
+		t.Fatal("unknown-type file flagged as preview")
+	}
+	preview := attachment{GUID: "p", TransferName: "AF.pluginPayloadAttachment", UTI: "dyn.34cd56ef"}
+	if got := filterRealAttachments([]attachment{preview, file}, ""); len(got) != 1 || got[0].GUID != "a1" {
+		t.Fatalf("file bubble not preserved: %+v", got)
+	}
+}
+
 func TestReplyContextFromLinkPreviewDropsImages(t *testing.T) {
 	g := &Gateway{Log: config.NewLogger(config.LevelError)}
 	data := messageLookupData{

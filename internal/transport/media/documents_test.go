@@ -66,11 +66,9 @@ func TestDocumentsNote(t *testing.T) {
 		{Path: "/private/b.txt", Filename: "b.txt", MIMEType: "text/plain"},
 	}
 	note := DocumentsNote(docs)
-	if !strings.Contains(note, "/private/a.pdf") || !strings.Contains(note, "/private/b.txt") {
-		t.Fatalf("note missing paths:\n%s", note)
-	}
-	if !strings.Contains(note, "read_file") {
-		t.Fatalf("note should direct the model to read_file:\n%s", note)
+	want := "[File attached at: /private/a.pdf ('a.pdf')]\n[File attached at: /private/b.txt ('b.txt')]"
+	if note != want {
+		t.Fatalf("unexpected note:\n%s", note)
 	}
 	if got := DocumentsNote(nil); got != "" {
 		t.Fatalf("empty docs should yield empty note, got %q", got)

@@ -13,6 +13,12 @@ const (
 	capabilityAttempts   = 5
 	capabilityRetryDelay = 500 * time.Millisecond
 	messageIndexTTL      = time.Hour
+	// messageIndexMaxBytes bounds the fast-path RAM cache. Entries are
+	// small (GUID plus routing metadata and quoted text), so this budget
+	// covers far more than one TTL window of traffic; overflow evicts
+	// oldest-first. The BlueBubbles lookup stays authoritative, so an
+	// evicted entry only costs a round trip, never admission.
+	messageIndexMaxBytes = 2 << 20
 	contactCacheTTL      = 6 * time.Hour
 )
 

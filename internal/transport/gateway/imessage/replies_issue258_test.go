@@ -23,11 +23,12 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 )
 
-// TestIssue258SelfAuthoredPredecessorIgnored reproduces the filed repro: a
-// threaded reply whose predecessor is a self-authored (isFromMe) image that
-// never invoked the agent must be skipped, even though the predecessor looks
-// like a bot message to BlueBubbles.
-func TestIssue258SelfAuthoredPredecessorIgnored(t *testing.T) {
+// TestIssue258SelfAuthoredPredecessorAdmitted pins the dedicated-Apple-ID
+// contract that superseded the original issue-258 report: a threaded reply
+// whose predecessor is a clean self-authored (isFromMe) image is admitted
+// even with no outbound-cache entry and no live turn, because no other
+// device shares the bot's Apple ID. Shared-ID deployments are unsupported.
+func TestIssue258SelfAuthoredPredecessorAdmitted(t *testing.T) {
 	root := replyFixture("root", 1, false)
 	image := replyFixture("image", 2, true)
 	image.Text = ""
@@ -44,20 +45,19 @@ func TestIssue258SelfAuthoredPredecessorIgnored(t *testing.T) {
 	bb.mu.Unlock()
 	g, b, model := newIMessageTestGateway(t, bb.server.URL)
 	defer b.Shutdown()
-	// No outbound-cache entry for the image and no live turn: the image was
-	// never admitted, so it can never be steered.
+	// No outbound-cache entry for the image and no live turn: under the
+	// dedicated Apple ID the clean self-authored record is authoritative,
+	// so the reply is admitted via the BlueBubbles lookup alone.
 	g.processIncomingMessage(threadIncoming())
-	if len(model.primaryRequests()) != 0 {
-		t.Fatal("self-authored predecessor invoked the agent")
-	}
-	if len(bb.sentMessages()) != 0 {
-		t.Fatal("ignored reply sent output")
+	if len(model.primaryRequests()) != 1 {
+		t.Fatalf("self-authored predecessor was not admitted, requests=%d", len(model.primaryRequests()))
 	}
 }
 
-// TestIssue258CompletedBotReplyStillAdmitted proves the outbound cache keeps
-// covering the past: a threaded reply whose bot predecessor was sent by a
-// finished turn is still admitted.
+// TestIssue258CompletedBotReplyStillAdmitted proves a threaded reply whose
+// bot predecessor was sent by a finished turn is still admitted, via the
+// fast-path cache or — past TTL, eviction, or restart — the authoritative
+// BlueBubbles record.
 func TestIssue258CompletedBotReplyStillAdmitted(t *testing.T) {
 	root, bot, anchor := replyFixture("root", 1, false), replyFixture("bot", 2, true), replyFixture("incoming", 10, false)
 	bot.ThreadOriginatorGUID, anchor.ThreadOriginatorGUID = "root", "root"

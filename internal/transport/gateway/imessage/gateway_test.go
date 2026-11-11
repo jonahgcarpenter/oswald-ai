@@ -191,9 +191,12 @@ func TestIMessageCommandAttachmentMultipartSend(t *testing.T) {
 	}))
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	err := g.sendCommandAttachment("chat-1", "", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	guid, err := g.sendCommandAttachment("chat-1", "", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if guid != "sent-1" {
+		t.Fatalf("attachment GUID=%q want %q", guid, "sent-1")
 	}
 	if requestCount != 1 || filename != "export.json" || mimeType != "application/json" || string(attachmentData) != "private-content" || chatGUID != "chat-1" || name != "export.json" || tempGUID == "" {
 		t.Fatalf("unexpected attachment request count=%d filename=%q mime=%q data=%q chat=%q name=%q temp_set=%t", requestCount, filename, mimeType, attachmentData, chatGUID, name, tempGUID != "")
@@ -211,7 +214,7 @@ func TestIMessageCommandAttachmentProviderFailures(t *testing.T) {
 	}))
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	err := g.sendCommandAttachment("chat-1", "", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	_, err := g.sendCommandAttachment("chat-1", "", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
 	if err == nil || strings.Contains(err.Error(), "private-content") || calls != 1 {
 		t.Fatalf("error=%v calls=%d", err, calls)
 	}
@@ -326,9 +329,12 @@ func TestIMessageCommandAttachmentThreadsReply(t *testing.T) {
 	g.capabilitiesLoaded = true
 	g.privateAPIEnabled = true
 	g.helperConnected = true
-	err := g.sendCommandAttachment("chat-1", "msg-9", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	guid, err := g.sendCommandAttachment("chat-1", "msg-9", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if guid != "sent-1" {
+		t.Fatalf("attachment GUID=%q want %q", guid, "sent-1")
 	}
 	if selectedMessageGUID != "msg-9" || method != defaultSendMethod {
 		t.Fatalf("threaded attachment missing reply fields selected=%q method=%q", selectedMessageGUID, method)
@@ -355,9 +361,12 @@ func TestIMessageCommandAttachmentThreadFallbackSendsPlain(t *testing.T) {
 	g.capabilitiesLoaded = true
 	g.privateAPIEnabled = true
 	g.helperConnected = true
-	err := g.sendCommandAttachment("chat-1", "msg-9", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	guid, err := g.sendCommandAttachment("chat-1", "msg-9", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if guid != "sent-1" {
+		t.Fatalf("attachment GUID=%q want %q", guid, "sent-1")
 	}
 	if calls != 2 || fallbackSelectedGUID != "" {
 		t.Fatalf("expected threaded attempt then plain retry, calls=%d fallback_selected=%q", calls, fallbackSelectedGUID)

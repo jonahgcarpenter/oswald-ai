@@ -174,9 +174,39 @@ func TestBuildPromptDescribesGIFContactSheetInReply(t *testing.T) {
 	}
 }
 
+func TestBuildPromptReplyFileLabel(t *testing.T) {
+	reply := &ReplyContext{
+		SenderName: "Oswald",
+		IsFromBot:  true,
+		Documents:  []media.DocumentRef{{Path: "/private/test.txt", Filename: "test.txt", MIMEType: "text/plain", Size: 4}},
+	}
+	want := "[Replying to Oswald's file]\n\ntranslate it\n\n[File attached at: /private/test.txt ('test.txt')]"
+	if got := BuildPrompt("translate it", nil, nil, reply, reply.Documents); got != want {
+		t.Fatalf("unexpected prompt %q", got)
+	}
+}
+
+func TestDecideMergesReplyDocuments(t *testing.T) {
+	reply := &ReplyContext{
+		SenderName: "Oswald",
+		IsFromBot:  true,
+		Documents:  []media.DocumentRef{{Path: "/private/test.txt", Filename: "test.txt", MIMEType: "text/plain", Size: 4}},
+	}
+	decision := Decide(Input{Text: "translate it", Reply: reply, IsReplyToBot: true})
+	if decision.Action != ActionLLM {
+		t.Fatalf("expected llm, got %q", decision.Action)
+	}
+	if len(decision.Documents) != 1 || decision.Documents[0].Filename != "test.txt" {
+		t.Fatalf("reply documents not merged: %+v", decision.Documents)
+	}
+	if !strings.Contains(decision.Prompt, "[Replying to Oswald's file]") || !strings.Contains(decision.Prompt, "/private/test.txt") {
+		t.Fatalf("prompt missing file reply context: %q", decision.Prompt)
+	}
+}
+
 func TestBuildPromptIncludesDocuments(t *testing.T) {
 	docs := []media.DocumentRef{{Path: "/private/a.pdf", Filename: "a.pdf", MIMEType: "application/pdf"}}
-	if got := BuildPrompt("summarize", nil, nil, nil, docs); got != "summarize\n\n[The user sent a document: 'a.pdf'. It is saved at: /private/a.pdf. Its text is not inlined (binary format). Extract the document text with read_file before answering, instead of asking the user to paste the contents.]" {
+	if got := BuildPrompt("summarize", nil, nil, nil, docs); got != "summarize\n\n[File attached at: /private/a.pdf ('a.pdf')]" {
 		t.Fatalf("unexpected prompt %q", got)
 	}
 }

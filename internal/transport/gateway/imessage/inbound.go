@@ -185,8 +185,18 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 				} else {
 					reply.Unsupported = attachmentLabels(realAttachments)
 				}
+				// Document lane mirrors the image lane: readable files ride
+				// into the turn as cached references so the model can read
+				// them, with the same bounds as inbound documents. Labels for
+				// successfully attached files are dropped so one file is never
+				// both attached and reported unreadable. Runs post-admission,
+				// so downloads never gate invocation.
+				if docs, docUnsupported := g.loadDocuments(realAttachments, canonicalUserID, log); len(docs) > 0 || len(docUnsupported) > 0 {
+					reply.Documents = docs
+					reply.Unsupported = dropAttachedLabels(append(reply.Unsupported, docUnsupported...), docs)
+				}
 			}
-			log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", len(reply.Images)))
+			log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", len(reply.Images)), config.F("reply_document_count", len(reply.Documents)))
 		} else {
 			log.Debug("gateway.reply_context.applied", "imessage reply target missing from cache", config.F("request_id", requestID), config.F("status", "degraded"))
 			reply = &routing.ReplyContext{IsUnavailable: true}

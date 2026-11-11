@@ -158,7 +158,7 @@ func formatReplyContext(reply *ReplyContext) string {
 		return fmt.Sprintf("[Replying to %s's attachment: Attachment unavailable]", name)
 	}
 
-	suffix := replyAttachmentSuffix(reply.Images, unsupported)
+	suffix := replyAttachmentSuffix(reply.Images, unsupported, reply.Documents)
 	switch {
 	case text != "" && name != "" && suffix != "":
 		return fmt.Sprintf("[Replying to %s: %q with %s]", name, text, suffix)
@@ -179,10 +179,13 @@ func formatReplyContext(reply *ReplyContext) string {
 	}
 }
 
-func replyAttachmentSuffix(images []llm.InputImage, unsupported []string) string {
-	parts := make([]string, 0, 2)
+func replyAttachmentSuffix(images []llm.InputImage, unsupported []string, docs []media.DocumentRef) string {
+	parts := make([]string, 0, 3)
 	if len(images) > 0 {
 		parts = append(parts, imageDescription(images))
+	}
+	if len(docs) > 0 {
+		parts = append(parts, fileDescription(docs))
 	}
 	if len(unsupported) == 1 {
 		parts = append(parts, "unsupported attachment: "+unsupported[0])
@@ -190,6 +193,16 @@ func replyAttachmentSuffix(images []llm.InputImage, unsupported []string) string
 		parts = append(parts, "unsupported attachments: "+strings.Join(unsupported, ", "))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// fileDescription mirrors imageDescription for replied files: the reply
+// line names the file count while DocumentsNote carries each saved path,
+// so history retains what was answered without replaying bytes.
+func fileDescription(docs []media.DocumentRef) string {
+	if len(docs) == 1 {
+		return "file"
+	}
+	return fmt.Sprintf("%d files", len(docs))
 }
 
 func imageOnlyNote(images []llm.InputImage) string {
