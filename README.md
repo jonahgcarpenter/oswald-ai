@@ -89,13 +89,13 @@ Operator commands run from a terminal against your `.oswald/` root:
 | Command                                  | Description                                                                                                     |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `oswald setup`                           | Seed missing `config.yaml`/`.env`/`SOUL.md` entries for first install; never overwrites.                        |
-| `oswald start`                           | Run the Oswald service in the foreground.                                                                       |
+| `oswald restart [--delay SECS|--now]`     | Restart the running service in place (same pod). Batch edits, then run once — the model runs it as its final step. |
 | `oswald profile create\|rename\|delete`   | Provision, rename, or remove a named profile subtree (refuses `default` on delete, requires confirmation).      |
 | `oswald mcp list\|add\|edit\|remove\|test` | Manage profile MCP servers (add through staged validation, never prints secrets).                              |
 | `oswald mcp auth <server>`               | Interactively authorize an MCP server (browser or device flow).                                                 |
 | `oswald gateway show\|set-multiplex`      | Inspect routing and toggle multi-profile routing.                                                               |
 | `oswald gateway routes list\|add\|remove` | Manage `gateway.profile_routes` (add is staged-validated).                                                      |
-| `oswald platforms show\|enable\|disable`  | Inspect gateway platforms and flip `platforms.<name>.enabled` (service restarts automatically to apply).       |
+| `oswald platforms show\|enable\|disable`  | Inspect gateway platforms and flip `platforms.<name>.enabled` (needs `oswald restart` to apply).               |
 | `oswald platforms set <platform> [flags]` | Set listener/admission leaves for `discord`, `bluebubbles`, or `api` (admission applies live).                 |
 | `oswald providers list\|show\|add\|remove` | Manage LLM providers (`--profile` allowed).                                                                     |
 | `oswald model show\|set`                  | Manage model selection: `--provider`, `--default`, `--context-length` (`--profile` allowed).                    |
@@ -105,9 +105,7 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald plugins install <source>`        | Install a plugin into the calling profile from a git URL, `owner/repo`, or local path, with bundled skills and node deps (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--node-package/--node-version` for manifests predating the sidecar convention, `--no-deps` to skip, `--force` to replace code; `--profile` allowed, fenced to the calling scope). |
 | `oswald plugins update <name>`           | Refresh a profile install in place (pinned installs need an explicit `--ref`; code only, `data/` untouched). |
 | `oswald plugins remove <name>`           | Drop a profile plugin (removes `code/` only so `data/` logins survive; `--full` also deletes `data/`). |
-| `oswald plugins install-deps <name>`      | Install a plugin's pinned npm dependencies into the profile code home (explicit consent per install, `--profile` allowed). |
-| `oswald plugins bin-path <name>`         | Print the absolute plugin-local binary path for explicit use in `terminal` (PATH is never mutated).            |
-| `oswald plugins exec <name> [-- <args>]` | Run an installed plugin binary for the calling profile (sandbox env, HOME redirected to the per-profile plugin `data/home`). |
+| `oswald plugins install-deps <name>`      | Install a plugin's pinned npm dependencies into the profile code home (explicit consent per install, `--profile` allowed; the bare CLI name is runnable in `terminal` right after). |
 | `oswald skills list\|info`                | List installed skills and inspect manifest/provenance state (`--profile` allowed).                              |
 | `oswald skills install <source>`         | Install a skill bundle from a git URL, `owner/repo`, or local path into the calling profile (`--ref` pins a full commit SHA, `--subdir` for monorepos). |
 | `oswald skills update\|remove <name>`     | Refresh a managed install (pins need explicit `--ref`; refuses operator edits without `--force`) or delete a skill and its lockfile record. |
@@ -116,12 +114,15 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |
 
 Every mutating group validates through the staged startup pipeline before writing, so a rejected
-edit leaves files untouched; each command reports `applied live` vs `restarting service to
-apply`. Reads (`show`, `get`, `list`, `validate`) may name another profile; mutations stay
+edit leaves files untouched; each command reports `applied live` vs `restart required - run
+'oswald restart' to apply`. Reads (`show`, `get`, `list`, `validate`) may name another profile; mutations stay
 fenced to the calling profile, and global sections plus profile lifecycle require the default
 scope — contradictions fail closed instead of landing elsewhere. Log-level and admission
-changes apply live; anything else triggers a supervised automatic restart of the service
-within seconds — no manual restart, no operator signal.
+changes apply live; everything else needs `oswald restart`. Installed plugin CLIs are the
+exception: their bare names work in `terminal` immediately after install (per-profile shims
+on `PATH` with `HOME` pointed at the plugin `data/home`) — only tool/skill/hook registration
+waits for the restart. The service itself runs as `oswald-server` (container `CMD`); `oswald`
+is the operator CLI.
 
 ## Documentation
 
