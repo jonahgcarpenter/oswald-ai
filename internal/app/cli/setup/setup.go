@@ -49,7 +49,7 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 			fmt.Fprintf(stdout, "%s %s\n", verb, filepath.Join(displayRoot, result.name))
 		}
 	}
-	fmt.Fprintf(stdout, "setup complete: edit %s and %s, then run `oswald start`\n", filepath.Join(displayRoot, "config.yaml"), filepath.Join(displayRoot, ".env"))
+	fmt.Fprintf(stdout, "setup complete: edit %s and %s, then run `oswald-server`\n", filepath.Join(displayRoot, "config.yaml"), filepath.Join(displayRoot, ".env"))
 	return exitOK
 }
 

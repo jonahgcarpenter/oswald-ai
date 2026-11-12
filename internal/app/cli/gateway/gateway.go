@@ -408,7 +408,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restarting service to apply"
+	return "restart required - run `oswald restart` to apply"
 }
 
 // reportGatewayError prints a classified diagnostic without values.

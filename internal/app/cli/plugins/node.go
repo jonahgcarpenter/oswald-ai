@@ -42,7 +42,7 @@ func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, 
 			fmt.Fprintf(stderr, "oswald: %v\n", err)
 			return exitError
 		}
-		fmt.Fprintf(stdout, "installed %s node dependencies\n", name)
+		fmt.Fprintf(stdout, "installed %s node dependencies (restart required - run `oswald restart` to apply)\n", name)
 		return exitOK
 	}
 	withMeta := plugins.Manifest{Name: manifest.Name, NodePackage: spec.Package, NodeVersion: spec.Version}
@@ -55,7 +55,7 @@ func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, 
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	fmt.Fprintf(stdout, "installed %s node dependencies\n%s\n", name, bin)
+	fmt.Fprintf(stdout, "installed %s node dependencies (restart required - run `oswald restart` to apply)\n%s\n", name, bin)
 	return exitOK
 }
 

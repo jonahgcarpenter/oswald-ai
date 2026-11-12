@@ -138,7 +138,7 @@ func updateCmd(ctx context.Context, root, flagProfile string, rest []string, std
 	if result.Pinned {
 		pin = "pinned@" + shortSHA(result.Revision)
 	}
-	fmt.Fprintf(stdout, "updated %s (%s, restarting service to apply)\n", key, pin)
+	fmt.Fprintf(stdout, "updated %s (%s, restart required - run `oswald restart` to apply)\n", key, pin)
 	return exitOK
 }
 

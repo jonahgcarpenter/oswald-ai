@@ -60,7 +60,7 @@ func TestSetModelRoundTrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("set = %d %s", code, stderr)
 	}
-	if !strings.Contains(out, "restarting service to apply") {
+	if !strings.Contains(out, "restart required - run `oswald restart` to apply") {
 		t.Fatalf("set missing applying hint = %q", out)
 	}
 	code, out, _ = run(t, root, "show")

@@ -120,7 +120,7 @@ func setCmd(root string, args []string, stdout, stderr io.Writer) int {
 		reportRuntimeError(stderr, err)
 		return exitError
 	}
-	effect := "restarting service to apply"
+	effect := "restart required - run `oswald restart` to apply"
 	if oldCfg != nil {
 		if nextCfg, err := config.Validate(abs); err == nil {
 			if config.ReloadEffect(oldCfg, nextCfg) == "live" {

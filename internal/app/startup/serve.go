@@ -6,15 +6,28 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
+// ServerPIDFile is the PID marker the service writes inside the configuration
+// root so `oswald restart` can signal the running process in place.
+const ServerPIDFile = "server.pid"
+
 // Serve loads one configuration root and runs the service until the context is
 // cancelled or startup fails. It logs classified diagnostics itself and returns
 // the cause after cleanup; it never calls os.Exit. The terminal banner is only
 // rendered when stdout is a terminal *os.File.
+//
+// The server writes <root>/server.pid (0600) on boot and removes it on clean
+// shutdown. `oswald restart` sends SIGTERM to that PID; the container runtime
+// restarts the container in the same pod. Load-bearing config and plugin
+// changes never restart automatically: mutating CLI commands print
+// "run `oswald restart` to apply" and non-hot watcher hits only log
+// `config.reload.restart_required` as an advisory.
 func Serve(ctx context.Context, root string, stdout io.Writer) error {
 	cfg, err := config.LoadProfiles(root)
 	if file, ok := stdout.(*os.File); ok {
@@ -27,12 +40,11 @@ func Serve(ctx context.Context, root string, stdout io.Writer) error {
 	rootLog := config.NewLogger(cfg.LogLevel)
 	log := rootLog.Server("app")
 	log.Debug("app.config.loaded", "loaded runtime configuration", config.F("log_level", cfg.LogLevel.String()))
+	writeServerPID(cfg.ProfileRoot, log)
+	defer removeServerPID(cfg.ProfileRoot)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	err = Run(ctx, cfg, rootLog, stdout)
 	stop()
-	if errors.Is(err, errRebuildNeeded) {
-		return execSelf(rootLog)
-	}
 	if err != nil {
 		var startupErr *Error
 		if errors.As(err, &startupErr) {
@@ -45,24 +57,20 @@ func Serve(ctx context.Context, root string, stdout io.Writer) error {
 	return nil
 }
 
-// execSelf replaces the current process with a fresh instance of this binary
-// carrying the same arguments and environment. It runs only after Run has
-// returned and joined every worker, so listeners and stores are fully closed
-// and the new process binds cleanly. It returns only on failure.
-func execSelf(log *config.Logger) error {
-	exe, err := os.Executable()
-	if err != nil {
-		log.Error("app.restart.failed", "automatic restart failed: cannot locate executable", config.ErrorField(err))
-		return err
+// writeServerPID records the serving process ID for `oswald restart`.
+// Failures are advisory: PID 1 containers and read-only roots must still serve.
+func writeServerPID(root string, log *config.Logger) {
+	path := filepath.Join(root, ServerPIDFile)
+	if err := config.AtomicWritePrivateFile(path, []byte(strconv.Itoa(os.Getpid()))); err != nil {
+		log.Warn("app.pid.write_failed", "could not write server pid file", config.ErrorField(err))
 	}
-	// The graceful shutdown already logged app.stopped with
-	// cleanup_reason=rebuild; no INFO event is emitted here because INFO
-	// belongs to the fixed activity/lifecycle catalog.
-	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
-		log.Error("app.restart.failed", "automatic restart failed", config.ErrorField(err))
-		return err
-	}
-	return nil
+}
+
+// removeServerPID clears the PID marker on clean shutdown. A stale file after
+// a crash is tolerated: `oswald restart` treats a dead PID as not running and
+// removes it.
+func removeServerPID(root string) {
+	_ = os.Remove(filepath.Join(root, ServerPIDFile))
 }
 
 // logFailure logs a fixed event with safe configuration diagnostics: the
