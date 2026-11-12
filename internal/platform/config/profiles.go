@@ -796,12 +796,22 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 			if route.Platform == "bluebubbles" {
 				route.Platform = "imessage"
 			}
-			if route.Platform != "discord" && route.Platform != "imessage" {
+			if route.Platform != "discord" && route.Platform != "imessage" && route.Platform != "*" {
 				return nil, configErr("config_route_invalid", "gateway.profile_routes")
 			}
-			id, err := NormalizeGatewayIdentifier(route.Platform, route.UserID)
-			if err != nil {
+			if route.Platform == "*" && route.UserID != "*" {
+				// Identities are platform-namespaced, so a cross-platform
+				// catch-all for one concrete user is ambiguous: use a
+				// per-platform "user_id: *" entry or the global "*/*" one.
 				return nil, configErr("config_route_invalid", "gateway.profile_routes")
+			}
+			id := route.UserID
+			if route.Platform != "*" && id != "*" {
+				var err error
+				id, err = NormalizeGatewayIdentifier(route.Platform, id)
+				if err != nil {
+					return nil, configErr("config_route_invalid", "gateway.profile_routes")
+				}
 			}
 			route.UserID = id
 			key := route.Platform + ":" + id

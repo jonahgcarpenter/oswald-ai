@@ -39,12 +39,13 @@ const (
 	showUsage         = "usage: oswald gateway show"
 	setMultiplexUsage = "usage: oswald gateway set-multiplex <true|false>"
 	routesListUsage   = "usage: oswald gateway routes list"
-	routesAddUsage    = "usage: oswald gateway routes add --name N --platform discord|bluebubbles --user-id ID --profile P"
+	routesAddUsage    = "usage: oswald gateway routes add --name N --platform discord|bluebubbles|* --user-id ID|* --profile P"
 	routesRemoveUsage = "usage: oswald gateway routes remove <name>"
 )
 
-// validRoutePlatforms is the exact set of route platforms in config files.
-var validRoutePlatforms = map[string]bool{"discord": true, "bluebubbles": true}
+// validRoutePlatforms is the exact set of route platform keys this command accepts.
+// "*" is a catch-all matching any platform.
+var validRoutePlatforms = map[string]bool{"discord": true, "bluebubbles": true, "*": true}
 
 // retiredPlatforms catches the old spelling so the error can redirect.
 var retiredPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true, "imessage": true}
@@ -126,7 +127,7 @@ func gatewayUsage(w io.Writer) {
 	fmt.Fprintln(w, "  show                       gateway routing section")
 	fmt.Fprintln(w, "  set-multiplex <BOOL>       set gateway.multiplex_profiles")
 	fmt.Fprintln(w, "  routes list                list profile routes")
-	fmt.Fprintln(w, "  routes add --name N --platform discord|bluebubbles --user-id ID --profile P")
+	fmt.Fprintln(w, "  routes add --name N --platform discord|bluebubbles|* --user-id ID|* --profile P")
 	fmt.Fprintln(w, "  routes remove <name>      remove a route by name")
 	fmt.Fprintln(w, "  (platform toggles moved to: oswald platforms enable|disable <name>)")
 }
@@ -185,7 +186,8 @@ func routesCmd(root string, args []string, stdout, stderr io.Writer) int {
 	if help.WantsHelp(args) {
 		fmt.Fprintln(stdout, "usage: oswald gateway routes <list|add|remove> [options]")
 		fmt.Fprintln(stdout, "  list                   list profile routes")
-		fmt.Fprintln(stdout, "  add --name N --platform discord|bluebubbles --user-id ID --profile P")
+		fmt.Fprintln(stdout, "  add --name N --platform discord|bluebubbles|* --user-id ID|* --profile P")
+		fmt.Fprintln(stdout, "                         use user-id * (or platform * with user-id *) as a catch-all")
 		fmt.Fprintln(stdout, "  remove <name>          remove a route by name")
 		return exitOK
 	}

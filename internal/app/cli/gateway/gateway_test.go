@@ -55,6 +55,23 @@ func run(t *testing.T, root string, args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+func TestRoutesWildcardAddAndRemove(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "guest"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := run(t, root, "routes", "add", "--name", "fallback", "--platform", "*", "--user-id", "*", "--profile", "guest"); code != 0 {
+		t.Fatalf("routes add wildcard = %d %s", code, stderr)
+	}
+	code, out, _ := run(t, root, "routes", "list")
+	if code != 0 || !strings.Contains(out, "guest") {
+		t.Fatalf("routes list = %d %q, want guest entry", code, out)
+	}
+	if code, _, stderr := run(t, root, "routes", "remove", "fallback"); code != 0 {
+		t.Fatalf("routes remove = %d %s", code, stderr)
+	}
+}
+
 func TestShowDisplaysGateway(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	code, out, _ := run(t, root, "show")

@@ -50,7 +50,12 @@ exchanges per transaction, 24h inactivity, 15-minute pending timeout, passive WA
 
 `profiles/` maps transport-authenticated identities to existing profiles (`bluebubbles`
 normalizes to internal `imessage`), falling back to the default profile when no route matches;
-explicit default routes need no multiplexing, named ones do. `banned_users` always reject first;
+explicit default routes need no multiplexing, named ones do. A route entry may use `"*"` as
+`platform` and/or `user_id` as an explicit catch-all (`{"discord","*"}` per-platform,
+`{"*","*"}` global; `platform:"*"` with a concrete user is rejected as ambiguous). Matching
+is most-specific first — exact, then per-platform wildcard, then global wildcard, then the
+implicit default fallback. Catch-alls only choose the profile; admission (`banned_users`
+first, then allow lists) still runs before and can reject. `banned_users` always reject first;
 empty `allowed_users` admits every routed identity — and admission runs before attachment or reply
 work. `identity/` defines the principal contract: `CanonicalUserID` carries the trusted profile
 name while `user_id` stays an untrusted display label, never ownership; the `cron` gateway's
