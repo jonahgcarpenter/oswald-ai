@@ -99,12 +99,16 @@ monorepos; unpinned installs follow the remote HEAD on `update`. Manifests at
 `--node-package`/`--node-version` flags (both required together; conflicts with a
 manifest declaration fail closed), or a root `package.json` with a lockfile
 (`npm ci`; a `package.json` without one is ignored). The resolved spec is
-recorded in `code/.install-metadata.json`, so `install-deps` falls back to it
-when the manifest declares nothing; `update` carries it forward
-and refreshes the sidecar after moving code. Reinstalling the same source is a
-no-op that repairs a missing sidecar. Reads (`list`, `info`) may name
+recorded in `code/.install-metadata.json`; `update` carries it forward
+and refreshes the sidecar after moving code. Reinstalling the same source is
+idempotent: a no-op when complete, and a `--no-deps` install healed by a plain
+reinstall (no flags needed — the recorded spec is reused, so the bare CLI name
+works right after). Reinstalling with `--no-deps` never strips an existing
+sidecar. Reads (`list`, `info`) may name
 another profile; mutations stay fenced to the calling scope
-(`OSWALD_HOME` mismatch fails closed). Everything plugins-related is restart-classified.
+(`OSWALD_HOME` mismatch fails closed). Plugin code changes need
+`oswald restart` (tool/skill/hook registration); installed CLIs run by bare
+name immediately.
 Old shared `plugins-available/` trees are orphaned and never read; operators may
 delete them by hand. Foreign ecosystems (OpenCode, Hermes, Claude bundles) are
 not installed directly: convert first with the `plugin-convert` skill

@@ -343,6 +343,19 @@ func InstallFromURL(ctx context.Context, profileRoot, raw string, opts InstallOp
 	if err != nil {
 		return InstallResult{}, err
 	}
+	// Idempotent reinstall: when the caller supplies no explicit flags and
+	// the staged source resolves no sidecar, fall back to the recorded
+	// install-time spec (the same rule install-deps resolution uses). A
+	// `--no-deps` install healed by a plain reinstall then matches its own
+	// provenance instead of failing closed on a spec mismatch. Explicit
+	// conflicting flags keep the fail-closed error below.
+	if !spec.Present() && strings.TrimSpace(opts.NodePackage) == "" && strings.TrimSpace(opts.NodeVersion) == "" {
+		if meta, err := ReadInstallMetadata(profileRoot, manifest.Name); err == nil {
+			if fallback, ok := ResolveNodeSpec(*manifest, meta); ok {
+				spec = fallback
+			}
+		}
+	}
 	// The published directory is always the manifest name so the key stays
 	// canonical: the repo or local path is only a transport.
 	dest := PluginCodeDir(profileRoot, manifest.Name)

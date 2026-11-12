@@ -394,6 +394,47 @@ func TestInstallNodeFlagsRecordedWithoutInstall(t *testing.T) {
 	}
 }
 
+func TestNoDepsInstallHealedByPlainReinstall(t *testing.T) {
+	profile := t.TempDir()
+	src := filepath.Join(t.TempDir(), "healable")
+	installFixture(t, src, "healable", "")
+	log := config.NewLogger(config.LevelWarn)
+	if _, err := InstallFromURL(t.Context(), profile, src, InstallOptions{
+		NodePackage: "agent-data", NodeVersion: "0.13.0", NoDeps: true,
+	}, log); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// The sidecar is absent (NoDeps skips npm), so fake the installed binary:
+	// the reinstall path must match provenance without running npm.
+	binDir := filepath.Join(PluginCodeDir(profile, "healable"), "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "agent-data"), []byte("#!/bin/sh\necho synthetic\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Plain reinstall with no flags reuses the recorded spec instead of
+	// failing closed on a spec mismatch.
+	again, err := InstallFromURL(t.Context(), profile, src, InstallOptions{}, log)
+	if err != nil {
+		t.Fatalf("healing reinstall: %v", err)
+	}
+	if !again.AlreadyInstalled {
+		t.Fatalf("healing reinstall was not idempotent: %+v", again)
+	}
+	if again.DepsInstalled {
+		t.Fatalf("repair reported on a complete sidecar: %+v", again)
+	}
+	// Reinstalling with --no-deps is a safe no-op that never strips deps.
+	keep, err := InstallFromURL(t.Context(), profile, src, InstallOptions{NoDeps: true}, log)
+	if err != nil || !keep.AlreadyInstalled {
+		t.Fatalf("no-deps reinstall = %+v %v", keep, err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "agent-data")); err != nil {
+		t.Fatal("no-deps reinstall stripped the sidecar")
+	}
+}
+
 func TestInstallNodeFlagsValidation(t *testing.T) {
 	profile := t.TempDir()
 	src := filepath.Join(t.TempDir(), "half-flagged")

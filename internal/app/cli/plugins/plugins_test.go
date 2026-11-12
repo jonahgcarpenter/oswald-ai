@@ -159,6 +159,26 @@ func TestInstallScopeFencing(t *testing.T) {
 	}
 }
 
+func TestInstallHealsNoDepsWithoutFlags(t *testing.T) {
+	root := pluginsTestRoot(t)
+	src := installSourceFixture(t, "healed")
+	if code, _, stderr := pluginsRun(t, root, "install", src, "--node-package", "agent-data", "--node-version", "0.13.0", "--no-deps"); code != 0 {
+		t.Fatalf("install = %d %s", code, stderr)
+	}
+	// Fake the sidecar binary so the healing path verifies without npm.
+	binDir := filepath.Join(plugins.PluginCodeDir(root, "healed"), "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "agent-data"), []byte("#!/bin/sh\necho synthetic\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No flags, no --force: the recorded spec is reused.
+	if code, out, stderr := pluginsRun(t, root, "install", src); code != 0 || !strings.Contains(out, "already installed healed") {
+		t.Fatalf("healing reinstall = %d %q %s", code, out, stderr)
+	}
+}
+
 func TestInstallValidation(t *testing.T) {
 	root := pluginsTestRoot(t)
 	if code, _, _ := pluginsRun(t, root, "install", "notaurl with spaces"); code == 0 {
