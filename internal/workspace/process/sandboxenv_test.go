@@ -108,3 +108,29 @@ func TestWithNodeOnPath(t *testing.T) {
 		t.Fatalf("not idempotent: %q", again)
 	}
 }
+
+func TestWithPluginShimsOnPath(t *testing.T) {
+	profile := filepath.Join("tmp", ".oswald")
+	base := []string{"PATH=/opt/oswald:/usr/bin:/bin", "HOME=/nowhere"}
+	out := WithPluginShimsOnPath(WithNodeOnPath(base), profile)
+	var pathLine string
+	for _, entry := range out {
+		if strings.HasPrefix(entry, "PATH=") {
+			pathLine = entry
+		}
+	}
+	want := filepath.Join(profile, "plugins", ".bin")
+	if !strings.HasSuffix(pathLine, string(os.PathListSeparator)+want) {
+		t.Fatalf("shim dir not appended at end: %q", pathLine)
+	}
+	if !strings.Contains(pathLine, "/opt/oswald:/usr/bin:/bin") {
+		t.Fatalf("base PATH lost: %q", pathLine)
+	}
+	// Idempotent and empty-root safe.
+	if again := WithPluginShimsOnPath(out, profile); len(again) != len(out) {
+		t.Fatalf("not idempotent: %q", again)
+	}
+	if same := WithPluginShimsOnPath(base, ""); len(same) != len(base) {
+		t.Fatalf("empty root changed base: %q", same)
+	}
+}

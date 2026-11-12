@@ -32,13 +32,15 @@ func PluginDataDir(profileRoot, plugin string) string {
 
 // RepairProfile ensures the per-profile plugins parent exists owner-only.
 // Per-plugin dirs are created on demand. It never migrates or deletes
-// operator data.
+// operator data. It also regenerates bare-name shims so existing installs
+// stay runnable after upgrades.
 func RepairProfile(profileRoot string) {
 	dir := ProfilePluginsDir(profileRoot)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return
 	}
 	_ = os.Chmod(dir, 0700)
+	_ = RegenerateShims(profileRoot)
 }
 
 // LoadFromProfile discovers profile-local plugins and enables every present

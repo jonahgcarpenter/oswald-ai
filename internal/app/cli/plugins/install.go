@@ -90,9 +90,31 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 	deps := ""
 	if result.DepsInstalled {
 		deps = ", node deps installed"
+		if bin := runnableBinName(profileRoot, result.Key); bin != "" {
+			deps += ", '" + bin + "' runnable now"
+		}
 	}
 	fmt.Fprintf(stdout, "%s %s (%s, enabled for %s%s, %s)\n", verb, result.Key, pin, target, deps, effectForChange(mustAbs(root), oldCfg))
 	return exitOK
+}
+
+// runnableBinName returns the bare terminal name for an installed plugin's
+// CLI (node bin or entry key), or "" when the plugin exposes no binary.
+// Shims regenerate during install, so a non-empty name is runnable now.
+func runnableBinName(profileRoot, key string) string {
+	winners := discoverForList(profileRoot)
+	manifest, ok := winners[key]
+	if !ok {
+		return ""
+	}
+	meta, _ := plugins.ReadInstallMetadata(profileRoot, key)
+	if bin := plugins.EffectiveNodeBin(manifest, meta, ""); bin != "" {
+		return bin
+	}
+	if strings.TrimSpace(manifest.Entry) != "" {
+		return key
+	}
+	return ""
 }
 
 // updateCmd refreshes one profile install in place. Pinned installs need an

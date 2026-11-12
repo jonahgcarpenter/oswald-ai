@@ -50,64 +50,13 @@ func installDepsCmd(ctx context.Context, root, flagProfile, raw string, stdout, 
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	bin, err := plugins.NodeBinPath(profileRoot, name, plugins.EffectiveNodeBin(manifest, meta, ""))
-	if err != nil {
-		fmt.Fprintf(stderr, "oswald: %v\n", err)
-		return exitError
+	// Shims regenerate inside the install call, so the bare name is
+	// runnable in terminal immediately; tool/hook registration still
+	// needs `oswald restart`.
+	if bin := plugins.EffectiveNodeBin(manifest, meta, ""); bin != "" {
+		fmt.Fprintf(stdout, "installed %s node dependencies ('%s' runnable now; restart required - run `oswald restart` to apply)\n", name, bin)
+		return exitOK
 	}
-	fmt.Fprintf(stdout, "installed %s node dependencies (restart required - run `oswald restart` to apply)\n%s\n", name, bin)
-	return exitOK
-}
-
-// binPathCmd prints the absolute plugin-local binary path for explicit use in
-// terminal commands. It never mutates PATH; the caller passes the absolute
-// path to terminal/process_manage. Installs are per-profile.
-func binPathCmd(root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
-	bin := ""
-	var names []string
-	for _, token := range rest {
-		if strings.HasPrefix(token, "--bin=") {
-			bin = strings.TrimSpace(strings.TrimPrefix(token, "--bin="))
-			continue
-		}
-		if token == "--bin" {
-			fmt.Fprintln(stderr, "usage: oswald plugins bin-path <name> [--bin BIN] [--profile NAME]")
-			return exitUsage
-		}
-		if strings.HasPrefix(token, "--profile") {
-			continue
-		}
-		names = append(names, token)
-	}
-	if len(names) != 1 {
-		fmt.Fprintln(stderr, "usage: oswald plugins bin-path <name> [--bin BIN] [--profile NAME]")
-		return exitUsage
-	}
-	name := strings.ToLower(strings.TrimSpace(names[0]))
-	if !plugins.ValidPluginKey(name) {
-		fmt.Fprintf(stderr, "oswald: invalid plugin name %q\n", names[0])
-		return exitUsage
-	}
-	_, _, profileRoot, err := resolveScope(root, flagProfile, false)
-	if err != nil {
-		reportPluginsError(stderr, err)
-		return exitError
-	}
-	winners := discoverForList(profileRoot)
-	manifest, ok := winners[name]
-	if !ok {
-		fmt.Fprintf(stderr, "oswald: unknown plugin %q\n", names[0])
-		return exitError
-	}
-	meta, _ := plugins.ReadInstallMetadata(profileRoot, name)
-	if bin == "" {
-		bin = plugins.EffectiveNodeBin(manifest, meta, "")
-	}
-	resolved, err := plugins.NodeBinPath(profileRoot, name, bin)
-	if err != nil {
-		fmt.Fprintf(stderr, "oswald: %v\n", err)
-		return exitError
-	}
-	fmt.Fprintln(stdout, resolved)
+	fmt.Fprintf(stdout, "installed %s node dependencies (restart required - run `oswald restart` to apply)\n", name)
 	return exitOK
 }

@@ -164,11 +164,10 @@ func pluginRuntimeNote(profileRoot string, pluginSkills []skills.PluginRoot, sou
 	}
 	var sb strings.Builder
 	sb.WriteString("\n\nPlugin runtime: this skill ships with plugin \"" + source + "\".")
-	sb.WriteString(" Its CLI lives under " + filepath.Join(filepath.Dir(skillsDir), "node_modules", ".bin") + ";")
-	sb.WriteString(" add that directory to PATH for terminal calls instead of installing anything.")
+	sb.WriteString(" Its CLI runs by bare name in terminal (installed shims are on PATH);")
+	sb.WriteString(" run it directly instead of resolving any path.")
 	if strings.TrimSpace(profileRoot) != "" {
-		sb.WriteString(" Run its commands with HOME set to " + filepath.Join(profileRoot, "plugins", filepath.FromSlash(source), "data", "home") + ";")
-		sb.WriteString(" credentials live in that home's config.")
+		sb.WriteString(" Commands run with the plugin data home (credentials live in that home's config).")
 	}
 	sb.WriteString(" Setup guides in the repo written for other agent systems do not apply here.")
 	return sb.String()

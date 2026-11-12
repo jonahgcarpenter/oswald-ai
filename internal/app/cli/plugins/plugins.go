@@ -60,18 +60,6 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 			return exitUsage
 		}
 		return installDepsCmd(ctx, root, profile, rest[1], stdout, stderr)
-	case "bin-path":
-		if len(rest) < 2 {
-			fmt.Fprintln(stderr, "usage: oswald plugins bin-path <name> [--bin BIN] [--profile NAME]")
-			return exitUsage
-		}
-		return binPathCmd(root, profile, rest[1:], stdout, stderr)
-	case "exec":
-		if len(rest) < 2 {
-			fmt.Fprintln(stderr, "usage: oswald plugins exec <name> [--bin BIN] [--timeout SECS] [-- <args...>] [--profile NAME]")
-			return exitUsage
-		}
-		return execCmd(ctx, root, profile, rest[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		pluginsUsage(stdout)
 		return exitOK
@@ -83,12 +71,10 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 }
 
 func pluginsUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald plugins [--profile NAME] <list|info|install-deps|bin-path|exec|install|update|remove> [name]")
+	fmt.Fprintln(w, "usage: oswald plugins [--profile NAME] <list|info|install-deps|install|update|remove> [name]")
 	fmt.Fprintln(w, "  list                  installed plugins (presence means enabled)")
 	fmt.Fprintln(w, "  info <name>           manifest and entry state, secrets redacted")
 	fmt.Fprintln(w, "  install-deps <name>   install pinned npm deps into the profile plugin home")
-	fmt.Fprintln(w, "  bin-path <name>       print the absolute plugin-local binary path")
-	fmt.Fprintln(w, "  exec <name>           run an installed plugin binary for the calling profile")
 	fmt.Fprintln(w, "  install <source>      install a plugin from a git URL, owner/repo, or path (deps install too)")
 	fmt.Fprintln(w, "  update <name>         refresh a managed install (pins need --ref)")
 	fmt.Fprintln(w, "  remove <name>         drop a plugin and delete profile code (--full also deletes data)")

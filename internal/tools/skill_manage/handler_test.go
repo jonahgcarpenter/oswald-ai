@@ -205,8 +205,7 @@ func TestBundledSkillViewCarriesRuntimeNote(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Plugin runtime:",
-		filepath.Join(filepath.Dir(skillsDir), "node_modules", ".bin"),
-		filepath.Join(root, "plugins", "demo", "data", "home"),
+		"bare name in terminal",
 		"do not apply here",
 	} {
 		if !strings.Contains(viewed.Content, want) {

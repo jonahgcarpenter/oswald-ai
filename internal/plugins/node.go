@@ -130,6 +130,11 @@ func InstallNodePackage(ctx context.Context, profileRoot, key, bin, spec, dir st
 			return fmt.Errorf("plugin binary is not installed")
 		}
 	}
+	if isLive {
+		if err := RegenerateShims(profileRoot); err != nil && log != nil {
+			log.Server("plugin.node").Warn("plugin.shim.regen_failed", "plugin shim regeneration failed", config.F("plugin", key))
+		}
+	}
 	return nil
 }
 
@@ -179,6 +184,11 @@ func InstallNodeLockfile(ctx context.Context, profileRoot, key, dir string, log 
 	}
 	if log != nil {
 		log.Server("plugin.node").Debug("plugin.node.installed", "installed plugin node dependencies", config.F("plugin", key))
+	}
+	if key != "" && strings.TrimSpace(profileRoot) != "" && isLive {
+		if err := RegenerateShims(profileRoot); err != nil && log != nil {
+			log.Server("plugin.node").Warn("plugin.shim.regen_failed", "plugin shim regeneration failed", config.F("plugin", key))
+		}
 	}
 	return nil
 }

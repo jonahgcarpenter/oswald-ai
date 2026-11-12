@@ -232,7 +232,7 @@ func runShell(ctx context.Context, command, dir, scratch, home string, timeoutSe
 		"OSWALD_SCRATCH=" + scratch,
 		"OSWALD_HOME=" + home,
 	}
-	cmd.Env = append(process.SandboxEnvForProfile(process.WithNodeOnPath(base), home), process.GitHubTokenEnv()...)
+	cmd.Env = append(process.SandboxEnvForProfile(process.WithPluginShimsOnPath(process.WithNodeOnPath(base), home), home), process.GitHubTokenEnv()...)
 	var buf bytes.Buffer
 	cmd.Stdout = &limitedWriter{buf: &buf, limit: maxTerminalOutput}
 	cmd.Stderr = &limitedWriter{buf: &buf, limit: maxTerminalOutput}

@@ -56,6 +56,12 @@ func TestClassifyGroups(t *testing.T) {
 		// skills: system everywhere, tool-mediated; nested namesakes stay agent-owned.
 		{filepath.Join(root, "skills", "review", "SKILL.md"), GroupSystem},
 		{filepath.Join(root, "skills"), GroupSystem},
+		// Generated plugin shims: system-managed like skills; model runs them
+		// but only install/update/remove/install-deps and boot repair write.
+		{filepath.Join(root, "plugins", ".bin", "demo"), GroupSystem},
+		// Plugin code stays agent-owned so `oswald plugins install` writes
+		// through terminal confinement.
+		{filepath.Join(root, "plugins", "demo", "code", "plugin.yaml"), GroupAgent},
 		{filepath.Join(root, "profiles", "bob", "skills", "review", "SKILL.md"), GroupSystem},
 		{filepath.Join(root, "project", "skills", "notes.md"), GroupAgent},
 		// SOUL.md: agent same-profile, system cross-profile.
@@ -182,9 +188,10 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 		"state.db":                                    "system-managed",
 		filepath.Join("memories", "USER.md"):          "memory tool",
 		filepath.Join("skills", "review", "SKILL.md"): "skill_manage tool",
-		".env": "oswald env",
-		filepath.Join("profiles", "bob", "notes.md"): "system-managed",
-		"/tmp/outside.txt":                           "system-managed",
+		filepath.Join("plugins", ".bin", "demo"):      "system-managed",
+		".env":                                        "oswald env",
+		filepath.Join("profiles", "bob", "notes.md"):  "system-managed",
+		"/tmp/outside.txt":                            "system-managed",
 	}
 	for raw, want := range writeDeny {
 		_, _, err := ws.ResolveWrite(raw)

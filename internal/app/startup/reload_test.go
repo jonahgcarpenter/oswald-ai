@@ -267,6 +267,18 @@ func TestReloaderAdvisesOnPluginInstall(t *testing.T) {
 	if count := strings.Count(output.String(), `"event":"config.reload.restart_required"`); count != 2 {
 		t.Fatalf("node sidecar install advisories = %d, want 2", count)
 	}
+	// Derived shims never trigger an advisory (no fingerprint loop).
+	before := output.String()
+	if err := os.MkdirAll(filepath.Join(root, "plugins", ".bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "plugins", ".bin", "demo"), []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	loader.Check()
+	if output.String() != before {
+		t.Fatal("shim dir change logged an advisory")
+	}
 }
 
 func mustValidate(t *testing.T, root string) *config.Config {

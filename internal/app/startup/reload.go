@@ -191,6 +191,12 @@ func pluginFingerprintPaths(profileRoot string) []string {
 			continue
 		}
 		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			// Hidden trees (including the generated .bin shim dir) are
+			// derived state, never installs: keep them out of the
+			// fingerprint so shim regeneration never retriggers itself.
+			continue
+		}
 		if name == "plugins-backup" || (len(name) > 4 && name[:2] == "__" && name[len(name)-2:] == "__") {
 			continue
 		}
@@ -206,13 +212,14 @@ func pluginFingerprintPaths(profileRoot string) []string {
 }
 
 // pluginPathsChanged reports whether any plugin marker path differs between
-// two fingerprints. Config-only changes leave these identical.
+// two fingerprints. Config-only changes leave these identical. Absent markers
+// compare by value, so a newly listed (still absent) path is not a change.
 func pluginPathsChanged(old, next map[string]fileID) bool {
 	for path, nextID := range next {
 		if !isPluginMarkerPath(path) {
 			continue
 		}
-		if oldID, ok := old[path]; !ok || oldID != nextID {
+		if oldID := old[path]; oldID != nextID {
 			return true
 		}
 	}
@@ -220,7 +227,7 @@ func pluginPathsChanged(old, next map[string]fileID) bool {
 		if !isPluginMarkerPath(path) {
 			continue
 		}
-		if nextID, ok := next[path]; !ok || oldID != nextID {
+		if nextID := next[path]; oldID != nextID {
 			return true
 		}
 	}

@@ -210,6 +210,43 @@ func ResolveEnvValue(name string, scope map[string]string) (string, bool) {
 	return "", false
 }
 
+// WithPluginShimsOnPath appends the per-profile plugin shim directory to the
+// PATH entries of a child env base, so installed plugin CLIs run by bare name
+// (kubectl-style) in terminal, execute_code, and background processes. The
+// directory is fixed per profile (<profileRoot>/plugins/.bin); individual
+// plugin trees never touch PATH. Missing directories are harmless list
+// entries, so the base stays deterministic without a spawn-time stat.
+// Unknown or empty roots pass through unchanged. Duplicates are not added.
+func WithPluginShimsOnPath(base []string, profileRoot string) []string {
+	profileRoot = strings.TrimSpace(profileRoot)
+	if profileRoot == "" {
+		return base
+	}
+	shimDir := filepath.Join(profileRoot, "plugins", ShimDirName)
+	out := append([]string(nil), base...)
+	for i, entry := range out {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.EqualFold(key, "PATH") {
+			continue
+		}
+		for _, part := range strings.Split(value, string(os.PathListSeparator)) {
+			if part == shimDir {
+				return out
+			}
+		}
+		out[i] = "PATH=" + value + string(os.PathListSeparator) + shimDir
+	}
+	return out
+}
+
+// PluginShimDirName is the leaf name of the per-profile shim directory.
+// It mirrors plugins.ShimDirName without importing the plugins package
+// (plugins imports this package for sandbox construction).
+const PluginShimDirName = ".bin"
+
+// ShimDirName aliases PluginShimDirName for call-site readability.
+const ShimDirName = PluginShimDirName
+
 // WithNodeOnPath ensures the server-resolved node directory heads the PATH
 // entries of a child env base, so plugin shims (`#!/usr/bin/env node`) run
 // under sandboxed PATHs that would otherwise hide node. Bases without a PATH
