@@ -13,8 +13,8 @@ import (
 // <name>/{code,data} trees so one fixed PATH entry
 // (<profileRoot>/plugins/.bin) exposes every install. The model runs the bare
 // tool name in terminal; the wrapper sets the per-plugin data HOME and execs
-// the absolute target. Shims are derived cache: install/update/remove,
-// install-deps, and boot repair regenerate them.
+// the absolute target. Shims are derived cache: install/update/remove and
+// boot repair regenerate them; a plain reinstall also heals `--no-deps`.
 const ShimDirName = ".bin"
 
 // PluginShimDir returns the per-profile shim directory:

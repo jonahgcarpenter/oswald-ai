@@ -259,7 +259,7 @@ func TestReloaderAdvisesOnPluginInstall(t *testing.T) {
 	if !strings.Contains(output.String(), `"event":"config.reload.restart_required"`) {
 		t.Fatal("plugin install did not log restart advisory")
 	}
-	// Simulate `install-deps`: sidecar marker appears, config identical.
+	// Simulate a sidecar appearing (healed deps): marker changes, config identical.
 	if err := os.MkdirAll(filepath.Join(codeDir, "node_modules"), 0700); err != nil {
 		t.Fatal(err)
 	}

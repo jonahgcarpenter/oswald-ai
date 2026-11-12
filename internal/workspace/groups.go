@@ -125,8 +125,8 @@ func Classify(abs, root string) Group {
 		return GroupSystem
 	}
 	// Generated plugin shims are tool-managed like the skills tree: the model
-	// runs them by bare name, but only install/update/remove/install-deps and
-	// boot repair may write them — never direct file edits.
+	// runs them by bare name, but only install/update/remove and boot repair
+	// may write them — never direct file edits.
 	if underPath(abs, filepath.Join(root, "plugins", ".bin")) {
 		return GroupSystem
 	}

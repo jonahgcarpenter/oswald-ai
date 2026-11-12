@@ -145,7 +145,7 @@ func (r *Reloader) Check() {
 // fingerprint records size and mtime for every config artifact, including
 // absent markers so creation and deletion are changes too. It also covers
 // per-profile plugin markers (manifest, install metadata, node sidecar) so
-// `plugins install/update/install-deps/remove` surfaces the same restart
+// `plugins install/update/remove` surfaces the same restart
 // advisory without any automatic restart.
 func fingerprint(root string) map[string]fileID {
 	out := map[string]fileID{}
@@ -178,7 +178,7 @@ func fingerprint(root string) map[string]fileID {
 // per-profile plugin install. The node sidecar lives under code/node_modules
 // (potentially thousands of files), so only the directory marker plus the
 // manifest and install metadata are fingerprinted: enough to detect
-// install/update/install-deps/remove without walking the sidecar tree.
+// install/update/remove without walking the sidecar tree.
 func pluginFingerprintPaths(profileRoot string) []string {
 	pluginsRoot := filepath.Join(profileRoot, "plugins")
 	entries, err := os.ReadDir(pluginsRoot)

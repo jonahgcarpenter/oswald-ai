@@ -91,24 +91,11 @@ func TestInfoRedacts(t *testing.T) {
 	}
 }
 
-func TestInstallDepsGates(t *testing.T) {
-	root := pluginsTestRoot(t)
-	if code, _, _ := pluginsRun(t, root, "install-deps", "ghost"); code == 0 {
-		t.Fatal("unknown install-deps accepted")
-	}
-	if code, _, _ := pluginsRun(t, root, "install-deps", "demo"); code == 0 {
-		t.Fatal("install-deps without node deps accepted")
-	}
-	// Per-profile reads: unknown plugin in another profile fails, not usage.
-	if code, _, _ := pluginsRun(t, root, "install-deps", "demo", "--profile", "alice"); code == 0 {
-		t.Fatal("alice install-deps accepted")
-	}
-}
-
 func TestRemovedExecSurface(t *testing.T) {
 	root := pluginsTestRoot(t)
-	// bin-path and exec are gone: the model runs bare names in terminal.
-	for _, args := range [][]string{{"bin-path", "demo"}, {"exec", "demo", "--", "x"}} {
+	// bin-path, exec, and install-deps are gone: deps install with the
+	// plugin, and the model runs bare names in terminal.
+	for _, args := range [][]string{{"bin-path", "demo"}, {"exec", "demo", "--", "x"}, {"install-deps", "demo"}} {
 		if code, _, _ := pluginsRun(t, root, args...); code == 0 {
 			t.Fatalf("%v accepted after removal", args[0])
 		}

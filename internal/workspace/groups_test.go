@@ -57,7 +57,7 @@ func TestClassifyGroups(t *testing.T) {
 		{filepath.Join(root, "skills", "review", "SKILL.md"), GroupSystem},
 		{filepath.Join(root, "skills"), GroupSystem},
 		// Generated plugin shims: system-managed like skills; model runs them
-		// but only install/update/remove/install-deps and boot repair write.
+		// but only install/update/remove and boot repair write.
 		{filepath.Join(root, "plugins", ".bin", "demo"), GroupSystem},
 		// Plugin code stays agent-owned so `oswald plugins install` writes
 		// through terminal confinement.

@@ -127,7 +127,6 @@ commands:
   plugins list|info           manage profile plugins (presence means enabled)
   plugins install|update|remove
                           install from URL, refresh, or remove per-profile plugin code
-  plugins install-deps      install pinned npm deps (bare name runnable after)
   skills list|info|install|update|remove
                           manage per-profile skills
   api show|set-key|clear-key

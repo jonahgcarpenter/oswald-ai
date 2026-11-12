@@ -41,7 +41,7 @@ config, and storage all live under the profile — same island rule as `mcp_serv
   `data/` untouched); `RemoveInstall` deletes code by default, everything with
   `full`. Ranges, tags, URLs, and file specs fail closed.
 - `node.go` owns the per-profile Node sidecar (`<profile>/plugins/<name>/code/node_modules`,
-  installed via `install-deps` as the consent gate, profile-fenced): pinned
+  installed as part of `install` (explicit `--no-deps` opts out), profile-fenced): pinned
   `npm install` with bounded output and timeouts, plus `NodeBinPath` internal
   resolution for shim targets. npm cache/tmp live under `data/cache/node` so `code/` stays a clean
   copy.
@@ -85,7 +85,7 @@ Code, config, and storage stay per profile. From the calling profile's scope
 ```bash
 oswald plugins install owner/repo --profile jonah  # https URL or local path too
 oswald plugins install owner/repo --node-package agent-data --node-version 0.13.0 --profile jonah  # sidecar for manifests predating node_package
-oswald plugins install-deps demo --profile jonah   # pinned npm deps, per-profile, explicit consent ('demo' runnable by bare name after)
+oswald plugins install --no-deps owner/repo --profile jonah  # skip the sidecar; heal later with a plain reinstall
 demo --version  # run in terminal by bare name (shim on PATH, HOME=data/home)
 oswald plugins update demo [--ref <40-char SHA>] --profile jonah  # pins never move without --ref
 oswald plugins remove demo --profile jonah [--full]  # code only; --full also deletes data/
