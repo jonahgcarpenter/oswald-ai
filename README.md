@@ -113,17 +113,6 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald config show\|get\|validate`        | Inspect effective configuration (secrets redacted) and validate files; never writes.                            |
 | `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |
 
-Every mutating group validates through the staged startup pipeline before writing, so a rejected
-edit leaves files untouched; each command reports `applied live` vs `restart required - run
-'oswald restart' to apply`. Reads (`show`, `get`, `list`, `validate`) may name another profile; mutations stay
-fenced to the calling profile, and global sections plus profile lifecycle require the default
-scope — contradictions fail closed instead of landing elsewhere. Log-level and admission
-changes apply live; everything else needs `oswald restart`. Installed plugin CLIs are the
-exception: their bare names work in `terminal` immediately after install (per-profile shims
-on `PATH` with `HOME` pointed at the plugin `data/home`) — only tool/skill/hook registration
-waits for the restart. The service itself runs as `oswald-server` (container `CMD`); `oswald`
-is the operator CLI.
-
 ## Documentation
 
 Everything resides in [`AGENTS.md`](AGENTS.md).
