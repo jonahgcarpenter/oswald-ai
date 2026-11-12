@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -30,11 +31,32 @@ const maxSoulBytes = 1 << 20
 // inherit every global provider, model, tool, and MCP default.
 const defaultProfileConfig = "# Optional profile-local overrides: providers, model, tools, mcp.\n{}\n"
 
+// Leaf usage lines double as `--help` pages: `oswald profile <command> --help`
+// prints the same text to stdout and exits 0 before any scope checks.
+const (
+	createUsage = "usage: oswald profile create <name>"
+	renameUsage = "usage: oswald profile rename <old> <new>"
+	deleteUsage = "usage: oswald profile delete <name>"
+)
+
 // Run dispatches the profile command group.
 func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		profileUsage(stderr)
 		return exitUsage
+	}
+	if len(args) >= 2 && help.WantsHelp(args[1:]) {
+		switch args[0] {
+		case "create":
+			fmt.Fprintln(stdout, createUsage)
+			return exitOK
+		case "rename":
+			fmt.Fprintln(stdout, renameUsage)
+			return exitOK
+		case "delete":
+			fmt.Fprintln(stdout, deleteUsage)
+			return exitOK
+		}
 	}
 	switch args[0] {
 	case "create", "rename", "delete":

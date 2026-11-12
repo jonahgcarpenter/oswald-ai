@@ -10,9 +10,16 @@ import (
 )
 
 // setCmd dispatches platforms set <platform> [flags].
+const (
+	setTopUsage         = "usage: oswald platforms set <discord|bluebubbles|api> [flags]"
+	setDiscordUsage     = "usage: oswald platforms set discord [--token REF] [--require-mention BOOL] [--allow IDS] [--ban IDS]"
+	setBluebubblesUsage = "usage: oswald platforms set bluebubbles [flags]"
+	setAPIUsage         = "usage: oswald platforms set api [--host IP] [--port N]"
+)
+
 func setCmd(root string, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set <discord|bluebubbles|api> [flags]")
+		fmt.Fprintln(stderr, setTopUsage)
 		return exitUsage
 	}
 	// Platform name accepted in any position among flags.
@@ -35,14 +42,14 @@ func setCmd(root string, args []string, stdout, stderr io.Writer) int {
 	}
 	if !validPlatforms[platform] {
 		if platform == "" {
-			fmt.Fprintln(stderr, "usage: oswald platforms set <discord|bluebubbles|api> [flags]")
+			fmt.Fprintln(stderr, setTopUsage)
 		} else {
 			fmt.Fprintf(stderr, "oswald: unknown platform %q\n", platform)
 		}
 		return exitUsage
 	}
 	if len(positionals) > 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set <discord|bluebubbles|api> [flags]")
+		fmt.Fprintln(stderr, setTopUsage)
 		return exitUsage
 	}
 	switch platform {
@@ -90,12 +97,12 @@ func setDiscord(root string, flagArgs []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set discord [--token REF] [--require-mention BOOL] [--allow IDS] [--ban IDS]")
+		fmt.Fprintln(stderr, setDiscordUsage)
 		return exitUsage
 	}
 	set := setFlags(sub)
 	if len(set) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set discord [--token REF] [--require-mention BOOL] [--allow IDS] [--ban IDS]")
+		fmt.Fprintln(stderr, setDiscordUsage)
 		return exitUsage
 	}
 	if set["require-mention"] {
@@ -157,12 +164,12 @@ func setBlueBubbles(root string, flagArgs []string, stdout, stderr io.Writer) in
 		return exitUsage
 	}
 	if sub.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set bluebubbles [flags]")
+		fmt.Fprintln(stderr, setBluebubblesUsage)
 		return exitUsage
 	}
 	set := setFlags(sub)
 	if len(set) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set bluebubbles [flags]")
+		fmt.Fprintln(stderr, setBluebubblesUsage)
 		return exitUsage
 	}
 	if set["server-url"] {
@@ -259,12 +266,12 @@ func setAPI(root string, flagArgs []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set api [--host IP] [--port N]")
+		fmt.Fprintln(stderr, setAPIUsage)
 		return exitUsage
 	}
 	set := setFlags(sub)
 	if len(set) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald platforms set api [--host IP] [--port N]")
+		fmt.Fprintln(stderr, setAPIUsage)
 		return exitUsage
 	}
 	abs, err := globalRoot(root)

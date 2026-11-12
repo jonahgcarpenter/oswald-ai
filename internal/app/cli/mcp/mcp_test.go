@@ -233,3 +233,19 @@ func TestRemoveFull(t *testing.T) {
 		t.Fatal("directory survived --full")
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := mcpRun(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald mcp") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "mcp", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"list", "add", "edit", "remove", "test", "auth"} {
+		code, out, _ := mcpRun(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald mcp "+leaf) {
+			t.Fatalf("mcp %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

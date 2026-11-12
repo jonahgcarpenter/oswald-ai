@@ -118,3 +118,19 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 		t.Fatal("default config mutated by rejected set")
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald model") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "model", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald model "+leaf) {
+			t.Fatalf("model %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

@@ -148,3 +148,19 @@ func TestCrossProfileReadAllowed(t *testing.T) {
 		t.Fatalf("cross-profile read rejected: %d %q", code, out)
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald config") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "config", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "get", "validate"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald config "+leaf) {
+			t.Fatalf("config %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

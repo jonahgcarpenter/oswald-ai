@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -23,12 +24,33 @@ const (
 	exitUsage = 2
 )
 
+// Leaf usage lines double as `--help` pages: `oswald delegation <command>
+// --help` prints the same text to stdout and exits 0 without resolving scope.
+const (
+	showUsage     = "usage: oswald delegation show [--profile NAME]"
+	unsetUsage    = "usage: oswald delegation unset model|provider|base-url [--profile NAME]"
+	setFlagsUsage = "usage: oswald delegation set [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]"
+)
+
 // Run dispatches the delegation command group.
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		delegationUsage(stderr)
 		return exitUsage
+	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "set":
+			setUsage(stdout)
+			return exitOK
+		case "unset":
+			fmt.Fprintln(stdout, unsetUsage)
+			return exitOK
+		}
 	}
 	target, err := resolveTarget(root, profile, !(rest[0] == "show"))
 	if err != nil {
@@ -38,7 +60,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald delegation show [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(target, stdout, stderr)
@@ -59,6 +81,12 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 func delegationUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald delegation [--profile NAME] <show|set|unset> [options]")
 	fmt.Fprintln(w, "  show                       delegation section (values only, never credentials)")
+	setUsage(w)
+	fmt.Fprintln(w, "  unset model|provider|base-url   clear a delegation leaf back to inherit")
+}
+
+func setUsage(w io.Writer) {
+	fmt.Fprintln(w, setFlagsUsage)
 	fmt.Fprintln(w, "  set --model M              delegation.model (empty inherits the profile model)")
 	fmt.Fprintln(w, "  set --provider P           delegation.provider (named provider; empty inherits)")
 	fmt.Fprintln(w, "  set --base-url URL         delegation.base_url (needs provider; empty inherits)")
@@ -66,7 +94,6 @@ func delegationUsage(w io.Writer) {
 	fmt.Fprintln(w, "  set --max-children N       delegation.max_concurrent_children")
 	fmt.Fprintln(w, "  set --max-depth N          delegation.max_spawn_depth")
 	fmt.Fprintln(w, "  set --orchestrator B       delegation.orchestrator_enabled (true|false)")
-	fmt.Fprintln(w, "  unset model|provider|base-url   clear a delegation leaf back to inherit")
 }
 
 type target struct {
@@ -128,7 +155,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 0 {
-		fmt.Fprintln(stderr, "usage: oswald delegation set [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]")
+		fmt.Fprintln(stderr, setFlagsUsage)
 		return exitUsage
 	}
 	set := 0
@@ -138,7 +165,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if set == 0 {
-		fmt.Fprintln(stderr, "usage: oswald delegation set [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]")
+		fmt.Fprintln(stderr, setFlagsUsage)
 		return exitUsage
 	}
 	if set > 1 {
@@ -197,7 +224,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 
 func unsetCmd(t *target, args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: oswald delegation unset <model|provider|base-url> [--profile NAME]")
+		fmt.Fprintln(stderr, unsetUsage)
 		return exitUsage
 	}
 	var leaf string
@@ -209,7 +236,7 @@ func unsetCmd(t *target, args []string, stdout, stderr io.Writer) int {
 	case "base-url", "base_url":
 		leaf = "base_url"
 	default:
-		fmt.Fprintln(stderr, "usage: oswald delegation unset <model|provider|base-url> [--profile NAME]")
+		fmt.Fprintln(stderr, unsetUsage)
 		return exitUsage
 	}
 	oldCfg, _ := config.Validate(t.root)

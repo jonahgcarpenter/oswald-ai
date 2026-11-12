@@ -14,6 +14,8 @@ import (
 // entry. Unspecified fields keep their values; switching --url/--command
 // clears the other transport's keys, and --no-oauth drops the OAuth block.
 // OAuth block internals beyond the --oauth-* flags stay a direct config edit.
+const editUsage = "usage: oswald mcp edit <server> [--profile NAME] [field flags]"
+
 func edit(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	_ = ctx
 	fs := flag.NewFlagSet("oswald mcp edit", flag.ContinueOnError)
@@ -32,7 +34,7 @@ func edit(ctx context.Context, root string, args []string, stdout, stderr io.Wri
 		return exitUsage
 	}
 	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
-		fmt.Fprintln(stderr, "usage: oswald mcp edit <server> [--profile NAME] [field flags]")
+		fmt.Fprintln(stderr, editUsage)
 		return exitUsage
 	}
 	if f.enable && f.disable {

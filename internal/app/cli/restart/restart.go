@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 )
 
 // PIDFileName is the server PID marker inside the configuration root.
@@ -30,6 +32,12 @@ var killFunc = func(pid int, sig syscall.Signal) error {
 // Run signals the running server. Exit codes mirror the parent cli convention.
 func Run(_ context.Context, root string, rest []string, stdout, stderr io.Writer) int {
 	const usage = "usage: oswald restart [--delay SECS|--now] [--force]"
+	if help.WantsHelp(rest) {
+		fmt.Fprintln(stdout, usage)
+		fmt.Fprintln(stdout, "  Signal the running oswald-server to exit gracefully so the")
+		fmt.Fprintln(stdout, "  container runtime restarts it in the same pod (batch edits first).")
+		return 0
+	}
 	delay := time.Duration(0)
 	force := false
 	for i := 0; i < len(rest); i++ {

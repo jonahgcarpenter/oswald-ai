@@ -13,6 +13,8 @@ import (
 
 // remove deletes the mcp_servers.<name> entry through staged validation.
 // The server directory is kept unless --full is passed.
+const removeUsage = "usage: oswald mcp remove <server> [--profile NAME] [--full]"
+
 func remove(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	_ = ctx
 	fs := flag.NewFlagSet("oswald mcp remove", flag.ContinueOnError)
@@ -24,7 +26,7 @@ func remove(ctx context.Context, root string, args []string, stdout, stderr io.W
 		return exitUsage
 	}
 	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
-		fmt.Fprintln(stderr, "usage: oswald mcp remove <server> [--profile NAME] [--full]")
+		fmt.Fprintln(stderr, removeUsage)
 		return exitUsage
 	}
 	name := serverName(rest[0])

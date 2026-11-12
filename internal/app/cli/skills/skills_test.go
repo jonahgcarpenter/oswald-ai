@@ -141,3 +141,19 @@ func TestScopeFencing(t *testing.T) {
 		t.Fatalf("calling-scope install misplaced: %v", err)
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := skillsRun(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald skills") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "skills", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"list", "info", "install", "update", "remove"} {
+		code, out, _ := skillsRun(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald skills "+leaf) {
+			t.Fatalf("skills %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

@@ -122,3 +122,19 @@ func TestSetBoundsAndUsage(t *testing.T) {
 		t.Fatalf("set orchestrator = %d %s", code, stderr)
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald delegation") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "delegation", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set", "unset"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald delegation "+leaf) {
+			t.Fatalf("delegation %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

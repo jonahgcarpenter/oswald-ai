@@ -84,34 +84,28 @@ In Discord servers and iMessage groups, slash commands must start with a mention
 
 ## CLI Commands
 
-Operator commands run from a terminal against your `.oswald/` root:
+Operator commands run from a terminal against your `.oswald/` root.
+Use `--help` for more clarification — `oswald <group> --help`,
+or `oswald <group> <command> --help` for a specific command.
 
-| Command                                  | Description                                                                                                     |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `oswald setup`                           | Seed missing `config.yaml`/`.env`/`SOUL.md` entries for first install; never overwrites.                        |
-| `oswald restart [--delay SECS|--now]`     | Restart the running service in place (same pod). Batch edits, then run once — the model runs it as its final step. |
-| `oswald profile create\|rename\|delete`   | Provision, rename, or remove a named profile subtree (refuses `default` on delete, requires confirmation).      |
-| `oswald mcp list\|add\|edit\|remove\|test` | Manage profile MCP servers (add through staged validation, never prints secrets).                              |
-| `oswald mcp auth <server>`               | Interactively authorize an MCP server (browser or device flow).                                                 |
-| `oswald gateway show\|set-multiplex`      | Inspect routing and toggle multi-profile routing.                                                               |
-| `oswald gateway routes list\|add\|remove` | Manage `gateway.profile_routes` (add is staged-validated).                                                      |
-| `oswald platforms show\|enable\|disable`  | Inspect gateway platforms and flip `platforms.<name>.enabled` (needs `oswald restart` to apply).               |
-| `oswald platforms set <platform> [flags]` | Set listener/admission leaves for `discord`, `bluebubbles`, or `api` (admission applies live).                 |
-| `oswald providers list\|show\|add\|remove` | Manage LLM providers (`--profile` allowed).                                                                     |
-| `oswald model show\|set`                  | Manage model selection: `--provider`, `--default`, `--context-length` (`--profile` allowed).                    |
-| `oswald delegation show\|set\|unset`        | Manage subagent model routing: `--model`, `--provider`, `--base-url`, iteration/children/depth caps, orchestrator on/off (`--profile` allowed). |
-| `oswald api show\|set-key\|clear-key`      | Manage the per-profile OpenAI gateway credential (`--profile` allowed, never printed).                          |
-| `oswald tools show\|set\|unset`            | Manage `web-search`, `image`, `browser`, and `terminal` backends (`--profile` allowed, secrets redacted).      |
-| `oswald plugins list\|info`                     | List installed profile plugins and inspect manifest/provenance state (presence means enabled, never prints secrets). |
-| `oswald plugins install <source>`        | Install a plugin into the calling profile from a git URL, `owner/repo`, or local path, with bundled skills and node deps auto-installed (`--ref` pins a full commit SHA, `--subdir` for monorepos, `--node-package/--node-version` for manifests predating the sidecar convention, `--no-deps` to skip, `--force` to replace code; `--profile` allowed, fenced to the calling scope). Reinstalling the same source is idempotent: a `--no-deps` install is healed by running install again without the flag, and the bare CLI name works in `terminal` right after. |
-| `oswald plugins update <name>`           | Refresh a profile install in place (pinned installs need an explicit `--ref`; code only, `data/` untouched). |
-| `oswald plugins remove <name>`           | Drop a profile plugin (removes `code/` only so `data/` logins survive; `--full` also deletes `data/`). |
-| `oswald skills list\|info`                | List installed skills and inspect manifest/provenance state (`--profile` allowed).                              |
-| `oswald skills install <source>`         | Install a skill bundle from a git URL, `owner/repo`, or local path into the calling profile (`--ref` pins a full commit SHA, `--subdir` for monorepos). |
-| `oswald skills update\|remove <name>`     | Refresh a managed install (pins need explicit `--ref`; refuses operator edits without `--force`) or delete a skill and its lockfile record. |
-| `oswald runtime show\|set`                | Inspect and set `runtime.log_level` (applies live).                                                             |
-| `oswald config show\|get\|validate`        | Inspect effective configuration (secrets redacted) and validate files; never writes.                            |
-| `oswald env show\|set\|unset`              | Manage the private per-profile `.env` (names only on show, never prints values).                                |
+| Command              | Description                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `oswald setup`       | Seed a first-install configuration root; never overwrites.                                |
+| `oswald restart`     | Restart the running service in place (same pod) after load-bearing edits.                 |
+| `oswald profile`     | Provision, rename, or remove named profile subtrees.                                      |
+| `oswald mcp`         | Manage profile MCP servers, including OAuth authorization.                                |
+| `oswald gateway`     | Manage gateway routing and profile routes.                                                |
+| `oswald platforms`   | Manage gateway platforms (listeners, admission).                                          |
+| `oswald providers`   | Manage LLM providers.                                                                     |
+| `oswald model`       | Manage model selection.                                                                   |
+| `oswald delegation`  | Manage subagent model routing.                                                            |
+| `oswald api`         | Manage the per-profile OpenAI gateway credential (never printed).                        |
+| `oswald tools`       | Manage `web-search`, `image`, `browser`, and `terminal` backends.                         |
+| `oswald plugins`     | Manage per-profile plugins; installed CLIs run by bare name in `terminal`.                |
+| `oswald skills`      | Manage per-profile skills.                                                                |
+| `oswald runtime`     | Inspect and set runtime options (applies live).                                           |
+| `oswald config`      | Inspect effective configuration and validate files; never writes.                         |
+| `oswald env`         | Manage the private per-profile `.env` (names only, never prints values).                  |
 
 ## Documentation
 

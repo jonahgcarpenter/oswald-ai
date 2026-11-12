@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -73,5 +74,17 @@ func TestRestartBadFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := Run(t.Context(), t.TempDir(), []string{"--delay", "abc"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("bad delay = %d, want 2", code)
+	}
+}
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(t.Context(), root, args, &stdout, &stderr); code != 0 {
+			t.Fatalf("restart %v = %d, want exit 0", args, code)
+		} else if out := stdout.String(); out == "" || !strings.Contains(out, "usage: oswald restart") {
+			t.Fatalf("restart %v missing usage: %q", args, out)
+		}
 	}
 }

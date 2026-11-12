@@ -155,3 +155,33 @@ func TestNamedScopeReadsAllowedMutationsDenied(t *testing.T) {
 		t.Fatal("global config mutated by rejected gateway command")
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald gateway") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "gateway", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set-multiplex", "routes"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald gateway "+leaf) {
+			t.Fatalf("gateway %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}
+
+func TestRoutesHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, leaf := range []string{"list", "add", "remove"} {
+		code, out, _ := run(t, root, "routes", leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald gateway routes "+leaf) {
+			t.Fatalf("routes %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+	code, out, _ := run(t, root, "routes", "--help")
+	if code != exitOK || !strings.Contains(out, "usage: oswald gateway routes") {
+		t.Fatalf("routes --help = %d %q, want exit 0 with routes usage", code, out)
+	}
+}

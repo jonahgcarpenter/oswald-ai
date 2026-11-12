@@ -21,6 +21,8 @@ func TestRunUsageAndDispatch(t *testing.T) {
 		{"setup with arguments", []string{"setup", "extra"}, exitUsage},
 		{"global help flag", []string{"--help"}, exitOK},
 		{"help command", []string{"help"}, exitOK},
+		{"restart help", []string{"restart", "--help"}, exitOK},
+		{"restart help word", []string{"restart", "help"}, exitOK},
 		{"profile without subcommand", []string{"profile"}, exitUsage},
 		{"gateway without subcommand", []string{"gateway"}, exitUsage},
 		{"platforms without subcommand", []string{"platforms"}, exitUsage},

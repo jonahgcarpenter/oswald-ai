@@ -239,3 +239,19 @@ func TestInstallNodeFlagsEndToEnd(t *testing.T) {
 		t.Fatal("node mismatch accepted without --force")
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := pluginsRun(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald plugins") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "plugins", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"list", "info", "install", "update", "remove"} {
+		code, out, _ := pluginsRun(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald plugins "+leaf) {
+			t.Fatalf("plugins %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

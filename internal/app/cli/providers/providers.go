@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -30,6 +31,22 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		providersUsage(stderr)
 		return exitUsage
 	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "list":
+			fmt.Fprintln(stdout, listUsage)
+			return exitOK
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "add":
+			fmt.Fprintln(stdout, addUsage)
+			return exitOK
+		case "remove":
+			fmt.Fprintln(stdout, removeUsage)
+			return exitOK
+		}
+	}
 	target, err := resolveTarget(root, profile, !(rest[0] == "list" || rest[0] == "show"))
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
@@ -38,13 +55,13 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	switch rest[0] {
 	case "list":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald providers list [--profile NAME]")
+			fmt.Fprintln(stderr, listUsage)
 			return exitUsage
 		}
 		return show(target, nil, stdout, stderr)
 	case "show":
 		if len(rest) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald providers show <name> [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(target, []string{"providers", rest[1]}, stdout, stderr)
@@ -52,7 +69,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		return addCmd(target, rest[1:], stdout, stderr)
 	case "remove":
 		if len(rest) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald providers remove <name> [--profile NAME]")
+			fmt.Fprintln(stderr, removeUsage)
 			return exitUsage
 		}
 		return remove(target, rest[1], stdout, stderr)
@@ -65,6 +82,15 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		return exitUsage
 	}
 }
+
+// Leaf usage lines double as `--help` pages: `oswald providers <command>
+// --help` prints the same text to stdout and exits 0 without resolving scope.
+const (
+	listUsage   = "usage: oswald providers list [--profile NAME]"
+	showUsage   = "usage: oswald providers show <name> [--profile NAME]"
+	addUsage    = "usage: oswald providers add <name> --api URL [--key REF] [--profile NAME]"
+	removeUsage = "usage: oswald providers remove <name> [--profile NAME]"
+)
 
 func providersUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald providers [--profile NAME] <list|show|add|remove> [options]")
@@ -129,7 +155,7 @@ func addCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 1 || *api == "" {
-		fmt.Fprintln(stderr, "usage: oswald providers add <name> --api URL [--key REF] [--profile NAME]")
+		fmt.Fprintln(stderr, addUsage)
 		return exitUsage
 	}
 	name := rest[0]

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -22,12 +23,29 @@ const (
 	exitUsage = 2
 )
 
+// Leaf usage lines double as `--help` pages: `oswald model <command> --help`
+// prints the same text to stdout and exits 0 without resolving scope.
+const (
+	showUsage = "usage: oswald model show [--profile NAME]"
+	setUsage  = "usage: oswald model set [--provider P] [--default M] [--context-length N] [--profile NAME]"
+)
+
 // Run dispatches the model command group.
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		modelUsage(stderr)
 		return exitUsage
+	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "set":
+			fmt.Fprintln(stdout, setUsage)
+			return exitOK
+		}
 	}
 	target, err := resolveTarget(root, profile, !(rest[0] == "show"))
 	if err != nil {
@@ -37,7 +55,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald model show [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(target, stdout, stderr)
@@ -110,7 +128,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 0 {
-		fmt.Fprintln(stderr, "usage: oswald model set [--provider P] [--default M] [--context-length N] [--profile NAME]")
+		fmt.Fprintln(stderr, setUsage)
 		return exitUsage
 	}
 	set := 0
@@ -124,7 +142,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		set++
 	}
 	if set == 0 {
-		fmt.Fprintln(stderr, "usage: oswald model set [--provider P] [--default M] [--context-length N] [--profile NAME]")
+		fmt.Fprintln(stderr, setUsage)
 		return exitUsage
 	}
 	if set > 1 {

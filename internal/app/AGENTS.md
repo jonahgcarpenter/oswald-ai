@@ -20,7 +20,9 @@ logs, and listeners can outlive `Run` until process exit.
 
 `cli/cli.go` dispatches `setup | restart | profile | mcp | gateway | platforms |
 providers | model | delegation | api | tools | plugins | skills | runtime | config | env | help` with exit codes 0/1/2 and injectable
-stdio. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
+stdio. Every group answers `help|-h|--help` on stdout (exit 0), and every leaf
+command answers `<command> --help` the same way via the shared
+`cli/help.WantsHelp` check placed before any scope resolution or parsing. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
 one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
 copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only
 interactive OAuth path. `platforms <name> <enable|disable>` flips only the global

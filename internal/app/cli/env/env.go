@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -24,12 +25,33 @@ const (
 // Run dispatches the env command group. --profile is accepted in any
 // position; reads may name another profile, mutations stay fenced to the
 // calling scope.
+// Leaf usage lines double as `--help` pages: `oswald env <command> --help`
+// prints the same text to stdout and exits 0 without resolving scope.
+const (
+	showUsage  = "usage: oswald env show [--profile NAME]"
+	setUsage   = "usage: oswald env set <NAME> <VALUE> [--profile NAME]"
+	unsetUsage = "usage: oswald env unset <NAME> [--profile NAME]"
+)
+
 func Run(_ context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	_ = stdin
 	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		envUsage(stderr)
 		return exitUsage
+	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "set":
+			fmt.Fprintln(stdout, setUsage)
+			return exitOK
+		case "unset":
+			fmt.Fprintln(stdout, unsetUsage)
+			return exitOK
+		}
 	}
 	target, err := resolveTarget(root, profile, rest[0] != "show")
 	if err != nil {
@@ -39,19 +61,19 @@ func Run(_ context.Context, root string, args []string, stdin io.Reader, stdout,
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald env show [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(target, stdout, stderr)
 	case "set":
 		if len(rest) != 3 {
-			fmt.Fprintln(stderr, "usage: oswald env set <NAME> <VALUE> [--profile NAME]")
+			fmt.Fprintln(stderr, setUsage)
 			return exitUsage
 		}
 		return set(target, rest[1], rest[2], stdout, stderr)
 	case "unset":
 		if len(rest) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald env unset <NAME> [--profile NAME]")
+			fmt.Fprintln(stderr, unsetUsage)
 			return exitUsage
 		}
 		return unset(target, rest[1], stdout, stderr)

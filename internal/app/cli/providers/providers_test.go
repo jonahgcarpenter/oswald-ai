@@ -136,3 +136,19 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 		t.Fatalf("own-scope add rejected: %s", stderr)
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald providers") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "providers", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"list", "show", "add", "remove"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald providers "+leaf) {
+			t.Fatalf("providers %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

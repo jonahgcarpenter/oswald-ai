@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -21,10 +22,17 @@ const (
 	exitUsage = 2
 )
 
+const setupUsage = "usage: oswald setup"
+
 // Run seeds the selected configuration root.
 func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
+	if help.WantsHelp(args) {
+		fmt.Fprintln(stdout, setupUsage)
+		fmt.Fprintln(stdout, "  seed missing config.yaml/.env/SOUL.md entries (never overwrites)")
+		return exitOK
+	}
 	if len(args) != 0 {
-		fmt.Fprintln(stderr, "usage: oswald setup")
+		fmt.Fprintln(stderr, setupUsage)
 		return exitUsage
 	}
 	results, err := seed(ctx, root)
