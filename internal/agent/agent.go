@@ -1344,10 +1344,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				Images:     toolImages,
 			})
 			historyPolicy := policy.History.Effective()
-			if !advertised {
-				historyPolicy.Mode = governance.HistoryMetadata
-				historyPolicy.SearchResult = false
-			}
 			if historyPolicy.Mode != governance.HistoryNone {
 				historyBatch.Calls = append(historyBatch.Calls, persistedToolCall(tc, historyPolicy, decision, result, execErr, toolContent, time.Now().UTC()))
 			}

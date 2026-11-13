@@ -313,6 +313,27 @@ func TestDiscoveryReturnsBothSidesAndReadIncludesNativeTraces(t *testing.T) {
 	}
 }
 
+func TestDiscoveryFindsMemoryToolResults(t *testing.T) {
+	store, ctx := newSearchFixture(t)
+	generation := resolveGeneration(t, store)
+	key := "discord:dm:123"
+	trace := memory.ToolHistory{Version: memory.ToolHistoryVersion, Batches: []memory.ToolHistoryBatch{{Calls: []memory.ToolHistoryCall{{Name: "memory", HistoryMode: "full", Arguments: map[string]interface{}{"action": "add"}, Result: "memneedle Project is Atlas", Status: "succeeded", SearchResult: true}}}}}
+	turn, err := store.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{UserID: "alice", SessionID: key, Generation: generation, UserText: "remember this", AssistantText: "saved", History: trace, Pressure: memory.SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewHandler(store)(ctx, map[string]interface{}{"query": "memneedle", "role_filter": "tool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "memneedle Project is Atlas") {
+		t.Fatalf("memory tool result not discoverable: %s", result.Content)
+	}
+}
+
 func TestSearchRejectsInvalidArgumentTypesAndRoleFilters(t *testing.T) {
 	store, ctx := newSearchFixture(t)
 	for _, args := range []map[string]interface{}{

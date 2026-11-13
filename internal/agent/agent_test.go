@@ -1763,10 +1763,14 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 	if len(requests) != 3 || !strings.Contains(requests[2].Messages[0].Content, "Project is Atlas.") {
 		t.Fatalf("next turn in the same session missed the write: %+v", requests[2].Messages)
 	}
+	replayed := false
 	for _, message := range requests[2].Messages {
 		if message.Role == "tool" || len(message.ToolCalls) != 0 {
-			t.Fatalf("file write tool result replayed into next request: %+v", requests[2].Messages)
+			replayed = true
 		}
+	}
+	if !replayed {
+		t.Fatalf("file write tool result missing from next request: %+v", requests[2].Messages)
 	}
 	if _, err := processAgent(agent, "next-session", "imessage", "another-session", "user-1", "User", "what did I save?", nil, nil); err != nil {
 		t.Fatal(err)

@@ -18,8 +18,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -432,40 +430,12 @@ func AssemblePromptContext(
 }
 
 func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memory.SessionTurn {
-	available := make(map[string]bool, len(tools))
-	for _, tool := range tools {
-		available[tool.Function.Name] = true
-	}
+	// All tool results stay in context: replay every persisted batch verbatim.
+	// Budget oversize still falls back per-turn via withoutToolHistory in
+	// AssemblePromptContext, and the 64 KiB aggregate bound in
+	// EncodeToolHistory still applies at persistence time.
 	prepared := append([]memory.SessionTurn(nil), turns...)
-	for i := range prepared {
-		compatible := true
-		for _, batch := range prepared[i].ToolHistory.Batches {
-			for _, call := range batch.Calls {
-				imageTool := call.Name == imagegenerate.Name || isImageInputTool(call.Name)
-				if (!available[call.Name] && !imageTool) || call.ArgumentsTruncated || (call.HistoryMode != "" && call.HistoryMode != string(governance.HistoryFull)) {
-					compatible = false
-				}
-			}
-		}
-		if compatible {
-			continue
-		}
-		// Keep independently replayable image call/result pairs even when another
-		// tool's metadata-only or unavailable history requires compact replay.
-		history := memory.EmptyToolHistory()
-		for _, batch := range prepared[i].ToolHistory.Batches {
-			kept := memory.ToolHistoryBatch{AssistantContent: batch.AssistantContent}
-			for _, call := range batch.Calls {
-				if (call.Name == imagegenerate.Name || isImageInputTool(call.Name)) && !call.ArgumentsTruncated && call.HistoryMode == string(governance.HistoryFull) {
-					kept.Calls = append(kept.Calls, call)
-				}
-			}
-			if len(kept.Calls) > 0 {
-				history.Batches = append(history.Batches, kept)
-			}
-		}
-		prepared[i].ToolHistory = history
-	}
+	_ = tools
 	return prepared
 }
 

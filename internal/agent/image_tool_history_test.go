@@ -12,13 +12,13 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 )
 
 func TestImageToolTextHistorySurvivesFollowUpAndStoreReopen(t *testing.T) {
@@ -147,26 +147,29 @@ func TestPersistedImageToolHistoryRedactsInlineDataAndKeepsText(t *testing.T) {
 	}
 }
 
-func TestImageHistoryReplaySurvivesMixedMetadataAndUnavailableTools(t *testing.T) {
+func TestHistoryReplayKeepsAllToolCalls(t *testing.T) {
 	for _, name := range []string{imagegenerate.Name, visionanalyze.Name} {
 		imageCall := memory.ToolHistoryCall{Name: name, HistoryMode: string(governance.HistoryFull), Arguments: map[string]interface{}{"image_url": "/private/image.png"}, Result: "Image result", Status: "succeeded"}
 		for _, other := range []memory.ToolHistoryCall{
-			{Name: "memory", HistoryMode: string(governance.HistoryMetadata)},
+			{Name: "memory", HistoryMode: string(governance.HistoryFull)},
 			{Name: "unavailable", HistoryMode: string(governance.HistoryFull)},
 		} {
 			turn := memory.SessionTurn{ID: 42, UserText: "Image please", AssistantText: "Done", ToolHistory: memory.ToolHistory{Version: memory.ToolHistoryVersion, Batches: []memory.ToolHistoryBatch{{Calls: []memory.ToolHistoryCall{other, imageCall}}}}}
 			prepared := prepareHistoricalTurns([]memory.SessionTurn{turn}, nil)
 			messages := memory.SessionTurnMessages(prepared[0])
-			if len(messages) != 4 || len(messages[1].ToolCalls) != 1 || messages[1].ToolCalls[0].Function.Name != name || messages[2].ToolCallID != messages[1].ToolCalls[0].ID || !strings.HasSuffix(messages[2].Content, imageCall.Result) || len(messages[2].Images) != 0 {
-				t.Fatal("mixed history removed a replayable image pair or broke correlation")
+			if len(messages) != 5 || len(messages[1].ToolCalls) != 2 || messages[1].ToolCalls[0].Function.Name != other.Name || messages[1].ToolCalls[1].Function.Name != name {
+				t.Fatalf("all tool calls were not replayed: %+v", messages)
+			}
+			if messages[2].ToolCallID != messages[1].ToolCalls[0].ID || messages[3].ToolCallID != messages[1].ToolCalls[1].ID || !strings.HasSuffix(messages[3].Content, imageCall.Result) || len(messages[3].Images) != 0 {
+				t.Fatal("replayed tool results broke correlation")
 			}
 			if len(turn.ToolHistory.Batches[0].Calls) != 2 {
 				t.Fatal("preparation mutated stored history")
 			}
 			imageCall.ArgumentsTruncated = true
 			turn.ToolHistory.Batches[0].Calls[1] = imageCall
-			if len(prepareHistoricalTurns([]memory.SessionTurn{turn}, nil)[0].ToolHistory.Batches) != 0 {
-				t.Fatal("truncated arguments were replayed as complete")
+			if len(prepareHistoricalTurns([]memory.SessionTurn{turn}, nil)[0].ToolHistory.Batches) != 1 {
+				t.Fatal("truncated arguments were dropped instead of replayed")
 			}
 			imageCall.ArgumentsTruncated = false
 		}

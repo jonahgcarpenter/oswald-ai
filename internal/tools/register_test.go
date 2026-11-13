@@ -144,8 +144,8 @@ func TestVisionRegisteredWithoutComfyUIAndUsesTextHistory(t *testing.T) {
 	reg := newTestRegistry(t, &config.Config{})
 	tool, visible := visibleTestTool(reg, visionanalyze.Name)
 	policy, configured := reg.Policy(visionanalyze.Name)
-	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult {
-		t.Fatal("vision tool was not independently registered with bounded nonsearchable text history")
+	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
+		t.Fatal("vision tool was not independently registered with searchable text history")
 	}
 	if reg.HasHandler(imagegenerate.Name) {
 		t.Fatal("vision registration enabled unconfigured image generation")
@@ -182,7 +182,7 @@ func TestSessionSearchRequiresProfileStoreAndIsPolicyBounded(t *testing.T) {
 func TestRegisterMemoryPolicyAndBatchSchema(t *testing.T) {
 	reg := newTestRegistry(t, testConfig())
 	policy, ok := reg.Policy(toolmemory.Name)
-	if !ok || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
+	if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
 		t.Fatalf("unexpected file memory policy: %+v", policy)
 	}
 	tool, ok := visibleTestTool(reg, toolmemory.Name)
@@ -390,7 +390,7 @@ func TestRegisterImageGenerateProviderMatrix(t *testing.T) {
 			}
 			if test.enabled {
 				policy, ok := reg.Policy(imagegenerate.Name)
-				if !ok || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult || policy.NormalizeArgs == nil {
+				if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult || policy.NormalizeArgs == nil {
 					t.Fatalf("image_generate policy=%+v", policy)
 				}
 			}
@@ -495,11 +495,11 @@ func TestRegisterBrowserProviderMatrix(t *testing.T) {
 			}
 			if test.wantShown {
 				vaultPolicy, ok := reg.Policy(toolbrowser.VaultFillName)
-				if !ok || vaultPolicy.History.Mode != governance.HistoryMetadata || vaultPolicy.History.SearchResult || vaultPolicy.NormalizeArgs == nil {
+				if !ok || vaultPolicy.History.Mode != governance.HistoryFull || !vaultPolicy.History.SearchResult || vaultPolicy.NormalizeArgs == nil {
 					t.Fatalf("browser_vault_fill policy = %+v", vaultPolicy.History)
 				}
 				visionPolicy, ok := reg.Policy(toolbrowser.VisionName)
-				if !ok || visionPolicy.History.Mode != governance.HistoryFull || visionPolicy.History.SearchResult {
+				if !ok || visionPolicy.History.Mode != governance.HistoryFull || !visionPolicy.History.SearchResult {
 					t.Fatalf("browser_vision history policy = %+v", visionPolicy.History)
 				}
 				navigatePolicy, ok := reg.Policy(toolbrowser.NavigateName)

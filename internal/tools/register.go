@@ -24,23 +24,23 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
+	toolcron "github.com/jonahgcarpenter/oswald-ai/internal/tools/cronjob"
 	tooldelegate "github.com/jonahgcarpenter/oswald-ai/internal/tools/delegate"
+	toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
+	toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
-toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
-toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
-toolcron "github.com/jonahgcarpenter/oswald-ai/internal/tools/cronjob"
-toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
-toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
-toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
+	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
@@ -52,7 +52,7 @@ toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
 func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
-	visionPolicy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
+	visionPolicy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}
 	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandlerWithWorkspace(cache, ws))); err != nil {
 		return fmt.Errorf("register vision_analyze tool: %w", err)
 	}
@@ -77,7 +77,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 		policy := governance.ToolPolicy{
 			NormalizeArgs: normalizeImageGenerateArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		}
 		if err := reg.RegisterHandler(imagegenerate.Name, policy, registry.Handler(imagegenerate.NewHandler(textWorkflow, imageWorkflow, client, cache, log))); err != nil {
 			return fmt.Errorf("initialize %s tool: %w", imagegenerate.Name, err)
@@ -130,15 +130,15 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", websearch.Name), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
 	}
 
-	if err := reg.RegisterHandler(toolmemory.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolmemory.NewHandler(fileStore))); err != nil {
+	if err := reg.RegisterHandler(toolmemory.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolmemory.NewHandler(fileStore))); err != nil {
 		return fmt.Errorf("register memory tool: %w", err)
 	}
 
-	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandlerWithPlugins(cfg.ProfileRoot, PluginSkillRoots(cfg)))); err != nil {
+	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolskill.NewHandlerWithPlugins(cfg.ProfileRoot, PluginSkillRoots(cfg)))); err != nil {
 		return fmt.Errorf("register skill_manage tool: %w", err)
 	}
 
-	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}, registry.Handler(toolclarify.NewHandler())); err != nil {
+	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolclarify.NewHandler())); err != nil {
 		return fmt.Errorf("register clarify tool: %w", err)
 	}
 
@@ -270,31 +270,31 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 		toolbrowser.DialogName:    toolPolicy(normalizeBrowserDialogArgs),
 		toolbrowser.VaultListName: {
 			NormalizeArgs: normalizeBrowserEmptyArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 		toolbrowser.VaultFillName: {
 			NormalizeArgs: normalizeVaultHandleArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 		toolbrowser.VaultSaveLoginName: {
 			NormalizeArgs: normalizeVaultSaveArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 		toolbrowser.VaultSaveAddressName: {
 			NormalizeArgs: normalizeVaultSaveAddressArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 		toolbrowser.VaultRemoveName: {
 			NormalizeArgs: normalizeVaultHandleArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 		toolbrowser.VaultEnterCodeName: {
 			NormalizeArgs: normalizeVaultHandleArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 		toolbrowser.VisionName: {
 			NormalizeArgs: normalizeBrowserVisionArgs,
-			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		},
 	}
 	for _, name := range names {
