@@ -16,64 +16,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func rejectUnknown(args map[string]interface{}, allowed ...string) error {
-	keep := make(map[string]bool, len(allowed))
-	for _, k := range allowed {
-		keep[k] = true
-	}
-	for k := range args {
-		if !keep[k] {
-			return fmt.Errorf("unknown argument %q", k)
-		}
-	}
-	return nil
-}
-
 func requestID(ctx context.Context) string {
 	return strings.TrimSpace(requestctx.MetadataFromContext(ctx).RequestID)
-}
-
-func stringArg(args map[string]interface{}, key string) (string, bool) {
-	v, ok := args[key].(string)
-	return v, ok
-}
-
-func intArg(args map[string]interface{}, key string, def int) (int, error) {
-	raw, ok := args[key]
-	if !ok || raw == nil {
-		return def, nil
-	}
-	switch v := raw.(type) {
-	case int:
-		return v, nil
-	case int64:
-		return int(v), nil
-	case float64:
-		if v != float64(int(v)) {
-			return 0, fmt.Errorf("%s must be an integer", key)
-		}
-		return int(v), nil
-	case json.Number:
-		n, err := v.Int64()
-		if err != nil {
-			return 0, fmt.Errorf("%s must be an integer", key)
-		}
-		return int(n), nil
-	default:
-		return 0, fmt.Errorf("%s must be an integer", key)
-	}
-}
-
-func boolArg(args map[string]interface{}, key string, def bool) (bool, error) {
-	raw, ok := args[key]
-	if !ok || raw == nil {
-		return def, nil
-	}
-	v, ok := raw.(bool)
-	if !ok {
-		return false, fmt.Errorf("%s must be a boolean", key)
-	}
-	return v, nil
 }
 
 // CheckSyntax validates newContent for linted extensions, surfacing only
