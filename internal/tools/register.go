@@ -28,6 +28,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
+	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
@@ -170,7 +171,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		{workspace.SearchFilesName, governance.ToolPolicy{NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},
 		{workspace.TerminalName, governance.ToolPolicy{NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
 		{workspace.ExecuteCodeName, governance.ToolPolicy{NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
-		{workspace.ProcessManageName, governance.ToolPolicy{NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewProcessManageHandler(ws, pm))},
+		{toolprocess.Name, governance.ToolPolicy{NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolprocess.NewProcessManageHandler(ws, pm))},
 		{workspace.CronjobManageName, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewCronjobManageHandler(ws, cronStore))},
 	}
 	for _, tool := range workspaceTools {

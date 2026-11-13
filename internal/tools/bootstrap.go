@@ -12,6 +12,7 @@ import (
 	tooldelegate "github.com/jonahgcarpenter/oswald-ai/internal/tools/delegate"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
+	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
@@ -22,10 +23,21 @@ import (
 )
 
 // BuiltinDefinitions returns every Go-owned builtin tool definition in
-// registration order.
+// registration order. Workspace-owned surfaces are listed explicitly so
+// each tool keeps its original position as surfaces move to tools/*.
 func BuiltinDefinitions() []llm.ToolDefinition {
 	defs := []llm.ToolDefinition{toolmemory.Definition(), toolskill.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), toolclarify.Definition(), tooldelegate.Definition()}
-	return append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...), workspace.Definitions()...)
+	defs = append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...),
+		workspace.ReadFileDefinition(),
+		workspace.WriteFileDefinition(),
+		workspace.PatchDefinition(),
+		workspace.SearchFilesDefinition(),
+		workspace.TerminalDefinition(),
+		workspace.ExecuteCodeDefinition(),
+		toolprocess.Definition(),
+		workspace.CronjobManageDefinition(),
+	)
+	return defs
 }
 
 // NewRegistryFromConfig creates a Registry with Go definitions and configured

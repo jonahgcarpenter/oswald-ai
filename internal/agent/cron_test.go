@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
@@ -63,7 +64,7 @@ func TestToolsForRequestToolsetFilter(t *testing.T) {
 	ok := func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		return productiveResult("ok"), nil
 	}
-	for _, name := range []string{workspace.ReadFileName, workspace.TerminalName, workspace.ProcessManageName} {
+	for _, name := range []string{workspace.ReadFileName, workspace.TerminalName, toolprocess.Name} {
 		if err := registerTestTool(t, reg, testToolSpec{Name: name, Description: "Tool " + name}, governance.ToolPolicy{}, ok); err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +137,7 @@ func TestTerminalHintInjectedOnlyWithProcessManage(t *testing.T) {
 		_ = reg
 		return a.toolsForRequest(context.Background(), cronPrincipal(), exposure.NewExposure(), nil, nil, nil)
 	}
-	with := newCatalog(workspace.TerminalName, workspace.ProcessManageName)
+	with := newCatalog(workspace.TerminalName, toolprocess.Name)
 	for _, tool := range with.Tools {
 		if tool.Function.Name == workspace.TerminalName && !strings.Contains(tool.Function.Description, "process_manage") {
 			t.Fatal("hint missing when companion advertised")

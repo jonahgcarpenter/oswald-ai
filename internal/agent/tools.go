@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -59,7 +60,7 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	// The background-polling hint names process_manage, so it is injected
 	// only when that tool is actually advertised; the static description
 	// never references tools from other toolsets.
-	if catalogHas(catalog, workspace.TerminalName) && catalogHas(catalog, workspace.ProcessManageName) {
+	if catalogHas(catalog, workspace.TerminalName) && catalogHas(catalog, toolprocess.Name) {
 		for i := range catalog.Tools {
 			if catalog.Tools[i].Function.Name == workspace.TerminalName && !strings.Contains(catalog.Tools[i].Function.Description, "process_manage") {
 				catalog.Tools[i].Function.Description += " Use background=true only for processes that must outlive the call, then poll with process_manage."

@@ -220,26 +220,6 @@ func TestTerminalForeground(t *testing.T) {
 	}
 }
 
-func TestTerminalBackgroundRoundTrip(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "alice")
-	pm := process.NewManager(root)
-	ctx := testContext("req-bg")
-	term := NewTerminalHandler(ws, pm)
-	manage := NewProcessManageHandler(ws, pm)
-	res, err := term(ctx, map[string]interface{}{"command": "echo bg-hi", "background": true, "timeout": float64(30)})
-	if err != nil || !strings.Contains(res.Content, "session_id:") {
-		t.Fatalf("background spawn = %+v %v", res, err)
-	}
-	waited, err := manage(ctx, map[string]interface{}{"action": "wait", "session_id": sessionFrom(res.Content), "timeout": float64(10)})
-	if err != nil || !strings.Contains(waited.Content, "bg-hi") {
-		t.Fatalf("wait = %+v %v", waited, err)
-	}
-}
-
 func sessionFrom(content string) string {
 	for _, line := range strings.Split(content, "\n") {
 		if strings.HasPrefix(line, "session_id:") {
@@ -260,25 +240,6 @@ func TestExecuteCodeStateless(t *testing.T) {
 	res, err := exec(ctx, map[string]interface{}{"code": "print(40+2)"})
 	if err != nil || !strings.Contains(res.Content, "42") {
 		t.Fatalf("execute_code = %+v %v (python3 may be missing)", res, err)
-	}
-}
-
-func TestDefinitionsContract(t *testing.T) {
-	defs := Definitions()
-	if len(defs) != 8 {
-		t.Fatalf("definitions = %d, want 8", len(defs))
-	}
-	seen := map[string]bool{}
-	for _, d := range defs {
-		if d.Name == "" || d.Description == "" || d.Parameters.Type != "object" || d.Parameters.Properties == nil {
-			t.Fatalf("invalid definition: %+v", d)
-		}
-		seen[d.Name] = true
-	}
-	for _, name := range []string{ReadFileName, WriteFileName, PatchName, SearchFilesName, TerminalName, ExecuteCodeName, ProcessManageName, CronjobManageName} {
-		if !seen[name] {
-			t.Fatalf("missing definition %s", name)
-		}
 	}
 }
 

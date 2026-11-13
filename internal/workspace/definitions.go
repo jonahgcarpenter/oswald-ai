@@ -12,7 +12,6 @@ const (
 	SearchFilesName   = "search_files"
 	TerminalName      = "terminal"
 	ExecuteCodeName   = "execute_code"
-	ProcessManageName = "process_manage"
 	CronjobManageName = "cronjob_manage"
 )
 
@@ -43,19 +42,8 @@ func replaceFirst(s, old, new string) string {
 	return s
 }
 
-// Definitions returns the workspace tool contracts in stable order.
-func Definitions() []llm.ToolDefinition {
-	return []llm.ToolDefinition{
-		ReadFileDefinition(),
-		WriteFileDefinition(),
-		PatchDefinition(),
-		SearchFilesDefinition(),
-		TerminalDefinition(),
-		ExecuteCodeDefinition(),
-		ProcessManageDefinition(),
-		CronjobManageDefinition(),
-	}
-}
+// Workspace tool contracts are composed in stable registration order by
+// tools.BuiltinDefinitions; each Definition lives next to its handler.
 
 // ReadFileDefinition returns the paginated text-file reader contract.
 func ReadFileDefinition() llm.ToolDefinition {

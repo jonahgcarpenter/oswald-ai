@@ -1,36 +1,23 @@
-package workspace
+package processmanage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
-// ProcessManageDefinition returns the background-process companion contract.
-func ProcessManageDefinition() llm.ToolDefinition {
-	return llm.ToolDefinition{
-		Name:        ProcessManageName,
-		Description: "Manage tracked background terminal processes: list sessions, poll status, read logs, wait for completion, kill, write/submit stdin, close stdin, or hand off ownership to the parent scope. Session IDs accept unique prefixes.",
-		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
-			"action":     {Type: "string", Description: "list|poll|log|wait|kill|write|submit|close|handoff"},
-			"session_id": {Type: "string", Description: "Process session ID (unique prefix accepted)"},
-			"data":       {Type: "string", Description: "Stdin bytes for write/submit, purpose sentence for handoff"},
-			"timeout":    {Type: "integer", Description: "Wait timeout in seconds", Minimum: float64Ptr(1)},
-			"offset":     {Type: "integer", Description: "Log start line (default 0)", Minimum: float64Ptr(0)},
-			"limit":      {Type: "integer", Description: "Log max lines (default 200)", Minimum: float64Ptr(1)},
-		}, Required: []string{"action"}, AdditionalProperties: boolPtr(false)},
-	}
-}
-
-// NewProcessManageHandler returns the process companion handler.
-func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Context, map[string]interface{}) (governance.Result, error) {
+// NewProcessManageHandler returns the process companion handler. The
+// workspace provides confinement policy and the process manager owns
+// session lifecycle; this package owns only the model-facing surface.
+func NewProcessManageHandler(ws *workspace.Workspace, pm *process.Manager) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err
@@ -105,10 +92,10 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 			}
 			return governance.Result{Content: fmt.Sprintf("session_id: %s\nstatus: %s\nexit_code: %d", info.ID, info.Status, info.ExitCode), Outcome: governance.OutcomeProductive}, nil
 		case "write":
-			if reason, blocked := ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
+			if reason, blocked := workspace.ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
-			if reason, blocked := ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
+			if reason, blocked := workspace.ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
 			if err := pm.Write(sessionID, data); err != nil {
@@ -116,10 +103,10 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 			}
 			return governance.Result{Content: "stdin written", Outcome: governance.OutcomeProductive}, nil
 		case "submit":
-			if reason, blocked := ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
+			if reason, blocked := workspace.ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
-			if reason, blocked := ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
+			if reason, blocked := workspace.ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
 			if err := pm.Submit(sessionID, data); err != nil {
@@ -140,5 +127,56 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 		default:
 			return governance.Result{}, errors.New("action must be list|poll|log|wait|kill|write|submit|close|handoff")
 		}
+	}
+}
+
+// The arg helpers below are intentionally local: every tools/* package owns
+// its own small copies instead of a shared generic helper package.
+
+func rejectUnknown(args map[string]interface{}, allowed ...string) error {
+	keep := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		keep[k] = true
+	}
+	for k := range args {
+		if !keep[k] {
+			return fmt.Errorf("unknown argument %q", k)
+		}
+	}
+	return nil
+}
+
+func requestID(ctx context.Context) string {
+	return strings.TrimSpace(requestctx.MetadataFromContext(ctx).RequestID)
+}
+
+func stringArg(args map[string]interface{}, key string) (string, bool) {
+	v, ok := args[key].(string)
+	return v, ok
+}
+
+func intArg(args map[string]interface{}, key string, def int) (int, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	switch v := raw.(type) {
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(v), nil
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(n), nil
+	default:
+		return 0, fmt.Errorf("%s must be an integer", key)
 	}
 }

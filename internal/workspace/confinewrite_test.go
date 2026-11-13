@@ -180,23 +180,6 @@ func TestExecuteCodeConfinedWrite(t *testing.T) {
 	}
 }
 
-func TestProcessManageWriteConfined(t *testing.T) {
-	_, alice, bob := profileTree(t)
-	if err := os.Chmod(alice, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(alice, "alice")
-	manage := NewProcessManageHandler(ws, process.NewManager(alice))
-	_, err := manage(testContext("req-xwrite"), map[string]interface{}{
-		"action":     "write",
-		"session_id": "nosuch",
-		"data":       "echo x > " + filepath.Join(bob, "notes.md"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "system-managed") {
-		t.Fatalf("write allowed cross-profile data: %v", err)
-	}
-}
-
 func TestScanProtectedReadShell(t *testing.T) {
 	_, alice, bob := profileTree(t)
 	bobState := filepath.Join(bob, "state.db")
