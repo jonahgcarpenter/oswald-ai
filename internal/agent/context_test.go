@@ -52,7 +52,7 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	}
 }
 
-func TestAssemblePromptContextReplaysNativeToolHistoryAndFallsBackWhenUnavailable(t *testing.T) {
+func TestAssemblePromptContextReplaysNativeToolHistoryEvenWhenUnavailable(t *testing.T) {
 	history := memory.ToolHistory{Version: memory.ToolHistoryVersion, Batches: []memory.ToolHistoryBatch{{Calls: []memory.ToolHistoryCall{{
 		Name: "weather.current", Arguments: map[string]interface{}{"city": "Louisville"}, Status: "succeeded", Outcome: "productive", Result: `{"temperature":72}`, ExecutedAt: "2026-08-28T12:00:00Z",
 	}}}}}
@@ -68,8 +68,8 @@ func TestAssemblePromptContextReplaysNativeToolHistoryAndFallsBackWhenUnavailabl
 	}
 
 	compact := assembleTestPromptContext("policy", "", "follow up", nil, []memory.SessionTurn{turn}, nil, 100000)
-	if roles(compact.Messages) != "system,user,assistant,user" || compact.Messages[2].Content != "72 degrees" {
-		t.Fatalf("unavailable tool did not use compact replay: %+v", compact.Messages)
+	if roles(compact.Messages) != "system,user,assistant,tool,assistant,user" || compact.Messages[3].Content != `{"temperature":72}` {
+		t.Fatalf("unavailable tool was not replayed: %+v", compact.Messages)
 	}
 	compactWithTool := assembleTestPromptContext("policy", "", "follow up", nil, []memory.SessionTurn{withoutToolHistory(turn)}, tools, 100000)
 	budgetFallback := assembleTestPromptContext("policy", "", "follow up", nil, []memory.SessionTurn{turn}, tools, compactWithTool.EstimatedAfter)

@@ -22,7 +22,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
 
 - `memory` — atomic USER/MEMORY entry ops (one action or 1–20 ordered ops; replace/remove need
   exact unique `old_text`); capacity errors return current entries for consolidation.
-  Metadata-only history: never searchable.
+  Full searchable history: results stay in context and are FTS-discoverable.
 - `skill_manage` — on-demand procedural skills over the profile `skills/` tree (`skill_manage/`
   leaf package; catalog/index/reads owned by `internal/skills/`): `list` (compact
   name/description/category index, 200-row cap), `view` (full body or one supporting file),
@@ -32,7 +32,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   plugin skills read-only for every write shape). Installed plugin skill views carry a plugin-runtime footer (bare-name
   invocation, other-systems-docs disclaimer); profile skills and
   supporting-file reads carry none. Unknown arguments rejected; authenticated principal required.
-  Metadata-only history with hashed bodies: never searchable.
+  Full searchable history.
 - `session_search` — full searchable history with four inferred shapes: `query` (FTS5 discovery,
   BM25-ranked, lineage-deduped, default 5), `session_id` + `around_message_id` scroll (1–20 each side),
   `session_id` full read (first 20 / last 10 past 30 rows), no-args recent browse (default 3).
@@ -62,7 +62,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   to the current page origin), `save_address` (seals user-supplied address fields the same way),
   `enter_code` (TOTP from a saved seed, or a save-first hint when none exists), `rm` (exact-handle
   delete, irreversible). There is no vault CLI: chat is the only ingest path, so user-supplied
-  secrets transit tool args — metadata-only history, hashed args, secret registry scrubbing on
+  secrets transit tool args — full history, hashed args, secret registry scrubbing on
   every browser output path.
 - `clarify` — blocking single-flight question form (1–5 questions, ≤4 choices each).
   Parks one pending ask per conversation (5-minute window) and walks the questions
@@ -104,8 +104,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   rejects `model/provider/base_url` overrides; scripts resolve under per-profile
   `scripts/`, delivery targets the concrete `deliver` object.
 
-History policy in one line: `memory`/`skill_manage`/`browser_vault_*` metadata-only, `session_search`/`web_search`
-searchable, image-tool and `clarify` text nonsearchable — with 16 KiB args and 16,000 result runes per call
+History policy in one line: every tool keeps full searchable history in context and FTS — with 16 KiB args and 16,000 result runes per call
 inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser
 and vault tools never log URLs, page content, expressions, or secrets — only counts and chars.
 
