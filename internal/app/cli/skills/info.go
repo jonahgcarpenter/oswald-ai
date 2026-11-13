@@ -3,6 +3,7 @@ package skills
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -39,24 +40,25 @@ func infoCmd(root, flagProfile, raw string, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintln(stdout, "requires_env: none")
 	}
-	entries, err := skillpkg.ReadLock(profileRoot)
+	entries, err := skillpkg.ReadInstallMetadata(profileRoot, result.Name)
 	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintln(stdout, "installed_from: unmanaged")
+			return exitOK
+		}
 		reportSkillsError(stderr, err)
 		return exitError
 	}
-	if meta, ok := entries[result.Name]; ok {
-		provenance := meta.Source
-		if meta.Pinned && meta.Revision != "" {
-			provenance += " pinned@" + shortSHA(meta.Revision)
-		} else if meta.Revision != "" {
-			provenance += " at " + shortSHA(meta.Revision)
-		} else {
-			provenance += " unpinned"
-		}
-		fmt.Fprintf(stdout, "installed_from: %s\n", provenance)
+	meta := entries
+	provenance := meta.Source
+	if meta.Pinned && meta.Revision != "" {
+		provenance += " pinned@" + shortSHA(meta.Revision)
+	} else if meta.Revision != "" {
+		provenance += " at " + shortSHA(meta.Revision)
 	} else {
-		fmt.Fprintln(stdout, "installed_from: unmanaged")
+		provenance += " unpinned"
 	}
+	fmt.Fprintf(stdout, "installed_from: %s\n", provenance)
 	return exitOK
 }
 

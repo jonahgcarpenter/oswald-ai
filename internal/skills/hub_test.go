@@ -88,29 +88,32 @@ func TestValidateBundle(t *testing.T) {
 	}
 }
 
-func TestLockRoundTrip(t *testing.T) {
+func TestMetadataRoundTrip(t *testing.T) {
 	root := t.TempDir()
-	entries, err := ReadLock(root)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("empty lock = %+v %v", entries, err)
+	if _, err := ReadInstallMetadata(root, "demo"); !os.IsNotExist(err) {
+		t.Fatalf("empty metadata = %v", err)
 	}
-	want := map[string]LockEntry{"demo": {Source: "local", URL: "/tmp/synth-demo", InstalledAt: "2026-01-01T00:00:00Z"}}
-	if err := WriteLock(root, want); err != nil {
+	dest := filepath.Join(root, "skills", "demo")
+	if err := os.MkdirAll(dest, 0700); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadLock(root)
-	if err != nil || got["demo"].URL != "/tmp/synth-demo" {
+	want := InstallMetadata{Source: "local", URL: "/tmp/synth-demo", InstalledAt: "2026-01-01T00:00:00Z"}
+	if err := WriteInstallMetadata(dest, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadInstallMetadata(root, "demo")
+	if err != nil || got.URL != "/tmp/synth-demo" {
 		t.Fatalf("got %+v %v", got, err)
 	}
-	info, err := os.Stat(filepath.Join(root, "skills.lock.json"))
+	info, err := os.Stat(filepath.Join(dest, ".install-metadata.json"))
 	if err != nil || info.Mode().Perm()&0077 != 0 {
-		t.Fatalf("lock perms = %+v %v", info, err)
+		t.Fatalf("metadata perms = %+v %v", info, err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "skills.lock.json"), []byte("{nope"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dest, ".install-metadata.json"), []byte("{nope"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadLock(root); err == nil {
-		t.Fatal("corrupt lock accepted")
+	if _, err := ReadInstallMetadata(root, "demo"); err == nil {
+		t.Fatal("corrupt metadata accepted")
 	}
 }
 
@@ -127,6 +130,12 @@ func TestInstallSkillLocal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "skills", "shipped", "SKILL.md")); err != nil {
 		t.Fatalf("published files missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "shipped", ".install-metadata.json")); err != nil {
+		t.Fatalf("metadata missing: %v", err)
+	}
+	if got := scanRoots(filepath.Join(root, "skills")); len(got) != 1 || got[0].Name != "shipped" {
+		t.Fatalf("scan with metadata = %+v", got)
 	}
 	again, err := InstallSkill(t.Context(), root, src, "", "", false)
 	if err != nil || !again.AlreadyInstalled {
@@ -244,7 +253,7 @@ func TestUpdateSkillLocalGit(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "pinned") {
 		t.Fatalf("wrong pinned error: %v", err)
 	}
-	// Edited SKILL.md refuses without --force.
+	// Edited SKILL.md is overwritten like plugins: no drift guard.
 	installed := filepath.Join(root, "skills", "gitskill", "SKILL.md")
 	data, err := os.ReadFile(installed)
 	if err != nil {
@@ -252,11 +261,6 @@ func TestUpdateSkillLocalGit(t *testing.T) {
 	}
 	if err := os.WriteFile(installed, append(data, "operator edit\n"...), 0600); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := UpdateSkill(t.Context(), root, "gitskill", second, false); err == nil {
-		t.Fatal("edited update accepted")
-	} else if !strings.Contains(err.Error(), "modified") {
-		t.Fatalf("wrong edit error: %v", err)
 	}
 	if _, err := UpdateSkill(t.Context(), root, "gitskill", second, true); err != nil {
 		t.Fatalf("force update: %v", err)
@@ -273,7 +277,7 @@ func TestUpdateSkillGates(t *testing.T) {
 	}
 }
 
-func TestUpdateSkillDetectsSupportingFileEdit(t *testing.T) {
+func TestUpdateSkillOverwritesSupportingFileEdit(t *testing.T) {
 	if !gitAvailable() {
 		t.Skip("git unavailable")
 	}
@@ -311,19 +315,14 @@ func TestUpdateSkillDetectsSupportingFileEdit(t *testing.T) {
 	if err := os.WriteFile(installed, append(data, "operator edit\n"...), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UpdateSkill(t.Context(), root, "gitskill", "", false); err == nil {
-		t.Fatal("supporting-file edit accepted without force")
-	} else if !strings.Contains(err.Error(), "modified") {
-		t.Fatalf("wrong edit error: %v", err)
-	}
-	if _, err := UpdateSkill(t.Context(), root, "gitskill", "", true); err != nil {
-		t.Fatalf("force update: %v", err)
+	if _, err := UpdateSkill(t.Context(), root, "gitskill", "", false); err != nil {
+		t.Fatalf("update over edit: %v", err)
 	}
 	refreshed, err := os.ReadFile(installed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(refreshed), "operator edit") {
-		t.Fatal("force update kept the operator edit")
+		t.Fatal("update kept the operator edit")
 	}
 }

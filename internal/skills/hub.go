@@ -2,15 +2,12 @@ package skills
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -18,14 +15,14 @@ import (
 // Hub install bounds. Skill bundles install per profile; shared code stays
 // with plugins. Sizes mirror the scan caps so installed skills always load.
 const (
-	hubCloneTimeout  = 5 * time.Minute
-	hubRevTimeout    = time.Minute
-	maxHubFileBytes  = 1 << 20
-	maxHubFiles      = 128
-	maxHubLockBytes  = 64 * 1024
-	hubLockFileName  = "skills.lock.json"
-	hubBackupDirName = "skills-backup"
-	hubFullSHARE     = `^[0-9a-f]{40}$`
+	hubCloneTimeout    = 5 * time.Minute
+	hubRevTimeout      = time.Minute
+	maxHubFileBytes    = 1 << 20
+	maxHubFiles        = 128
+	maxInstallMetadata = 16 * 1024
+	hubBackupDirName   = "skills-backup"
+	metadataFileName   = ".install-metadata.json"
+	hubFullSHARE       = `^[0-9a-f]{40}$`
 )
 
 var (
@@ -34,14 +31,14 @@ var (
 	hubTimestamp = func() string { return time.Now().UTC().Format("20060102T150405Z") }
 )
 
-// LockEntry is the provenance record for one installed skill. Secrets never
-// appear here: only source identity and revisions.
-type LockEntry struct {
+// InstallMetadata is the provenance record for one installed skill, stored
+// beside the installed code. Secrets never appear here: only source identity
+// and revisions.
+type InstallMetadata struct {
 	Source      string `json:"source"`
 	URL         string `json:"url"`
 	Ref         string `json:"ref,omitempty"`
 	Revision    string `json:"revision,omitempty"`
-	ContentHash string `json:"content_hash,omitempty"`
 	Subdir      string `json:"subdir,omitempty"`
 	Pinned      bool   `json:"pinned"`
 	InstalledAt string `json:"installed_at"`
@@ -115,75 +112,53 @@ func ValidateInstallSubdir(subdir string) (string, error) {
 	return filepath.Clean(trimmed), nil
 }
 
-// LockPath returns the per-profile skills lockfile path.
-func LockPath(profileRoot string) (string, error) {
+// MetadataPath returns the provenance file for one installed skill,
+// inside the installed skill tree.
+func MetadataPath(profileRoot, name string) (string, error) {
+	key, err := validateNewName(name)
+	if err != nil {
+		return "", fmt.Errorf("invalid skill name %q", name)
+	}
 	if strings.TrimSpace(profileRoot) == "" {
 		return "", fmt.Errorf("profile root is unavailable")
 	}
-	return filepath.Join(profileRoot, hubLockFileName), nil
+	return filepath.Join(profileRoot, "skills", key, metadataFileName), nil
 }
 
-// ReadLock loads the per-profile skills lockfile. A missing file reads as
-// empty; anything else that fails to parse fails closed.
-func ReadLock(profileRoot string) (map[string]LockEntry, error) {
-	path, err := LockPath(profileRoot)
+// WriteInstallMetadata records provenance beside installed code, owner-only.
+func WriteInstallMetadata(dest string, meta InstallMetadata) error {
+	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("encode skill metadata: %w", err)
+	}
+	if len(data) > maxInstallMetadata {
+		return fmt.Errorf("skill metadata exceeds size limit")
+	}
+	if err := os.WriteFile(filepath.Join(dest, metadataFileName), append(data, '\n'), 0600); err != nil {
+		return fmt.Errorf("write skill metadata: %w", err)
+	}
+	return nil
+}
+
+// ReadInstallMetadata loads provenance for one installed skill. Hand-placed
+// skill trees (no metadata file) report os.ErrNotExist.
+func ReadInstallMetadata(profileRoot, name string) (InstallMetadata, error) {
+	path, err := MetadataPath(profileRoot, name)
+	if err != nil {
+		return InstallMetadata{}, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]LockEntry{}, nil
-		}
-		return nil, fmt.Errorf("skill lockfile is unavailable")
+		return InstallMetadata{}, err
 	}
-	if len(data) > maxHubLockBytes {
-		return nil, fmt.Errorf("skill lockfile exceeds size limit")
+	if len(data) > maxInstallMetadata+1 {
+		return InstallMetadata{}, fmt.Errorf("skill metadata exceeds size limit")
 	}
-	var entries map[string]LockEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("skill lockfile is not valid")
+	var meta InstallMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return InstallMetadata{}, fmt.Errorf("skill metadata is not valid")
 	}
-	if entries == nil {
-		entries = map[string]LockEntry{}
-	}
-	return entries, nil
-}
-
-// WriteLock atomically replaces the per-profile skills lockfile, owner-only.
-func WriteLock(profileRoot string, entries map[string]LockEntry) error {
-	path, err := LockPath(profileRoot)
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode skill lockfile: %w", err)
-	}
-	if len(data) > maxHubLockBytes {
-		return fmt.Errorf("skill lockfile exceeds size limit")
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".skills-lock-*.tmp")
-	if err != nil {
-		return fmt.Errorf("skill lockfile is unavailable")
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("skill lockfile is unavailable")
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("skill lockfile is unavailable")
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("skill lockfile is unavailable")
-	}
-	if err := os.Chmod(tmpName, 0600); err != nil {
-		return fmt.Errorf("skill lockfile is unavailable")
-	}
-	return os.Rename(tmpName, path)
+	return meta, nil
 }
 
 // ValidateBundle checks that dir holds one installable SKILL.md and returns
@@ -222,9 +197,8 @@ type InstallResult struct {
 
 // InstallSkill validates a skill bundle from a git or local source and
 // publishes it into the profile skills tree, recording provenance in the
-// per-profile lockfile. Force replaces an existing install, backing it up
-// first. Local installs record a content hash used by update to detect
-// operator edits.
+// per-skill metadata file. Force replaces an existing install, backing it up
+// first.
 func InstallSkill(ctx context.Context, profileRoot, raw, ref, subdir string, force bool) (InstallResult, error) {
 	source, err := ParseInstallSource(raw)
 	if err != nil {
@@ -282,7 +256,7 @@ func InstallSkill(ctx context.Context, profileRoot, raw, ref, subdir string, for
 	dest := filepath.Join(skillsRoot, name)
 	if _, err := os.Lstat(dest); err == nil {
 		if !force {
-			if result, done, err := existingSkillState(profileRoot, name, source, cleanSubdir, ref, bundleDir); err != nil {
+			if result, done, err := existingSkillState(profileRoot, name, source, cleanSubdir, ref); err != nil {
 				return InstallResult{}, err
 			} else if done {
 				return result, nil
@@ -300,22 +274,12 @@ func InstallSkill(ctx context.Context, profileRoot, raw, ref, subdir string, for
 	if err := copySkillTree(bundleDir, dest); err != nil {
 		return InstallResult{}, err
 	}
-	contentHash, err := skillContentHash(dest)
-	if err != nil {
-		_ = os.RemoveAll(dest)
-		return InstallResult{}, err
-	}
-	entries, err := ReadLock(profileRoot)
-	if err != nil {
-		_ = os.RemoveAll(dest)
-		return InstallResult{}, err
-	}
-	entries[name] = LockEntry{
+	meta := InstallMetadata{
 		Source: source.Kind, URL: source.URL, Ref: ref, Revision: revision,
-		ContentHash: contentHash, Subdir: cleanSubdir, Pinned: ref != "",
+		Subdir: cleanSubdir, Pinned: ref != "",
 		InstalledAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := WriteLock(profileRoot, entries); err != nil {
+	if err := WriteInstallMetadata(dest, meta); err != nil {
 		_ = os.RemoveAll(dest)
 		return InstallResult{}, err
 	}
@@ -324,13 +288,9 @@ func InstallSkill(ctx context.Context, profileRoot, raw, ref, subdir string, for
 
 // existingSkillState mirrors the plugin install gate: same source is a no-op
 // (pins never move without update), anything else guides to --force/update.
-func existingSkillState(profileRoot, name string, source InstallSource, subdir, ref, bundleDir string) (InstallResult, bool, error) {
-	entries, err := ReadLock(profileRoot)
+func existingSkillState(profileRoot, name string, source InstallSource, subdir, ref string) (InstallResult, bool, error) {
+	meta, err := ReadInstallMetadata(profileRoot, name)
 	if err != nil {
-		return InstallResult{}, false, err
-	}
-	meta, ok := entries[name]
-	if !ok {
 		return InstallResult{}, false, fmt.Errorf("skill %q is already installed but unmanaged (use --force to replace)", name)
 	}
 	if meta.Source != source.Kind || meta.URL != source.URL || meta.Subdir != subdir {
@@ -339,17 +299,16 @@ func existingSkillState(profileRoot, name string, source InstallSource, subdir, 
 	if ref != "" && ref != meta.Revision {
 		return InstallResult{}, false, fmt.Errorf("skill %q is installed at another revision (use skills update to move it)", name)
 	}
-	_ = bundleDir
 	return InstallResult{Name: name, Revision: meta.Revision, Pinned: meta.Pinned, AlreadyInstalled: true}, true, nil
 }
 
 // UpdateSkill refreshes one managed install by re-cloning its recorded
 // source and publishing the result over the installed tree. Installed trees
-// carry no git metadata (only the lockfile), so in-place fetch is impossible.
-// Pinned installs need an explicit --ref; unpinned installs follow the remote
-// HEAD. Operator-modified skills (SKILL.md hash drift) refuse without --force,
-// which backs the modified tree up first.
+// carry no git metadata (only the metadata file), so in-place fetch is
+// impossible. Pinned installs need an explicit --ref; unpinned installs follow
+// the remote HEAD.
 func UpdateSkill(ctx context.Context, profileRoot, name, ref string, force bool) (InstallResult, error) {
+	_ = force
 	key, err := validateNewName(name)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("invalid skill name %q", name)
@@ -359,13 +318,12 @@ func UpdateSkill(ctx context.Context, profileRoot, name, ref string, force bool)
 		return InstallResult{}, err
 	}
 	ref = strings.TrimSpace(ref)
-	entries, err := ReadLock(profileRoot)
+	meta, err := ReadInstallMetadata(profileRoot, name)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return InstallResult{}, fmt.Errorf("skill %q is not a managed install", name)
+		}
 		return InstallResult{}, err
-	}
-	meta, ok := entries[name]
-	if !ok {
-		return InstallResult{}, fmt.Errorf("skill %q is not a managed install", name)
 	}
 	if meta.Pinned && ref == "" {
 		return InstallResult{}, fmt.Errorf("skill %q is pinned; choose a new commit explicitly", name)
@@ -374,14 +332,6 @@ func UpdateSkill(ctx context.Context, profileRoot, name, ref string, force bool)
 		return InstallResult{}, fmt.Errorf("skill %q is not a git install; reinstall it to refresh", name)
 	}
 	dest := filepath.Join(profileRoot, "skills", name)
-	current, err := skillContentHash(dest)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	modified := current != meta.ContentHash
-	if modified && !force {
-		return InstallResult{}, fmt.Errorf("skill %q was modified; use --force to overwrite", name)
-	}
 	staging, err := os.MkdirTemp("", "oswald-skill-*")
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("stage skill update: %w", err)
@@ -409,11 +359,6 @@ func UpdateSkill(ctx context.Context, profileRoot, name, ref string, force bool)
 	if _, err := ValidateBundle(bundleDir); err != nil {
 		return InstallResult{}, err
 	}
-	if modified {
-		if _, err := backupSkill(profileRoot, name); err != nil {
-			return InstallResult{}, err
-		}
-	}
 	fresh, err := os.MkdirTemp(filepath.Join(profileRoot, "skills"), ".skill-update-*.tmp")
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("stage skill update: %w", err)
@@ -422,18 +367,7 @@ func UpdateSkill(ctx context.Context, profileRoot, name, ref string, force bool)
 	if err := copySkillTree(bundleDir, fresh); err != nil {
 		return InstallResult{}, err
 	}
-	contentHash, err := skillContentHash(fresh)
-	if err != nil {
-		return InstallResult{}, err
-	}
-	if err := os.RemoveAll(dest); err != nil {
-		return InstallResult{}, fmt.Errorf("skill update failed: %w", err)
-	}
-	if err := os.Rename(fresh, dest); err != nil {
-		return InstallResult{}, fmt.Errorf("skill update failed: %w", err)
-	}
 	meta.Revision = revision
-	meta.ContentHash = contentHash
 	meta.InstalledAt = time.Now().UTC().Format(time.RFC3339)
 	if ref != "" {
 		meta.Ref = ref
@@ -442,16 +376,20 @@ func UpdateSkill(ctx context.Context, profileRoot, name, ref string, force bool)
 		meta.Ref = ""
 		meta.Pinned = false
 	}
-	entries[name] = meta
-	if err := WriteLock(profileRoot, entries); err != nil {
+	if err := WriteInstallMetadata(fresh, meta); err != nil {
 		return InstallResult{}, err
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return InstallResult{}, fmt.Errorf("skill update failed: %w", err)
+	}
+	if err := os.Rename(fresh, dest); err != nil {
+		return InstallResult{}, fmt.Errorf("skill update failed: %w", err)
 	}
 	return InstallResult{Name: name, Revision: revision, Pinned: meta.Pinned}, nil
 }
 
-// RemoveSkill deletes one installed skill and its lockfile record. Skills are
-// per-profile data, so no cross-profile guard is needed; --full also removes
-// that skill's backups.
+// RemoveSkill deletes one installed skill. Skills are per-profile data, so
+// no cross-profile guard is needed; --full also removes that skill's backups.
 func RemoveSkill(profileRoot, name string, full bool) error {
 	key, err := validateNewName(name)
 	if err != nil {
@@ -465,13 +403,6 @@ func RemoveSkill(profileRoot, name string, full bool) error {
 	if err := os.RemoveAll(dest); err != nil {
 		return fmt.Errorf("remove skill: %w", err)
 	}
-	entries, err := ReadLock(profileRoot)
-	if err == nil {
-		if _, ok := entries[name]; ok {
-			delete(entries, name)
-			_ = WriteLock(profileRoot, entries)
-		}
-	}
 	if full {
 		matches, _ := filepath.Glob(filepath.Join(profileRoot, hubBackupDirName, name+"-*"))
 		for _, match := range matches {
@@ -479,51 +410,6 @@ func RemoveSkill(profileRoot, name string, full bool) error {
 		}
 	}
 	return nil
-}
-
-// skillContentHash digests the installed skill tree for operator-edit
-// detection. Every regular file contributes its relative path and bytes, so
-// model edits to supporting files trip the same guard as SKILL.md edits.
-func skillContentHash(dir string) (string, error) {
-	var files []string
-	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("installed skill is unreadable")
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		files = append(files, rel)
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("installed skill is unreadable")
-	}
-	sort.Strings(files)
-	seenSkill := false
-	h := sha256.New()
-	for _, rel := range files {
-		data, err := os.ReadFile(filepath.Join(dir, rel))
-		if err != nil || (rel == "SKILL.md" && len(data) == 0) {
-			return "", fmt.Errorf("installed skill is unreadable")
-		}
-		if rel == "SKILL.md" {
-			seenSkill = true
-		}
-		fmt.Fprintf(h, "%s\x00%d\x00", rel, len(data))
-		h.Write(data)
-	}
-	if !seenSkill {
-		return "", fmt.Errorf("installed skill is unreadable")
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // backupSkill moves the previous tree aside before a forced replace.
@@ -540,7 +426,7 @@ func backupSkill(profileRoot, name string) (string, error) {
 }
 
 // copySkillTree copies a validated skill bundle, skipping .git and the
-// install metadata. Symlinks fail closed; files are bounded to the scan cap.
+// install metadata file. Symlinks fail closed; files are bounded to the scan cap.
 func copySkillTree(src, dest string) error {
 	var count int
 	err := filepath.WalkDir(src, func(path string, entry os.DirEntry, err error) error {
@@ -558,6 +444,9 @@ func copySkillTree(src, dest string) error {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if rel == metadataFileName {
 			return nil
 		}
 		target := filepath.Join(dest, rel)
@@ -674,14 +563,4 @@ func hubGitLsRemote(ctx context.Context, url string) (string, error) {
 		return "", fmt.Errorf("skill fetch failed")
 	}
 	return fields[0], nil
-}
-
-// SortedLockNames returns installed skill names in stable order for listing.
-func SortedLockNames(entries map[string]LockEntry) []string {
-	names := make([]string, 0, len(entries))
-	for name := range entries {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
