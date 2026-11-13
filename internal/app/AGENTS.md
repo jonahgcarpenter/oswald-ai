@@ -58,9 +58,10 @@ The running server never restarts itself: `startup/reload.go::Reloader` fingerpr
 invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps only the
 `runtime` log level and gateway admission policy (`config.reload.applied`); a validated non-hot
 diff only logs an advisory `config.reload.restart_required` (with `reason_code`). The operator
-(or model) batches edits and runs `oswald restart` once when ready: it signals the PID in
-`<root>/server.pid` (written `0600` on boot, removed on clean shutdown) with `SIGTERM` so the
-container runtime restarts the service in the same pod. Non-hot changes are reloaded on entry
+(or model) batches edits and runs `oswald restart` once when ready: it signals the
+local oswald-server process (nearest `oswald-server` ancestor, else PID 1 when
+it is the server) with `SIGTERM` so the supervisor restarts the service in
+place. Non-hot changes are reloaded on entry
 after that restart; hot changes apply live with no restart. The watcher never rewrites operator
 files, and a stable fingerprint never fires twice, so rapid successive writes coalesce.
 
@@ -88,5 +89,5 @@ files, and a stable fingerprint never fires twice, so rapid successive writes co
 Inject clients and gateways rather than starting real listeners. Cover dispatch exit codes,
 seed-only setup, create/delete guards and rollback, command aliasing, approval consumption,
 partial-failure shutdown order, hot-vs-advisory signaling (validated non-hot logs once;
-hot and invalid never log restart_required), and restart PID signaling (missing/invalid
-pid, SIGTERM vs SIGKILL, no real kills).
+hot and invalid never log restart_required), and restart discovery (ancestor
+vs PID 1 vs not-running, SIGTERM vs SIGKILL, no real kills).
