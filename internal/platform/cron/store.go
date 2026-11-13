@@ -324,13 +324,28 @@ func (s *Store) RunNow(ctx context.Context, r *Runner, id string) (Execution, st
 }
 
 // runScriptJob runs a no_agent script job inline and records the ledger.
+// Script execution retries on failure; delivery retries only re-send.
 func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job, slotUnix int64) (Execution, string, error) {
 	started := time.Now().UTC()
-	out, err := runScriptFile(ctx, r, job.Script, 3600)
-	status := "completed_script"
-	if err != nil {
-		status = "script_error"
+	var out string
+	var runErr error
+	d := DispatcherFor(s.root)
+	if d == nil {
+		d = &Dispatcher{Store: s, Runner: r}
 	}
+	for attempt := 1; ; attempt++ {
+		out, runErr = runScriptFile(ctx, r, job.Script, 3600)
+		if runErr == nil {
+			break
+		}
+		failed := Execution{JobID: job.ID, Instant: slotUnix, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: "script_error", OutputPreview: preview(out), Delivered: false, DeliveryError: runErr.Error()}
+		s.appendLedger(failed)
+		s.finishRun(job.ID, failed.Status, failed.DeliveryError, true)
+		if attempt >= d.maxAttempts() {
+			return failed, "", nil
+		}
+	}
+	status := "completed_script"
 	if strings.TrimSpace(out) == "" {
 		ex := Execution{JobID: job.ID, Instant: slotUnix, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: status, Delivered: true}
 		s.appendLedger(ex)
@@ -338,13 +353,9 @@ func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job, slotUnix 
 		return ex, "", nil
 	}
 	ex := Execution{JobID: job.ID, Instant: slotUnix, StartedUnix: started.Unix(), FinishedUnix: time.Now().Unix(), Status: status, OutputPreview: preview(out), Delivered: false}
-	d := DispatcherFor(s.root)
-	if d == nil {
-		d = &Dispatcher{Store: s, Runner: r}
-	}
-	d.deliver(job, &ex, out, nil)
+	d.deliver(ctx, job, &ex, out, nil)
 	s.appendLedger(ex)
-	s.finishRun(job.ID, status, ex.DeliveryError, status == "script_error")
+	s.finishRun(job.ID, status, ex.DeliveryError, !ex.Delivered)
 	return ex, out, nil
 }
 

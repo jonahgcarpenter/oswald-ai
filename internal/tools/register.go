@@ -167,6 +167,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 	process.SetProfileEnvPassthrough(cfg.ProfileRoot, cfg.TerminalEnvPassthrough)
 	cronStore := cron.NewStore(cfg.ProfileRoot)
 	docCache := docache.NewProfileCache(cfg.ProfileRoot, cfg.ProfileName)
+	cronValidators := cronTargetValidators(cfg, log)
 	workspaceTools := []struct {
 		name    string
 		policy  governance.ToolPolicy
@@ -179,7 +180,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		{toolterm.Name, governance.ToolPolicy{NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolterm.NewTerminalHandler(ws, pm))},
 		{toolexec.Name, governance.ToolPolicy{NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolexec.NewExecuteCodeHandler(ws))},
 		{toolprocess.Name, governance.ToolPolicy{NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolprocess.NewProcessManageHandler(ws, pm))},
-		{toolcron.Name, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolcron.NewCronjobManageHandler(ws, cronStore))},
+		{toolcron.Name, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolcron.NewCronjobManageHandler(ws, cronStore, cronValidators))},
 	}
 	for _, tool := range workspaceTools {
 		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
@@ -195,6 +196,21 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 		NormalizeArgs: normalize,
 		History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 	}
+}
+
+// cronTargetValidators builds per-platform deliver-target liveness checks
+// from the deployment config. A platform without a configured backend gets
+// no entry, and create/update then rejects its targets as unservable rather
+// than scheduling jobs that can never deliver.
+func cronTargetValidators(cfg *config.Config, log *config.Logger) map[string]cron.TargetValidator {
+	validators := make(map[string]cron.TargetValidator)
+	if url := strings.TrimSpace(cfg.BlueBubblesURL); url != "" && strings.TrimSpace(cfg.BlueBubblesPassword) != "" {
+		validators[cron.DeliverIMessage] = cron.NewIMessageTargetValidator(url, cfg.BlueBubblesPassword)
+	}
+	if token := strings.TrimSpace(cfg.DiscordToken); token != "" {
+		validators[cron.DeliverDiscord] = cron.NewDiscordTargetValidator("", token)
+	}
+	return validators
 }
 
 // DelegatePolicy returns the registry policy for the delegate tool: full

@@ -102,7 +102,9 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   the confined-write/protected-read scans; `handoff` reparents to the caller's scope.
 - `cronjob_manage` — schedules end to end (`create|list|update|pause|resume|remove|run`),
   rejects `model/provider/base_url` overrides; scripts resolve under per-profile
-  `scripts/`, delivery targets the concrete `deliver` object.
+  `scripts/`, delivery targets the concrete `deliver` object. `create`/`update` liveness-check
+  explicit deliver targets against the live transport (imessage GUIDs, discord channels/DMs,
+  guild membership for mentions); unverifiable or unconfigured-platform targets are rejected.
 
 History policy in one line: every tool keeps full searchable history in context and FTS — with 16 KiB args and 16,000 result runes per call
 inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser

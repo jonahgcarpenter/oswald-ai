@@ -16,8 +16,14 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
-// NewCronjobManageHandler returns the scheduler handler.
-func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store) func(context.Context, map[string]interface{}) (governance.Result, error) {
+// cronValidateTimeout bounds deliver-target liveness probes at
+// create/update time.
+const cronValidateTimeout = 30 * time.Second
+
+// NewCronjobManageHandler returns the scheduler handler. Validators is the
+// per-platform deliver-target liveness check (nil skips liveness, which
+// hermetic unit tests use; production always wires it).
+func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validators map[string]cron.TargetValidator) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	runner := &cron.Runner{}
 	if ws != nil {
 		runner.Root = ws.Root()
@@ -77,7 +83,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store) func(co
 					return governance.Result{}, errors.New("repeat_times must be an integer >= 0")
 				}
 			}
-			input, err := decodeCronInput(ctx, args)
+			input, err := decodeCronInput(ctx, args, validators)
 			if err != nil {
 				return governance.Result{}, err
 			}
@@ -93,7 +99,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store) func(co
 		case "update":
 			id, _ := stringArg(args, "job_id")
 			updated, err := store.Mutate(strings.TrimSpace(id), func(job *cron.Job) error {
-				return applyCronUpdate(runner, job, args)
+				return applyCronUpdate(ctx, runner, job, args, validators)
 			})
 			if err != nil {
 				return governance.Result{}, err
@@ -173,7 +179,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store) func(co
 	}
 }
 
-func decodeCronInput(ctx context.Context, args map[string]interface{}) (cron.Job, error) {
+func decodeCronInput(ctx context.Context, args map[string]interface{}, validators map[string]cron.TargetValidator) (cron.Job, error) {
 	var job cron.Job
 	rawSchedule, _ := stringArg(args, "schedule")
 	if strings.TrimSpace(rawSchedule) == "" {
@@ -191,7 +197,7 @@ func decodeCronInput(ctx context.Context, args map[string]interface{}) (cron.Job
 	if v, err := boolArg(args, "no_agent", false); err == nil {
 		job.NoAgent = v
 	}
-	deliver, err := decodeDeliverInput(ctx, args, nil)
+	deliver, err := decodeDeliverInput(ctx, args, nil, validators)
 	if err != nil {
 		return cron.Job{}, err
 	}
@@ -237,7 +243,9 @@ func mcpDisplay(servers []string) string {
 
 // decodeDeliverInput resolves the deliver target: explicit fields win, and
 // an omitted target defaults to the creating chat from request metadata.
-func decodeDeliverInput(ctx context.Context, args map[string]interface{}, base *cron.Job) (cron.Deliver, error) {
+// Explicit targets are liveness-checked against the validators; the
+// defaulted live-session target is trusted by construction.
+func decodeDeliverInput(ctx context.Context, args map[string]interface{}, base *cron.Job, validators map[string]cron.TargetValidator) (cron.Deliver, error) {
 	var platform, chatID, userID string
 	hasPlatform := false
 	hasChat := false
@@ -276,7 +284,32 @@ func decodeDeliverInput(ctx context.Context, args map[string]interface{}, base *
 	if base == nil && !hasPlatform && !hasChat {
 		return deliverFromContext(ctx)
 	}
-	return cron.NormalizeDeliver(out)
+	resolved, err := cron.NormalizeDeliver(out)
+	if err != nil {
+		return cron.Deliver{}, err
+	}
+	if hasPlatform || hasChat || hasUser {
+		if err := validateDeliverTarget(ctx, validators, resolved); err != nil {
+			return cron.Deliver{}, err
+		}
+	}
+	return resolved, nil
+}
+
+// validateDeliverTarget liveness-checks an explicit deliver target. A nil
+// validators map skips the check (hermetic unit tests); a wired map
+// requires the platform to be configured and the target to verify.
+func validateDeliverTarget(ctx context.Context, validators map[string]cron.TargetValidator, target cron.Deliver) error {
+	if validators == nil {
+		return nil
+	}
+	validator, ok := validators[strings.ToLower(strings.TrimSpace(target.Platform))]
+	if !ok || validator == nil {
+		return fmt.Errorf("deliver platform %q is not configured for delivery in this deployment", target.Platform)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, cronValidateTimeout)
+	defer cancel()
+	return validator.ValidateTarget(callCtx, target.ChatID, target.UserID)
 }
 
 // deliverFromContext defaults the target to the creating chat: the session
@@ -294,7 +327,7 @@ func deliverFromContext(ctx context.Context) (cron.Deliver, error) {
 	return cron.Deliver{}, errors.New("deliver target is required: pass deliver_platform and deliver_chat_id")
 }
 
-func applyCronUpdate(runner *cron.Runner, job *cron.Job, args map[string]interface{}) error {
+func applyCronUpdate(ctx context.Context, runner *cron.Runner, job *cron.Job, args map[string]interface{}, validators map[string]cron.TargetValidator) error {
 	// Core -> schedule -> run fields; first failure wins.
 	now := time.Now().UTC()
 	if raw, ok := args["schedule"]; ok {
@@ -344,7 +377,7 @@ func applyCronUpdate(runner *cron.Runner, job *cron.Job, args map[string]interfa
 			job.Repeat.Times = &n
 		}
 	}
-	deliver, err := decodeDeliverInput(context.Background(), args, job)
+	deliver, err := decodeDeliverInput(ctx, args, job, validators)
 	if err != nil {
 		return err
 	}
