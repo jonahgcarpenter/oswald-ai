@@ -120,26 +120,6 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 	}
 }
 
-func TestPatchUniqueAndReplaceAll(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "alice")
-	ctx := testContext("req-p")
-	if err := os.WriteFile(filepath.Join(root, "p.txt"), []byte("one\ntwo\none\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	patch := NewPatchHandler(ws)
-	if _, err := patch(ctx, map[string]interface{}{"path": "p.txt", "old_string": "one", "new_string": "1"}); err == nil {
-		t.Fatal("ambiguous patch succeeded")
-	}
-	res, err := patch(ctx, map[string]interface{}{"path": "p.txt", "old_string": "one", "new_string": "1", "replace_all": true})
-	if err != nil || !strings.Contains(res.Content, "2 occurrences") {
-		t.Fatalf("replace_all = %+v %v", res, err)
-	}
-}
-
 func TestSearchFilesContentAndNames(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {

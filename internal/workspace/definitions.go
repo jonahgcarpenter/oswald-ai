@@ -6,7 +6,6 @@ import (
 
 // Tool names exposed to the model.
 const (
-	PatchName         = "patch"
 	SearchFilesName   = "search_files"
 	TerminalName      = "terminal"
 	ExecuteCodeName   = "execute_code"
@@ -15,20 +14,6 @@ const (
 
 // Workspace tool contracts are composed in stable registration order by
 // tools.BuiltinDefinitions; each Definition lives next to its handler.
-
-// PatchDefinition returns the targeted-edit contract.
-func PatchDefinition() llm.ToolDefinition {
-	return llm.ToolDefinition{
-		Name:        PatchName,
-		Description: "Targeted find-and-replace edits in files. Use this instead of sed/awk in terminal. Uses fuzzy matching (9 strategies) so minor whitespace/indentation differences won't break it. Returns a unified diff. Auto-runs syntax checks after editing. Finds a unique string and replaces it.",
-		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
-			"path":        {Type: "string", Description: "File path to edit."},
-			"old_string":  {Type: "string", Description: "Exact text to find and replace. Must be unique in the file unless replace_all=true. Include surrounding context lines to ensure uniqueness."},
-			"new_string":  {Type: "string", Description: "Changed replacement text; it must differ from old_string. Pass empty string '' to delete the matched text."},
-			"replace_all": {Type: "boolean", Description: "Replace all occurrences instead of requiring a unique match (default: false)", Default: false},
-		}, Required: []string{"path", "old_string", "new_string"}, AdditionalProperties: boolPtr(false)},
-	}
-}
 
 // SearchFilesDefinition returns the ripgrep-backed search contract.
 func SearchFilesDefinition() llm.ToolDefinition {
