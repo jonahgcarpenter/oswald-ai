@@ -9,23 +9,23 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
+	toolcron "github.com/jonahgcarpenter/oswald-ai/internal/tools/cronjob"
 	tooldelegate "github.com/jonahgcarpenter/oswald-ai/internal/tools/delegate"
+	toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
+	toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
-toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
-toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
-toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
-toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
-toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
+	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // BuiltinDefinitions returns every Go-owned builtin tool definition in
@@ -41,7 +41,7 @@ func BuiltinDefinitions() []llm.ToolDefinition {
 		toolterm.Definition(),
 		toolexec.Definition(),
 		toolprocess.Definition(),
-		workspace.CronjobManageDefinition(),
+		toolcron.Definition(),
 	)
 	return defs
 }
