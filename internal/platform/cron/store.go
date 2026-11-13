@@ -681,9 +681,10 @@ func repairCronFile(path, profile, artifact string) {
 	logCronRepair(profile, artifact, before)
 }
 
-// RepairProfile tightens permissions on existing cron material and ensures
-// the per-profile scripts directory exists. Missing files stay missing;
-// symlinks and foreign-owned paths are left for the fail-closed checks.
+// RepairProfile tightens permissions on existing cron material without
+// creating anything. Missing paths stay missing so creation remains lazy on
+// first use; symlinks and foreign-owned paths are left for the fail-closed
+// checks.
 func RepairProfile(profileRoot, profile string) {
 	if strings.TrimSpace(profileRoot) == "" || strings.TrimSpace(profile) == "" {
 		return
@@ -692,10 +693,7 @@ func RepairProfile(profileRoot, profile string) {
 	repairCronDir(dir, profile, "cron_dir")
 	repairCronFile(filepath.Join(dir, "jobs.json"), profile, "cron_jobs")
 	repairCronFile(filepath.Join(dir, "executions.jsonl"), profile, "cron_executions")
-	scripts := filepath.Join(profileRoot, "scripts")
-	if err := os.MkdirAll(scripts, 0700); err == nil {
-		repairCronDir(scripts, profile, "cron_scripts")
-	}
+	repairCronDir(filepath.Join(profileRoot, "scripts"), profile, "cron_scripts")
 }
 
 func ensureScratchDir(root, scratch, profile string) {

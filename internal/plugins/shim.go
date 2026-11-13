@@ -60,6 +60,18 @@ func RegenerateShims(profileRoot string) error {
 	}
 
 	dir := PluginShimDir(profileRoot)
+	if len(wanted) == 0 {
+		// No resolvable binaries: clear derived residue instead of an
+		// empty shim directory. Missing paths stay missing; only files
+		// directly under the derived dir are touched.
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, entry := range entries {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+			}
+			_ = os.Remove(dir)
+		}
+		return nil
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("prepare plugin shims: %w", err)
 	}

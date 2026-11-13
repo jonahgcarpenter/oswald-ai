@@ -81,8 +81,9 @@ func TestRegenerateShimsSkipsUnknownBin(t *testing.T) {
 	if err := RegenerateShims(root); err != nil {
 		t.Fatal(err)
 	}
-	if entries, err := os.ReadDir(PluginShimDir(root)); err != nil || len(entries) != 0 {
-		t.Fatalf("unexpected shims: %v %v", entries, err)
+	// No resolvable binary means no shim directory at all.
+	if _, err := os.Lstat(PluginShimDir(root)); !os.IsNotExist(err) {
+		t.Fatalf(".bin exists for unknown bin (err=%v), want absent", err)
 	}
 }
 
@@ -124,8 +125,9 @@ func TestRegenerateShimsPrunesStale(t *testing.T) {
 	if err := RegenerateShims(root); err != nil {
 		t.Fatal(err)
 	}
-	if entries, err := os.ReadDir(PluginShimDir(root)); err != nil || len(entries) != 0 {
-		t.Fatalf("stale shim survived: %v %v", entries, err)
+	// The last shim pruned means the directory goes away too.
+	if _, err := os.Lstat(PluginShimDir(root)); !os.IsNotExist(err) {
+		t.Fatalf("stale .bin survived (err=%v), want absent", err)
 	}
 }
 
@@ -135,8 +137,8 @@ func TestRegenerateShimsRejectsEscape(t *testing.T) {
 	if err := RegenerateShims(root); err != nil {
 		t.Fatal(err)
 	}
-	if entries, err := os.ReadDir(PluginShimDir(root)); err != nil || len(entries) != 0 {
-		t.Fatalf("escape entry produced a shim: %v %v", entries, err)
+	if _, err := os.Lstat(PluginShimDir(root)); !os.IsNotExist(err) {
+		t.Fatalf("escape entry produced .bin (err=%v), want absent", err)
 	}
 }
 
