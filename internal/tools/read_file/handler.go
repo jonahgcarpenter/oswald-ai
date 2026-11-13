@@ -1,19 +1,20 @@
-package workspace
+package readfile
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/docextract"
 )
 
@@ -23,7 +24,7 @@ const (
 )
 
 // NewReadFileHandler returns the paginated text-file reader.
-func NewReadFileHandler(ws *Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewReadFileHandler(ws *workspace.Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		return readFileCall(ctx, ws, nil, args)
 	}
@@ -31,13 +32,13 @@ func NewReadFileHandler(ws *Workspace) func(context.Context, map[string]interfac
 
 // NewReadFileHandlerWithDocCache returns the reader with private inbound
 // document cache access. Cache paths named in prompts resolve here.
-func NewReadFileHandlerWithDocCache(ws *Workspace, docs *docache.Cache) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewReadFileHandlerWithDocCache(ws *workspace.Workspace, docs *docache.Cache) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		return readFileCall(ctx, ws, docs, args)
 	}
 }
 
-func readFileCall(ctx context.Context, ws *Workspace, docs *docache.Cache, args map[string]interface{}) (governance.Result, error) {
+func readFileCall(ctx context.Context, ws *workspace.Workspace, docs *docache.Cache, args map[string]interface{}) (governance.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return governance.Result{}, err
 	}
@@ -64,15 +65,15 @@ func readFileCall(ctx context.Context, ws *Workspace, docs *docache.Cache, args 
 	}
 	abs, _, err := ws.Resolve(rawPath)
 	if err != nil {
-		if rel, category, ok := AsDeny(err); ok {
-			return governance.Result{}, errors.New(DenyMessage(rel, category, false))
+		if rel, category, ok := workspace.AsDeny(err); ok {
+			return governance.Result{}, errors.New(workspace.DenyMessage(rel, category, false))
 		}
 		if suggestion := suggestSimilar(ws.Root(), rawPath); suggestion != "" {
 			return governance.Result{}, fmt.Errorf("file not found; did you mean %s", suggestion)
 		}
 		return governance.Result{}, err
 	}
-	data, err := readRegularFile(abs)
+	data, err := workspace.ReadRegularFile(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if suggestion := suggestSimilar(ws.Root(), rawPath); suggestion != "" {
@@ -126,7 +127,7 @@ func readFileCall(ctx context.Context, ws *Workspace, docs *docache.Cache, args 
 	}
 	content := strings.TrimSuffix(sb.String(), "\n")
 	if !truncated {
-		ws.NoteFullRead(requestID(ctx), abs, FileHash(data))
+		ws.NoteFullRead(requestID(ctx), abs, workspace.FileHash(data))
 	} else {
 		_ = lastIncluded
 		out := content + fmt.Sprintf("\n[truncated at ~100K characters; continue with offset %d]", nextOffset)
@@ -185,7 +186,7 @@ func readCachedDocument(ctx context.Context, docs *docache.Cache, path string, o
 
 // readExtractedWorkspaceFile renders a workspace binary container through the
 // document extractor with the standard pagination envelope.
-func readExtractedWorkspaceFile(ctx context.Context, ws *Workspace, abs string, data []byte, offset, limit int) (governance.Result, error) {
+func readExtractedWorkspaceFile(ctx context.Context, ws *workspace.Workspace, abs string, data []byte, offset, limit int) (governance.Result, error) {
 	text, err := docextract.Extract(abs, data)
 	if err != nil {
 		return governance.Result{}, errors.New("cannot read images/binary — use vision_analyze for images")
@@ -200,7 +201,7 @@ func readExtractedWorkspaceFile(ctx context.Context, ws *Workspace, abs string, 
 	if content == "" {
 		return governance.Result{Content: "(empty file)", Outcome: governance.OutcomeProductive}, nil
 	}
-	ws.NoteFullRead(requestID(ctx), abs, FileHash(data))
+	ws.NoteFullRead(requestID(ctx), abs, workspace.FileHash(data))
 	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 }
 
@@ -234,38 +235,6 @@ func paginateExtracted(text string, offset, limit int) (string, bool, int, int) 
 		chars += len(entry)
 	}
 	return strings.TrimSuffix(sb.String(), "\n"), truncated, nextOffset, total
-}
-
-func readRegularFile(abs string) ([]byte, error) {
-	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
-	}
-	// Bound single reads at 8 MiB; pagination handles the rest.
-	const maxBytes = 8 << 20
-	buf := make([]byte, 0, 64<<10)
-	chunk := make([]byte, 32<<10)
-	for {
-		n, err := f.Read(chunk)
-		if n > 0 {
-			if len(buf)+n > maxBytes+1 {
-				return nil, errors.New("file exceeds size limit")
-			}
-			buf = append(buf, chunk[:n]...)
-		}
-		if err != nil {
-			break
-		}
-	}
-	return buf, nil
 }
 
 func suggestSimilar(root, raw string) string {
@@ -334,4 +303,55 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// The arg helpers below are intentionally local: every tools/* package owns
+// its own small copies instead of a shared generic helper package.
+
+func rejectUnknown(args map[string]interface{}, allowed ...string) error {
+	keep := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		keep[k] = true
+	}
+	for k := range args {
+		if !keep[k] {
+			return fmt.Errorf("unknown argument %q", k)
+		}
+	}
+	return nil
+}
+
+func requestID(ctx context.Context) string {
+	return strings.TrimSpace(requestctx.MetadataFromContext(ctx).RequestID)
+}
+
+func stringArg(args map[string]interface{}, key string) (string, bool) {
+	v, ok := args[key].(string)
+	return v, ok
+}
+
+func intArg(args map[string]interface{}, key string, def int) (int, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	switch v := raw.(type) {
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(v), nil
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(n), nil
+	default:
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
 }

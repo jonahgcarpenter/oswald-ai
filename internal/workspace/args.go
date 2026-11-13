@@ -76,10 +76,10 @@ func boolArg(args map[string]interface{}, key string, def bool) (bool, error) {
 	return v, nil
 }
 
-// checkSyntax validates newContent for linted extensions, surfacing only
+// CheckSyntax validates newContent for linted extensions, surfacing only
 // errors the write introduces. Old content that already failed validation
 // suppresses the same-class failure so pre-existing breakage is filtered.
-func checkSyntax(path, oldContent, newContent string) error {
+func CheckSyntax(path, oldContent, newContent string) error {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".json":
@@ -92,7 +92,7 @@ func checkSyntax(path, oldContent, newContent string) error {
 		}
 		var v interface{}
 		if err := json.Unmarshal([]byte(newContent), &v); err != nil {
-			return fmt.Errorf("json syntax error: %s", truncateRunes(err.Error(), 300))
+			return fmt.Errorf("json syntax error: %s", TruncateRunes(err.Error(), 300))
 		}
 		return errors.New("json syntax error")
 	case ".yaml", ".yml":
@@ -103,7 +103,7 @@ func checkSyntax(path, oldContent, newContent string) error {
 			if oldErr != nil || (strings.TrimSpace(oldContent) != "" && oldV == nil) {
 				return nil
 			}
-			return fmt.Errorf("yaml syntax error: %s", truncateRunes(err.Error(), 300))
+			return fmt.Errorf("yaml syntax error: %s", TruncateRunes(err.Error(), 300))
 		}
 		return nil
 	case ".py":
@@ -128,7 +128,7 @@ func checkPythonSyntax(oldContent, newContent string) error {
 	if msg == "" {
 		return errors.New("python syntax error")
 	}
-	return fmt.Errorf("python syntax error: %s", truncateRunes(msg, 500))
+	return fmt.Errorf("python syntax error: %s", TruncateRunes(msg, 500))
 }
 
 func pythonCompiles(src string) bool {
@@ -170,7 +170,7 @@ func pythonCompileError(src string) string {
 	return msg
 }
 
-func truncateRunes(s string, max int) string {
+func TruncateRunes(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
 		return s

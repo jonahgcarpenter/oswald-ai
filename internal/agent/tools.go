@@ -15,6 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
+	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -53,7 +54,7 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	}
 	for _, tool := range a.registry.LLMToolsForVisibility(exposure.Visibility()) {
 		if policy, ok := a.registry.Policy(tool.Function.Name); ok {
-			tool.Function.Description = workspace.DynamicDescription(tool.Function.Name, tool.Function.Description)
+			tool.Function.Description = toolread.DynamicDescription(tool.Function.Name, tool.Function.Description)
 			add(tool, policy)
 		}
 	}

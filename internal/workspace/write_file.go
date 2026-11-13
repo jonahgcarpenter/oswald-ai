@@ -50,7 +50,7 @@ func NewWriteFileHandler(ws *Workspace) func(context.Context, map[string]interfa
 			return governance.Result{}, err
 		}
 		reqID := requestID(ctx)
-		oldData, readErr := readRegularFile(abs)
+		oldData, readErr := ReadRegularFile(abs)
 		exists := readErr == nil
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return governance.Result{}, errors.New("file is unavailable")
@@ -61,13 +61,13 @@ func NewWriteFileHandler(ws *Workspace) func(context.Context, map[string]interfa
 				return governance.Result{}, errors.New("write refused: read_file the full file first, merge, then retry")
 			}
 		}
-		if err := checkSyntax(abs, string(oldData), content); err != nil {
+		if err := CheckSyntax(abs, string(oldData), content); err != nil {
 			return governance.Result{}, err
 		}
 		if err := writeRegularFile(abs, content); err != nil {
 			return governance.Result{}, errors.New("file is unavailable")
 		}
-		data, err := readRegularFile(abs)
+		data, err := ReadRegularFile(abs)
 		if err != nil {
 			return governance.Result{}, errors.New("file is unavailable")
 		}
@@ -86,7 +86,7 @@ func NewWriteFileHandler(ws *Workspace) func(context.Context, map[string]interfa
 
 func writeRegularFile(abs, content string) error {
 	dir := filepath.Dir(abs)
-	if err := mkdirPrivateAll(dir); err != nil {
+	if err := MkdirPrivateAll(dir); err != nil {
 		// Parent creation is best-effort private; fall back to standard mkdir.
 		if mk := os.MkdirAll(dir, 0700); mk != nil {
 			return mk

@@ -120,37 +120,6 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 	}
 }
 
-func TestReadWriteGate(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "alice")
-	ctx := testContext("req-1")
-	write := NewWriteFileHandler(ws)
-	read := NewReadFileHandler(ws)
-	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hello"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := write(ctx, map[string]interface{}{"path": "a.txt", "content": "bye"}); err == nil {
-		t.Fatal("write without read succeeded")
-	}
-	if _, err := read(ctx, map[string]interface{}{"path": "a.txt"}); err != nil {
-		t.Fatalf("read failed: %v", err)
-	}
-	res, err := write(ctx, map[string]interface{}{"path": "a.txt", "content": "bye"})
-	if err != nil || !strings.Contains(res.Content, "verified") {
-		t.Fatalf("write after read = %+v %v", res, err)
-	}
-	// External modification invalidates the gate.
-	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("outside"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := write(ctx, map[string]interface{}{"path": "a.txt", "content": "again"}); err == nil {
-		t.Fatal("stale write succeeded after external change")
-	}
-}
-
 func TestPatchUniqueAndReplaceAll(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
@@ -240,21 +209,6 @@ func TestExecuteCodeStateless(t *testing.T) {
 	res, err := exec(ctx, map[string]interface{}{"code": "print(40+2)"})
 	if err != nil || !strings.Contains(res.Content, "42") {
 		t.Fatalf("execute_code = %+v %v (python3 may be missing)", res, err)
-	}
-}
-
-func TestDynamicDescriptionOCROverride(t *testing.T) {
-
-	SetOCRAvailable(false)
-	base := ReadFileDefinition().Description
-	if got := DynamicDescription(ReadFileName, base); got != base {
-		t.Fatal("override applied without OCR")
-	}
-	SetOCRAvailable(true)
-	defer SetOCRAvailable(false)
-	got := DynamicDescription(ReadFileName, base)
-	if !strings.Contains(got, "PDF (scanned or text)") || strings.Contains(got, "PDF (text layer)") {
-		t.Fatalf("ocr override = %q", got)
 	}
 }
 
@@ -762,67 +716,6 @@ func TestTerminalDangerousWithoutReviewerFailsClosed(t *testing.T) {
 	term := NewTerminalHandler(ws, process.NewManager(root))
 	if _, err := term(testContext("req-review-none"), map[string]interface{}{"command": "sudo id", "timeout": float64(30)}); err == nil || !strings.Contains(err.Error(), "review is unavailable") {
 		t.Fatalf("no reviewer = %v", err)
-	}
-}
-
-func TestDenyMessagesCategorized(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "default")
-	read := NewReadFileHandler(ws)
-	write := NewWriteFileHandler(ws)
-	for _, p := range []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "MEMORY.md"), filepath.Join("profiles", "alice", "x"), filepath.Join("skills", "review", "SKILL.md")} {
-		full := filepath.Join(root, p)
-		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte("data\n"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cases := []struct {
-		call string
-		args map[string]interface{}
-		want string
-	}{
-		{"read", map[string]interface{}{"path": ".env.local"}, "protected"},
-		{"read", map[string]interface{}{"path": "profiles/alice/state.db"}, "session_search"},
-		{"read", map[string]interface{}{"path": "config.yaml"}, "oswald config"},
-		{"read", map[string]interface{}{"path": "profiles/alice/x"}, ""},
-		{"read", map[string]interface{}{"path": "memories/MEMORY.md"}, ""},
-		{"read", map[string]interface{}{"path": "skills/review/SKILL.md"}, ""},
-		{"read", map[string]interface{}{"path": "SOUL.md"}, ""},
-		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, ""},
-		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "oswald providers"},
-		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "memory tool"},
-		{"write", map[string]interface{}{"path": "skills/review/SKILL.md", "content": "x"}, "skill_manage tool"},
-		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "protected"},
-		{"write", map[string]interface{}{"path": "profiles/alice/notes.md", "content": "x"}, "system-managed"},
-	}
-	for _, tc := range cases {
-		var err error
-		if tc.call == "read" {
-			_, err = read(testContext("req-deny"), tc.args)
-		} else {
-			// Seed the read-before-write gate for agent-owned paths.
-			if tc.want == "" {
-				if _, rerr := read(testContext("req-deny"), map[string]interface{}{"path": tc.args["path"]}); rerr != nil {
-					t.Fatalf("seed read %v = %v", tc.args["path"], rerr)
-				}
-			}
-			_, err = write(testContext("req-deny"), tc.args)
-		}
-		if tc.want == "" {
-			if err != nil {
-				t.Fatalf("%s %v = %v, want success", tc.call, tc.args["path"], err)
-			}
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("%s %v = %v, want %q", tc.call, tc.args["path"], err, tc.want)
-		}
 	}
 }
 

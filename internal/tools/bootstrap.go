@@ -13,6 +13,7 @@ import (
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
+	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
@@ -28,7 +29,7 @@ import (
 func BuiltinDefinitions() []llm.ToolDefinition {
 	defs := []llm.ToolDefinition{toolmemory.Definition(), toolskill.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), toolclarify.Definition(), tooldelegate.Definition()}
 	defs = append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...),
-		workspace.ReadFileDefinition(),
+		toolread.Definition(),
 		workspace.WriteFileDefinition(),
 		workspace.PatchDefinition(),
 		workspace.SearchFilesDefinition(),

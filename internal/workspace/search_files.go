@@ -98,7 +98,7 @@ func searchSingleFile(ctx context.Context, ws *Workspace, abs, pattern, outputMo
 	if err != nil {
 		return governance.Result{}, errors.New("pattern is not a valid regex")
 	}
-	data, err := readRegularFile(abs)
+	data, err := ReadRegularFile(abs)
 	if err != nil {
 		return governance.Result{}, errors.New("file is unavailable")
 	}
@@ -241,7 +241,7 @@ func searchContents(ctx context.Context, ws *Workspace, root, pattern, fileGlob,
 			skipped++
 			return nil
 		}
-		data, rerr := readRegularFile(path)
+		data, rerr := ReadRegularFile(path)
 		if rerr != nil {
 			return nil
 		}
@@ -301,7 +301,7 @@ func matchLines(content string, re *regexp.Regexp, contextLines int) []string {
 			continue
 		}
 		if contextLines == 0 {
-			out = append(out, fmt.Sprintf("%d:%s", i+1, truncateRunes(line, 500)))
+			out = append(out, fmt.Sprintf("%d:%s", i+1, TruncateRunes(line, 500)))
 			continue
 		}
 		start := i - contextLines
@@ -317,7 +317,7 @@ func matchLines(content string, re *regexp.Regexp, contextLines int) []string {
 			if j == i {
 				prefix = ">"
 			}
-			out = append(out, fmt.Sprintf("%s%d:%s", prefix, j+1, truncateRunes(lines[j], 500)))
+			out = append(out, fmt.Sprintf("%s%d:%s", prefix, j+1, TruncateRunes(lines[j], 500)))
 		}
 		out = append(out, "--")
 		if len(out) > 200 {

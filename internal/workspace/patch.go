@@ -52,7 +52,7 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 			}
 			return governance.Result{}, err
 		}
-		data, err := readRegularFile(abs)
+		data, err := ReadRegularFile(abs)
 		if err != nil {
 			return governance.Result{}, errors.New("file not found")
 		}
@@ -60,7 +60,7 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		count := strings.Count(content, oldString)
 		if count == 0 {
 			if fuzzy := fuzzyMatch(content, oldString); fuzzy != "" {
-				return governance.Result{}, fmt.Errorf("old_string not found; closest match:\n%s", truncateRunes(fuzzy, 500))
+				return governance.Result{}, fmt.Errorf("old_string not found; closest match:\n%s", TruncateRunes(fuzzy, 500))
 			}
 			return governance.Result{}, errors.New("old_string not found")
 		}
@@ -73,7 +73,7 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		} else {
 			updated = strings.Replace(content, oldString, newString, 1)
 		}
-		if err := checkSyntax(abs, content, updated); err != nil {
+		if err := CheckSyntax(abs, content, updated); err != nil {
 			return governance.Result{}, err
 		}
 		if err := writeRegularFile(abs, updated); err != nil {
