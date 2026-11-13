@@ -17,7 +17,7 @@ import (
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 )
 
 func cronPrincipal() identity.Principal {
@@ -65,7 +65,7 @@ func TestToolsForRequestToolsetFilter(t *testing.T) {
 	ok := func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		return productiveResult("ok"), nil
 	}
-	for _, name := range []string{toolread.Name, workspace.TerminalName, toolprocess.Name} {
+	for _, name := range []string{toolread.Name, toolterm.Name, toolprocess.Name} {
 		if err := registerTestTool(t, reg, testToolSpec{Name: name, Description: "Tool " + name}, governance.ToolPolicy{}, ok); err != nil {
 			t.Fatal(err)
 		}
@@ -138,15 +138,15 @@ func TestTerminalHintInjectedOnlyWithProcessManage(t *testing.T) {
 		_ = reg
 		return a.toolsForRequest(context.Background(), cronPrincipal(), exposure.NewExposure(), nil, nil, nil)
 	}
-	with := newCatalog(workspace.TerminalName, toolprocess.Name)
+	with := newCatalog(toolterm.Name, toolprocess.Name)
 	for _, tool := range with.Tools {
-		if tool.Function.Name == workspace.TerminalName && !strings.Contains(tool.Function.Description, "process_manage") {
+		if tool.Function.Name == toolterm.Name && !strings.Contains(tool.Function.Description, "process_manage") {
 			t.Fatal("hint missing when companion advertised")
 		}
 	}
-	without := newCatalog(workspace.TerminalName)
+	without := newCatalog(toolterm.Name)
 	for _, tool := range without.Tools {
-		if tool.Function.Name == workspace.TerminalName && strings.Contains(tool.Function.Description, "process_manage") {
+		if tool.Function.Name == toolterm.Name && strings.Contains(tool.Function.Description, "process_manage") {
 			t.Fatalf("hint leaked without companion: %q", tool.Function.Description)
 		}
 	}

@@ -133,32 +133,6 @@ func TestScanConfinedWriteCode(t *testing.T) {
 	}
 }
 
-func TestTerminalConfinedWriteEnvelope(t *testing.T) {
-	_, alice, bob := profileTree(t)
-	if err := os.Chmod(alice, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(alice, "alice")
-	term := NewTerminalHandler(ws, process.NewManager(alice))
-	// Reads roam, including cross-profile.
-	res, err := term(testContext("req-xread"), map[string]interface{}{
-		"command": "cat " + filepath.Join(bob, "SOUL.md"),
-	})
-	if err != nil || !strings.Contains(res.Content, "bob soul") {
-		t.Fatalf("cross-profile read failed: %+v %v", res, err)
-	}
-	// Writes stay confined with the group message.
-	res, err = term(testContext("req-xwrite"), map[string]interface{}{
-		"command": "echo x > " + filepath.Join(bob, "notes.md"),
-	})
-	if err != nil {
-		t.Fatalf("deny returned error: %v", err)
-	}
-	if !strings.Contains(res.Content, `"status":"blocked"`) || !strings.Contains(res.Content, "system-managed") {
-		t.Fatalf("missing blocked envelope: %q", res.Content)
-	}
-}
-
 func TestScanProtectedReadShell(t *testing.T) {
 	_, alice, bob := profileTree(t)
 	bobState := filepath.Join(bob, "state.db")
@@ -229,24 +203,6 @@ func TestScanProtectedReadCode(t *testing.T) {
 		if reason, blocked := ScanProtectedRead(code, alice, alice, false); blocked {
 			t.Errorf("code denied safe snippet %q: %q", code, reason)
 		}
-	}
-}
-
-func TestTerminalDeniesCrossProfileStateRead(t *testing.T) {
-	_, alice, bob := profileTree(t)
-	if err := os.Chmod(alice, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(alice, "alice")
-	term := NewTerminalHandler(ws, process.NewManager(alice))
-	res, err := term(testContext("req-xstate"), map[string]interface{}{
-		"command": "cd " + bob + " && sqlite3 state.db \"SELECT id FROM sessions;\"",
-	})
-	if err != nil {
-		t.Fatalf("deny returned error: %v", err)
-	}
-	if !strings.Contains(res.Content, `"status":"blocked"`) || !strings.Contains(res.Content, "session_search") {
-		t.Fatalf("missing blocked envelope: %q", res.Content)
 	}
 }
 

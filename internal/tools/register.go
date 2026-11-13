@@ -31,6 +31,7 @@ import (
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
 toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
+toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
 toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
 toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
@@ -174,7 +175,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		{toolwrite.Name, governance.ToolPolicy{NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolwrite.NewWriteFileHandler(ws))},
 		{toolpatch.Name, governance.ToolPolicy{NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolpatch.NewPatchHandler(ws))},
 		{toolsearch.Name, governance.ToolPolicy{NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolsearch.NewSearchFilesHandler(ws))},
-		{workspace.TerminalName, governance.ToolPolicy{NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
+		{toolterm.Name, governance.ToolPolicy{NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolterm.NewTerminalHandler(ws, pm))},
 		{toolexec.Name, governance.ToolPolicy{NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolexec.NewExecuteCodeHandler(ws))},
 		{toolprocess.Name, governance.ToolPolicy{NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolprocess.NewProcessManageHandler(ws, pm))},
 		{workspace.CronjobManageName, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewCronjobManageHandler(ws, cronStore))},

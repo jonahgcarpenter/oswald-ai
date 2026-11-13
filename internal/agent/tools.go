@@ -16,7 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 )
 
 // MCPProvider resolves request-scoped deferred MCP tools through the
@@ -61,9 +61,9 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	// The background-polling hint names process_manage, so it is injected
 	// only when that tool is actually advertised; the static description
 	// never references tools from other toolsets.
-	if catalogHas(catalog, workspace.TerminalName) && catalogHas(catalog, toolprocess.Name) {
+	if catalogHas(catalog, toolterm.Name) && catalogHas(catalog, toolprocess.Name) {
 		for i := range catalog.Tools {
-			if catalog.Tools[i].Function.Name == workspace.TerminalName && !strings.Contains(catalog.Tools[i].Function.Description, "process_manage") {
+			if catalog.Tools[i].Function.Name == toolterm.Name && !strings.Contains(catalog.Tools[i].Function.Description, "process_manage") {
 				catalog.Tools[i].Function.Description += " Use background=true only for processes that must outlive the call, then poll with process_manage."
 			}
 		}

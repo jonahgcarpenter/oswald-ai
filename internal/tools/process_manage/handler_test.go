@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
@@ -84,7 +85,7 @@ func TestTerminalBackgroundRoundTrip(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	pm := process.NewManager(root)
 	ctx := testContext("req-bg")
-	term := workspace.NewTerminalHandler(ws, pm)
+	term := toolterminal.NewTerminalHandler(ws, pm)
 	manage := NewProcessManageHandler(ws, pm)
 	res, err := term(ctx, map[string]interface{}{"command": "echo bg-hi", "background": true, "timeout": float64(30)})
 	if err != nil || !strings.Contains(res.Content, "session_id:") {
