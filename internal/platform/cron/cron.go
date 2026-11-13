@@ -273,8 +273,10 @@ const jobsLockTimeout = 30 * time.Second
 
 // lockJobs serializes a load→modify→save section across processes with an
 // flock on cron/.jobs.lock plus the in-process file mutex, so gateway,
-// CLI, and tool writes cannot clobber each other. On lock timeout it
-// degrades to in-process locking so the scheduler stays alive.
+// CLI, and tool writes cannot clobber each other. On lock timeout, or when
+// the cron directory does not exist yet, it degrades to in-process locking
+// so the scheduler stays alive; writers create the directory themselves on
+// first save.
 func (s *Store) lockJobs() (unlock func()) {
 	s.fileMu.Lock()
 	release := func() { s.fileMu.Unlock() }
@@ -282,7 +284,7 @@ func (s *Store) lockJobs() (unlock func()) {
 	if err != nil {
 		return release
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return release
 	}
 	f, err := os.OpenFile(filepath.Join(dir, ".jobs.lock"), os.O_CREATE|os.O_RDWR, 0600)

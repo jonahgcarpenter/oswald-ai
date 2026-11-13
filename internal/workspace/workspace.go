@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
@@ -75,7 +76,7 @@ func (w *Workspace) EnsureScratch() (string, error) {
 		return "", err
 	}
 	dir := w.ScratchDir()
-	if err := mkdirPrivateAll(dir); err != nil {
+	if err := MkdirPrivateAll(dir); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -214,6 +215,97 @@ func FileHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// WriteRegularFile atomically replaces abs with content: private temp file
+// in the same directory, synced, renamed over the target, then permissioned
+// and directory-synced. Symlinks and non-regular targets are refused, never
+// followed. Tool surfaces share this single safe-write path.
+func WriteRegularFile(abs, content string) error {
+	dir := filepath.Dir(abs)
+	if err := MkdirPrivateAll(dir); err != nil {
+		// Parent creation is best-effort private; fall back to standard mkdir.
+		if mk := os.MkdirAll(dir, 0700); mk != nil {
+			return mk
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".workspace-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Refuse to overwrite symlinks.
+	if info, err := os.Lstat(abs); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("refuses to overwrite special file")
+		}
+	}
+	if err := os.Rename(name, abs); err != nil {
+		return err
+	}
+	if err := os.Chmod(abs, 0600); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer d.Close()
+	_ = d.Sync()
+	_ = syscall.Fsync(int(d.Fd()))
+	return nil
+}
+
+// ReadRegularFile opens abs without following a trailing symlink and reads
+// at most 8 MiB plus one byte (callers treat over-limit as truncation or
+// refusal). Non-regular files fail closed. Tool surfaces share this single
+// safe-open path.
+func ReadRegularFile(abs string) ([]byte, error) {
+	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	// Bound single reads at 8 MiB; pagination handles the rest.
+	const maxBytes = 8 << 20
+	buf := make([]byte, 0, 64<<10)
+	chunk := make([]byte, 32<<10)
+	for {
+		n, err := f.Read(chunk)
+		if n > 0 {
+			if len(buf)+n > maxBytes+1 {
+				return nil, errors.New("file exceeds size limit")
+			}
+			buf = append(buf, chunk[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return buf, nil
+}
+
 // RepairCache tightens permissions on existing cache directories without
 // creating anything. Missing paths stay missing so creation remains lazy on
 // first tool use; symlinks and non-directories are left for the fail-closed
@@ -284,7 +376,10 @@ func validateRoot(root string) error {
 	return nil
 }
 
-func mkdirPrivateAll(dir string) error {
+// MkdirPrivateAll creates dir and any missing parents owner-only, rejecting
+// symlink escapes along the way. Tool surfaces call it when first writing
+// into a profile directory.
+func MkdirPrivateAll(dir string) error {
 	path := string(filepath.Separator)
 	for _, part := range strings.Split(strings.TrimPrefix(dir, path), path) {
 		if part == "" {

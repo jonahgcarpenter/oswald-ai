@@ -78,6 +78,31 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   units only. Top-level dispatches run sync by default (blocking tool result);
   `background:true` runs async with a handle receipt and later new-turn
   delivery; nested orchestrator calls run inline. Full history, searchable results.
+- `read_file` — paginated text read (`LINE_NUM|CONTENT`, 1-indexed offset, 2000-line
+  default/max, ~100K-char budget with `next_offset` continuation); binary containers
+  (`.docx/.xlsx/.ppt/.pdf`/Office/OpenDocument/RTF/EPUB/SQLite) auto-extract to text,
+  images refuse with a `vision_analyze` redirect; similar-filename suggestions on miss.
+  Inbound document cache paths resolve first.
+- `write_file` — whole-file replace with read-before-write gate (refuses without a
+  current full read or on external modification), syntax-checked (new errors only),
+  atomic temp-rename with `verified:<hash>` receipt; parents created private.
+- `patch` — targeted find-and-replace (unique match or `replace_all`), 9-strategy
+  fuzzy matching with closest-match hint, unified-diff result, same syntax gate.
+- `search_files` — ripgrep-backed content search (regex, line numbers, context lines,
+  `files_only`/`count` modes, 50-result default) and glob file search (discovery or
+  exact newest-first order); skips `.git`/`node_modules`/`__pycache__` and >1 MiB files.
+- `terminal` — foreground `/bin/sh -c` (default 180s, 600s max; over-cap promotes to
+  tracked background) with minimal env (`PATH` includes `/opt/oswald`,
+  `TMPDIR=<cwd>/cache/scratch/`); arg validation lives here, guarded execution in
+  `workspace.ExecuteCommand` (pre-execution chain, review escalation, spawn).
+- `execute_code` — stateless `python3` per call (300s cap, 200KB code limit, 50KB
+  output cap) with `__pycache__` reset support; shares the terminal arg-surface pattern.
+- `process_manage` — tracked background sessions: `list|poll|log|wait|kill|write|
+  submit|close|handoff` (unique-prefix ids, 200-line log default); stdin writes run
+  the confined-write/protected-read scans; `handoff` reparents to the caller's scope.
+- `cronjob_manage` — schedules end to end (`create|list|update|pause|resume|remove|run`),
+  rejects `model/provider/base_url` overrides; scripts resolve under per-profile
+  `scripts/`, delivery targets the concrete `deliver` object.
 
 History policy in one line: `memory`/`skill_manage`/`browser_vault_*` metadata-only, `session_search`/`web_search`
 searchable, image-tool and `clarify` text nonsearchable — with 16 KiB args and 16,000 result runes per call

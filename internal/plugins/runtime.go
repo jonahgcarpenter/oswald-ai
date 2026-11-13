@@ -30,12 +30,16 @@ func PluginDataDir(profileRoot, plugin string) string {
 	return filepath.Join(ProfilePluginsDir(profileRoot), filepath.FromSlash(plugin), "data")
 }
 
-// RepairProfile ensures the per-profile plugins parent exists owner-only.
-// Per-plugin dirs are created on demand. It never migrates or deletes
-// operator data. It also regenerates bare-name shims so existing installs
-// stay runnable after upgrades.
+// RepairProfile tightens permissions on the existing per-profile plugins
+// parent without creating anything. Missing paths stay missing so creation
+// remains lazy on first install; per-plugin dirs are created on demand. It
+// never migrates or deletes operator data. It also regenerates bare-name
+// shims so existing installs stay runnable after upgrades.
 func RepairProfile(profileRoot string) {
 	dir := ProfilePluginsDir(profileRoot)
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return
 	}

@@ -407,7 +407,7 @@ func resolveShape(shape, base string) string {
 		return ""
 	}
 	if t == "~" || strings.HasPrefix(t, "~/") {
-		t = filepath.Join(userHome(), strings.TrimPrefix(t, "~"))
+		t = filepath.Join(UserHome(), strings.TrimPrefix(t, "~"))
 	} else if strings.HasPrefix(t, "~") {
 		return ""
 	} else if !filepath.IsAbs(t) && t != ".." && !strings.HasPrefix(t, "../") && !strings.HasPrefix(t, "./") && !strings.Contains(t, "/") {

@@ -55,7 +55,7 @@ config, and storage all live under the profile — same island rule as `mcp_serv
   per-profile `plugins/<name>/data` storage (`0700` dirs, `0600` files,
   workspace-protected). `EnabledRequiresEnv` reports each present plugin's
   declared `requires_env` so startup can register them for sandbox passthrough.
-- `runtime.go` repairs `plugins/` roots, loads every present plugin from the
+- `runtime.go` permission-repairs the existing `plugins/` root (never creates it), loads every present plugin from the
   profile tree, checks `requires_env` fail-closed, and publishes tools into the
   profile registry with override gating.
 - `agent` fires `pre_tool_call` (directive, 5s, fail-closed `plugin_blocked`),

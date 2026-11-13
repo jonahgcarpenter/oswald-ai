@@ -14,8 +14,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
+	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 )
 
 func cronPrincipal() identity.Principal {
@@ -63,7 +65,7 @@ func TestToolsForRequestToolsetFilter(t *testing.T) {
 	ok := func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		return productiveResult("ok"), nil
 	}
-	for _, name := range []string{workspace.ReadFileName, workspace.TerminalName, workspace.ProcessManageName} {
+	for _, name := range []string{toolread.Name, toolterm.Name, toolprocess.Name} {
 		if err := registerTestTool(t, reg, testToolSpec{Name: name, Description: "Tool " + name}, governance.ToolPolicy{}, ok); err != nil {
 			t.Fatal(err)
 		}
@@ -78,7 +80,7 @@ func TestToolsForRequestToolsetFilter(t *testing.T) {
 		t.Fatalf("unfiltered catalog = %d tools", len(full.Tools))
 	}
 	core := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{"core"}, nil, nil)
-	if len(core.Tools) != 1 || core.Tools[0].Function.Name != workspace.ReadFileName {
+	if len(core.Tools) != 1 || core.Tools[0].Function.Name != toolread.Name {
 		t.Fatalf("core catalog = %v", catalogToolNames(core.Tools))
 	}
 	empty := a.toolsForRequest(ctx, principal, exposure.NewExposure(), []string{}, nil, nil)
@@ -136,15 +138,15 @@ func TestTerminalHintInjectedOnlyWithProcessManage(t *testing.T) {
 		_ = reg
 		return a.toolsForRequest(context.Background(), cronPrincipal(), exposure.NewExposure(), nil, nil, nil)
 	}
-	with := newCatalog(workspace.TerminalName, workspace.ProcessManageName)
+	with := newCatalog(toolterm.Name, toolprocess.Name)
 	for _, tool := range with.Tools {
-		if tool.Function.Name == workspace.TerminalName && !strings.Contains(tool.Function.Description, "process_manage") {
+		if tool.Function.Name == toolterm.Name && !strings.Contains(tool.Function.Description, "process_manage") {
 			t.Fatal("hint missing when companion advertised")
 		}
 	}
-	without := newCatalog(workspace.TerminalName)
+	without := newCatalog(toolterm.Name)
 	for _, tool := range without.Tools {
-		if tool.Function.Name == workspace.TerminalName && strings.Contains(tool.Function.Description, "process_manage") {
+		if tool.Function.Name == toolterm.Name && strings.Contains(tool.Function.Description, "process_manage") {
 			t.Fatalf("hint leaked without companion: %q", tool.Function.Description)
 		}
 	}

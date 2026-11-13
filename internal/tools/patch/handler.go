@@ -1,4 +1,4 @@
-package workspace
+package patch
 
 import (
 	"context"
@@ -8,10 +8,11 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // NewPatchHandler returns targeted find-and-replace edits.
-func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewPatchHandler(ws *workspace.Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err
@@ -47,12 +48,12 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		}
 		abs, _, err := ws.ResolveWrite(rawPath)
 		if err != nil {
-			if rel, group, ok := AsDeny(err); ok {
-				return governance.Result{}, errors.New(DenyMessage(rel, group, true))
+			if rel, group, ok := workspace.AsDeny(err); ok {
+				return governance.Result{}, errors.New(workspace.DenyMessage(rel, group, true))
 			}
 			return governance.Result{}, err
 		}
-		data, err := readRegularFile(abs)
+		data, err := workspace.ReadRegularFile(abs)
 		if err != nil {
 			return governance.Result{}, errors.New("file not found")
 		}
@@ -60,7 +61,7 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		count := strings.Count(content, oldString)
 		if count == 0 {
 			if fuzzy := fuzzyMatch(content, oldString); fuzzy != "" {
-				return governance.Result{}, fmt.Errorf("old_string not found; closest match:\n%s", truncateRunes(fuzzy, 500))
+				return governance.Result{}, fmt.Errorf("old_string not found; closest match:\n%s", workspace.TruncateRunes(fuzzy, 500))
 			}
 			return governance.Result{}, errors.New("old_string not found")
 		}
@@ -73,13 +74,13 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		} else {
 			updated = strings.Replace(content, oldString, newString, 1)
 		}
-		if err := checkSyntax(abs, content, updated); err != nil {
+		if err := workspace.CheckSyntax(abs, content, updated); err != nil {
 			return governance.Result{}, err
 		}
-		if err := writeRegularFile(abs, updated); err != nil {
+		if err := workspace.WriteRegularFile(abs, updated); err != nil {
 			return governance.Result{}, errors.New("file is unavailable")
 		}
-		ws.NoteWrite(requestID(ctx), abs, FileHash([]byte(updated)))
+		ws.NoteWrite(requestID(ctx), abs, workspace.FileHash([]byte(updated)))
 		diff := unifiedDiff(rawPath, oldString, newString, count, replaceAll)
 		return governance.Result{Content: diff, Outcome: governance.OutcomeProductive}, nil
 	}
@@ -136,4 +137,41 @@ func fuzzyMatch(content, needle string) string {
 		}
 	}
 	return best
+}
+
+// The arg helpers below are intentionally local: every tools/* package owns
+// its own small copies instead of a shared generic helper package.
+
+func rejectUnknown(args map[string]interface{}, allowed ...string) error {
+	keep := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		keep[k] = true
+	}
+	for k := range args {
+		if !keep[k] {
+			return fmt.Errorf("unknown argument %q", k)
+		}
+	}
+	return nil
+}
+
+func requestID(ctx context.Context) string {
+	return strings.TrimSpace(requestctx.MetadataFromContext(ctx).RequestID)
+}
+
+func stringArg(args map[string]interface{}, key string) (string, bool) {
+	v, ok := args[key].(string)
+	return v, ok
+}
+
+func boolArg(args map[string]interface{}, key string, def bool) (bool, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	v, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return v, nil
 }

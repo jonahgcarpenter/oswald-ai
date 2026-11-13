@@ -9,23 +9,41 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
+	toolcron "github.com/jonahgcarpenter/oswald-ai/internal/tools/cronjob"
 	tooldelegate "github.com/jonahgcarpenter/oswald-ai/internal/tools/delegate"
+	toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
+	toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
+	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
+	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
+	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // BuiltinDefinitions returns every Go-owned builtin tool definition in
-// registration order.
+// registration order. Workspace-owned surfaces are listed explicitly so
+// each tool keeps its original position as surfaces move to tools/*.
 func BuiltinDefinitions() []llm.ToolDefinition {
 	defs := []llm.ToolDefinition{toolmemory.Definition(), toolskill.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), toolclarify.Definition(), tooldelegate.Definition()}
-	return append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...), workspace.Definitions()...)
+	defs = append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...),
+		toolread.Definition(),
+		toolwrite.Definition(),
+		toolpatch.Definition(),
+		toolsearch.Definition(),
+		toolterm.Definition(),
+		toolexec.Definition(),
+		toolprocess.Definition(),
+		toolcron.Definition(),
+	)
+	return defs
 }
 
 // NewRegistryFromConfig creates a Registry with Go definitions and configured
