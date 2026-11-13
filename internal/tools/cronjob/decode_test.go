@@ -1,6 +1,7 @@
 package cronjob
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -36,9 +37,9 @@ func TestApplyCronUpdateOneshotKeepsNextRunAt(t *testing.T) {
 	// one-shots, so a hardcoded date would rot into a failure.
 	future := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 
-	err := applyCronUpdate(nil, job, map[string]interface{}{
+	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": future,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}
@@ -57,9 +58,9 @@ func TestApplyCronUpdateOneshotInPhrase(t *testing.T) {
 	job := oneshotJob(cron.StateScheduled)
 	before := time.Now().UTC()
 
-	err := applyCronUpdate(nil, job, map[string]interface{}{
+	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": "in 30m",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}
@@ -83,9 +84,9 @@ func TestApplyCronUpdateOneshotPausedStaysNull(t *testing.T) {
 	job.NextRunAt = nil
 	future := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 
-	err := applyCronUpdate(nil, job, map[string]interface{}{
+	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": future,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}
@@ -106,9 +107,9 @@ func TestApplyCronUpdateRepeatsStillAdvance(t *testing.T) {
 		State:    cron.StateScheduled,
 	}
 
-	err := applyCronUpdate(nil, job, map[string]interface{}{
+	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": "0 23 * * 1-5",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}

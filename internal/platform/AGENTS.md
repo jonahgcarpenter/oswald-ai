@@ -70,13 +70,18 @@ Per-profile jobs in `cron/jobs.json` with atomic rewrites (plus `executions.json
 newest 1000): `scheduled|paused|completed|running` states plus `enabled`, fuzzy id-or-name
 resolution, concrete `deliver{platform,chat_id,user_id}` targets (no origin indirection; groupchat
 `user_id` mentions, DMs ignore it), `repeat{times,null=forever,completed}` auto-complete, and
-`failure_streak` auto-pause at 3 with a target alert. Schedules store the parsed dict
+`failure_streak` auto-pause at 3 with a target alert — agent, script, and delivery failures
+all count toward the streak. Each tick retries the failing phase up to 3 times (agent
+errors re-run the agent, delivery errors only re-send with a 10s backoff) with one ledger
+row per attempt, so a fully failing tick trips auto-pause immediately. Schedules store the parsed dict
 `{kind:cron|interval|once,expr|minutes|run_at,display}` with UTC ISO `created_at/next_run_at`
 (`null` when unscheduled); the grammar covers durations, `every` phrases, 5-field cron, RFC3339,
 and `in` one-shots, all UTC wall-clock. Scripts live under per-profile `scripts/` (jailed,
 must exist). Validation rejects injection, script escapes, bad deliver targets, and user-owned
 `model/provider/base_url`; unknown or legacy fields fail closed with a manual-update error (no
-migration). `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe
+migration). Deliver targets are also liveness-checked at create/update time against the live
+transport (imessage group GUIDs and guild/channel membership via BlueBubbles/Discord lookups;
+DMs validate handle shape, never existence) — unverifiable targets are rejected, never scheduled. `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe
 (skipped duplicates stay silent), restore-once for orphaned runs, and one-shot grace retire;
 unparsable schedules record `blocked_config` instead of running. A per-profile 30s ticker with
 re-arm wake drives dispatch at a 30m ceiling — `[SILENT]` suppresses, and nothing mirrors into

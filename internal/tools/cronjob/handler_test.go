@@ -2,6 +2,7 @@ package cronjob
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron"), requestctx.Metadata{RequestID: "req-cron", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store)
+	manage := NewCronjobManageHandler(ws, store, nil)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "no_agent": true})
 	if err != nil || !strings.Contains(created.Content, "job_id:") {
 		t.Fatalf("create = %+v %v", created, err)
@@ -82,7 +83,7 @@ func TestCronjobManageZonedTimestamps(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-tz"), requestctx.Metadata{RequestID: "req-cron-tz", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store)
+	manage := NewCronjobManageHandler(ws, store, nil)
 	// Far-future one-shot: asserts the zoned next_run_at rendering (the Nov
 	// 2026 wall-clock regression) without depending on the test clock.
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "2027-06-01T00:15:00Z", "prompt": "hi"})
@@ -109,7 +110,7 @@ func TestCronjobManageNameAndDeliver(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-name"), requestctx.Metadata{RequestID: "req-cron-name", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store)
+	manage := NewCronjobManageHandler(ws, store, nil)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "112233445"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
@@ -154,7 +155,7 @@ func TestCronjobManageDeliverValidation(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store)
+	manage := NewCronjobManageHandler(ws, store, nil)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
@@ -191,7 +192,7 @@ func TestCronjobManageMCPServers(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-mcp"), requestctx.Metadata{RequestID: "req-cron-mcp", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store)
+	manage := NewCronjobManageHandler(ws, store, nil)
 	// Omitted exposes all.
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 	if err != nil {
@@ -233,4 +234,97 @@ func TestCronjobManageMCPServers(t *testing.T) {
 			t.Fatalf("bad allowlist accepted: %v", args["mcp_servers"])
 		}
 	}
+}
+
+type stubTargetValidator struct {
+	calls *int
+	err   error
+}
+
+func (v stubTargetValidator) ValidateTarget(_ context.Context, _, _ string) error {
+	if v.calls != nil {
+		*v.calls++
+	}
+	return v.err
+}
+
+func TestCronjobManageCreateValidatesTarget(t *testing.T) {
+	newFixture := func(t *testing.T) (*workspace.Workspace, *cron.Store, context.Context) {
+		t.Helper()
+		root := t.TempDir()
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		ctx := requestctx.WithMetadata(testContext("req-cron-validate"), requestctx.Metadata{RequestID: "req-cron-validate", SessionID: "discord:chan1:987654321"})
+		return workspace.NewWorkspace(root, "alice"), cron.NewStore(root), ctx
+	}
+	reject := errors.New("chat is unknown to BlueBubbles (stale or mistyped GUID)")
+
+	t.Run("rejects unknown chat", func(t *testing.T) {
+		ws, store, ctx := newFixture(t)
+		var calls int
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"imessage": stubTargetValidator{calls: &calls, err: reject}})
+		_, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "imessage", "deliver_chat_id": "iMessage;+;chat5814039491040595", "deliver_user_id": "+16626873509"})
+		if err == nil || !strings.Contains(err.Error(), "unknown") {
+			t.Fatalf("mistyped GUID accepted: %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("validator calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("rejects unconfigured platform", func(t *testing.T) {
+		ws, store, ctx := newFixture(t)
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{})
+		_, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "imessage", "deliver_chat_id": "iMessage;+;chat1"})
+		if err == nil || !strings.Contains(err.Error(), "not configured") {
+			t.Fatalf("unconfigured platform accepted: %v", err)
+		}
+	})
+
+	t.Run("accepts verified target", func(t *testing.T) {
+		ws, store, ctx := newFixture(t)
+		var calls int
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{calls: &calls}})
+		created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "112233445"})
+		if err != nil {
+			t.Fatalf("verified target rejected: %v", err)
+		}
+		if calls != 1 || !strings.Contains(created.Content, "job_id:") {
+			t.Fatalf("validator not consulted: calls=%d content=%q", calls, created.Content)
+		}
+	})
+
+	t.Run("update revalidates merged target", func(t *testing.T) {
+		ws, store, ctx := newFixture(t)
+		plain := NewCronjobManageHandler(ws, store, nil)
+		created, err := plain(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
+		if err != nil {
+			t.Fatalf("create = %v", err)
+		}
+		jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+		guarded := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{err: reject}})
+		if _, err := guarded(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_chat_id": "nope"}); err == nil {
+			t.Fatal("update to unknown chat accepted")
+		}
+		stored, err := store.Resolve(jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Deliver.ChatID != "chan1" {
+			t.Fatalf("failed update mutated the target: %+v", stored.Deliver)
+		}
+	})
+
+	t.Run("defaulted target skips validation", func(t *testing.T) {
+		ws, store, ctx := newFixture(t)
+		var calls int
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{calls: &calls, err: reject}})
+		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"}); err != nil {
+			t.Fatalf("live-session default rejected: %v", err)
+		}
+		if calls != 0 {
+			t.Fatalf("defaulted target was liveness-checked: calls=%d", calls)
+		}
+	})
 }

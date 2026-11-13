@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,11 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+)
+
+var (
+	errTestSend  = errors.New("send failed")
+	errTestAgent = errors.New("agent failed")
 )
 
 func testRunner(root string) *Runner {
@@ -891,5 +897,176 @@ func TestNextCronDayOrSemanticsAndLeapDay(t *testing.T) {
 	}
 	if monday.Weekday() != time.Monday {
 		t.Fatalf("weekly cron = %v", monday)
+	}
+}
+
+// flakySender fails the first failsLeft deliveries, then succeeds.
+type flakySender struct {
+	calls     int
+	failsLeft int
+	failErr   error
+}
+
+func (s *flakySender) Deliver(_ context.Context, _, _ string, _ string, _ []media.OutputAttachment) error {
+	s.calls++
+	if s.failsLeft > 0 {
+		s.failsLeft--
+		return s.failErr
+	}
+	return nil
+}
+
+func (s *flakySender) DeliverMention(_ context.Context, _ string, _ string, _ Mention, _ string, _ []media.OutputAttachment) error {
+	return s.Deliver(context.Background(), "", "", "", nil)
+}
+
+func retryTestDispatcher(store *Store, root string, agent AgentFunc, sender *flakySender) *Dispatcher {
+	return &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Agent:         agent,
+		Senders:       map[string]Sender{"discord": sender},
+		NewGeneration: func(ctx context.Context, profile, session string) error { return nil },
+		RetryBackoff:  time.Nanosecond,
+	}
+}
+
+func ledgerLines(t *testing.T, root string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "cron", "executions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
+}
+
+func TestDeliveryFailuresIncrementStreakAndPauseInOneTick(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	sender := &flakySender{failsLeft: 100, failErr: errTestSend}
+	d := retryTestDispatcher(store, root, func(ctx context.Context, call AgentCall) (AgentResult, error) {
+		return AgentResult{Text: "hello"}, nil
+	}, sender)
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "30m", now)
+	job := mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Deliver: testDeliver()})
+	ex, _, err := d.RunOne(context.Background(), job, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Status != "delivery_failed" || ex.Delivered {
+		t.Fatalf("final = %+v", ex)
+	}
+	if sender.calls != MaxPhaseAttempts+1 {
+		t.Fatalf("sender attempts = %d, want %d deliveries plus the auto-pause alert", sender.calls, MaxPhaseAttempts+1)
+	}
+	updated, err := store.Resolve(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FailureStreak != MaxPhaseAttempts || updated.State != StatePaused || updated.NextRunAt != nil {
+		t.Fatalf("no auto-pause after one failing tick: %+v", updated)
+	}
+	if got := ledgerLines(t, root); got != MaxPhaseAttempts {
+		t.Fatalf("ledger rows = %d, want %d", got, MaxPhaseAttempts)
+	}
+}
+
+func TestAgentRetryThenSuccessDeliversOnce(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	sender := &flakySender{}
+	agentCalls := 0
+	d := retryTestDispatcher(store, root, func(ctx context.Context, call AgentCall) (AgentResult, error) {
+		agentCalls++
+		if agentCalls < 3 {
+			return AgentResult{}, errTestAgent
+		}
+		return AgentResult{Text: "recovered"}, nil
+	}, sender)
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "in 1s", now)
+	job := mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Deliver: testDeliver()})
+	ex, _, err := d.RunOne(context.Background(), job, time.Minute)
+	if err != nil || !ex.Delivered {
+		t.Fatalf("dispatch = %+v %v", ex, err)
+	}
+	if agentCalls != 3 {
+		t.Fatalf("agent attempts = %d, want 3", agentCalls)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender attempts = %d, want 1", sender.calls)
+	}
+	updated, err := store.Resolve(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FailureStreak != 0 {
+		t.Fatalf("streak not reset after recovery: %+v", updated)
+	}
+}
+
+func TestDeliveryRetryDoesNotReinvokeAgent(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	sender := &flakySender{failsLeft: 2, failErr: errTestSend}
+	agentCalls := 0
+	d := retryTestDispatcher(store, root, func(ctx context.Context, call AgentCall) (AgentResult, error) {
+		agentCalls++
+		return AgentResult{Text: "once"}, nil
+	}, sender)
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "in 1s", now)
+	job := mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Deliver: testDeliver()})
+	ex, _, err := d.RunOne(context.Background(), job, time.Minute)
+	if err != nil || !ex.Delivered {
+		t.Fatalf("dispatch = %+v %v", ex, err)
+	}
+	if agentCalls != 1 {
+		t.Fatalf("agent attempts = %d, want 1", agentCalls)
+	}
+	if sender.calls != 3 {
+		t.Fatalf("sender attempts = %d, want 3", sender.calls)
+	}
+	updated, err := store.Resolve(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FailureStreak != 0 {
+		t.Fatalf("streak not reset after recovery: %+v", updated)
+	}
+}
+
+func TestScriptRetryRecordsEachFailure(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	writeScript(t, root, "fail.sh", "#!/bin/sh\nexit 3\n")
+	sender := &flakySender{}
+	d := &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Senders:      map[string]Sender{"discord": sender},
+		MaxAttempts:  2,
+		RetryBackoff: time.Nanosecond,
+	}
+	sched, _ := mustParse(t, "30m", time.Now().UTC())
+	job := mustCreate(t, store, Job{Schedule: sched, Script: "fail.sh", NoAgent: true, Deliver: testDeliver()})
+	ex, _, err := d.RunOne(context.Background(), job, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Status != "script_error" || ex.Delivered {
+		t.Fatalf("final = %+v", ex)
+	}
+	updated, err := store.Resolve(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FailureStreak != 2 || updated.State != StateScheduled {
+		t.Fatalf("two script failures should streak without pausing: %+v", updated)
+	}
+	if got := ledgerLines(t, root); got != 2 {
+		t.Fatalf("ledger rows = %d, want 2", got)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("failed scripts must not deliver: sender calls = %d", sender.calls)
 	}
 }
