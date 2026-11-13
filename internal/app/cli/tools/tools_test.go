@@ -125,7 +125,7 @@ func TestProfileFlagAnyPosition(t *testing.T) {
 	}
 }
 
-func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+func TestCrossProfileReadDeniedMutateDenied(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
 		t.Fatal(err)
@@ -134,9 +134,8 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
-	code, out, _ := run(t, root, "show", "--profile", "default")
-	if code != 0 || !strings.Contains(out, "web_search") {
-		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	if code, _, _ := run(t, root, "show", "--profile", "default"); code == 0 {
+		t.Fatal("cross-profile read accepted")
 	}
 	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if code, _, _ := run(t, root, "set", "--profile", "default", "web-search", "--searxng-url", "http://127.0.0.1:9999"); code == 0 {

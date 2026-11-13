@@ -117,12 +117,11 @@ func bobScope(t *testing.T, root string) {
 	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
 }
 
-func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+func TestCrossProfileReadDeniedMutateDenied(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	bobScope(t, root)
-	code, out, _ := run(t, root, "list", "--profile", "default")
-	if code != 0 || !strings.Contains(out, "fake") {
-		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	if code, _, _ := run(t, root, "list", "--profile", "default"); code == 0 {
+		t.Fatal("cross-profile read accepted")
 	}
 	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if code, _, _ := run(t, root, "add", "--profile", "default", "evil", "--api", "http://127.0.0.1:9998/v1"); code == 0 {

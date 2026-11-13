@@ -11,8 +11,8 @@ import (
 )
 
 // resolveScope loads the configuration and selects the operator profile
-// named by the --profile flag (or OSWALD_HOME when empty). Reads may name
-// another profile; mutations fail closed on contradiction via
+// named by the --profile flag (or OSWALD_HOME when empty). Reads and
+// mutations fail closed on contradiction via
 // ResolveProfile.
 func resolveScope(root, flagProfile string, mutating bool) (profile *config.Config, profileName, profileRoot string, err error) {
 	var name string

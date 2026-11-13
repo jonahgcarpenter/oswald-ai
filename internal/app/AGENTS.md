@@ -35,9 +35,9 @@ Scoped groups mirror the top-level `config.yaml` keys one-to-one: `providers` â†
 `plugins.entries.*` (per-profile installs, presence means enabled). `--profile` is accepted
 (in any position) only where profiles may override (`providers`, `model`, `api`, `tools`, `mcp`, `plugins`,
 `delegation`);
-`gateway`, `platforms`, and `runtime` are global-only. Scoping is read-vs-mutate: reads
-(`show`, `get`, `list`, `validate`, `test`) may name another existing profile, while every
-mutation stays fenced to the calling scope (`OSWALD_HOME` profile) and fails closed on
+`gateway`, `platforms`, and `runtime` are global-only. Scoping is fenced to the
+calling scope (`OSWALD_HOME` profile): reads (`show`, `get`, `list`,
+`validate`, `test`) and mutations both fail closed on
 contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`) and profile
 lifecycle (`profile create|rename|delete`) additionally require the default scope.
 `commands/` holds the `Definition/Request/Result/Handler` contract and

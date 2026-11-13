@@ -134,7 +134,7 @@ func TestValidateAcceptsAndRejects(t *testing.T) {
 	}
 }
 
-func TestCrossProfileReadAllowed(t *testing.T) {
+func TestCrossProfileReadDenied(t *testing.T) {
 	root := testRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
 		t.Fatal(err)
@@ -143,9 +143,8 @@ func TestCrossProfileReadAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
-	code, out, _ := run(t, root, "get", "runtime.log_level", "--profile", "default")
-	if code != 0 || !strings.Contains(out, "info") {
-		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	if code, _, _ := run(t, root, "get", "runtime.log_level", "--profile", "default"); code == 0 {
+		t.Fatal("cross-profile read accepted")
 	}
 }
 

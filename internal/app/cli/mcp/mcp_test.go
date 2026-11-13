@@ -134,13 +134,12 @@ func TestProfileScopeEnforced(t *testing.T) {
 		t.Fatalf("add missed the bob profile:\n%s", data)
 	}
 	if code, _, _ := mcpRun(t, root, "list", "--profile", "alice"); code == 0 {
-		// Reads tolerate another profile name but fail closed when it does
-		// not exist.
+		// Reads and mutations both fail closed on contradiction.
 		t.Fatal("list of missing profile accepted")
 	}
-	// Reads of an existing profile are visible cross-profile…
-	if code, out, _ := mcpRun(t, root, "list", "--profile", "default"); code != 0 {
-		t.Fatalf("cross-profile list rejected: %d %q", code, out)
+	// Reads stay fenced to the calling scope…
+	if code, _, _ := mcpRun(t, root, "list", "--profile", "default"); code == 0 {
+		t.Fatal("cross-profile list accepted")
 	}
 	// …but mutations stay fenced to the calling scope.
 	if code, _, _ := mcpRun(t, root, "add", "evil", "--profile", "default", "--url", "https://example.com/mcp"); code == 0 {

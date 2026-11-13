@@ -23,8 +23,7 @@ const (
 )
 
 // Run dispatches the env command group. --profile is accepted in any
-// position; reads may name another profile, mutations stay fenced to the
-// calling scope.
+// position; reads and mutations stay fenced to the calling scope.
 // Leaf usage lines double as `--help` pages: `oswald env <command> --help`
 // prints the same text to stdout and exits 0 without resolving scope.
 const (

@@ -32,8 +32,8 @@ func splitProfile(args []string) (string, []string) {
 	return profile, rest
 }
 
-// resolveScope loads config and selects the profile for reads (any existing)
-// or mutations (calling scope only, contradictions fail closed).
+// resolveScope loads config and selects the profile for reads (calling
+// scope only, contradictions fail closed)
 func resolveScope(root, flagProfile string, mutating bool) (*config.Config, string, string, error) {
 	var name string
 	var err error
