@@ -215,6 +215,61 @@ func FileHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// WriteRegularFile atomically replaces abs with content: private temp file
+// in the same directory, synced, renamed over the target, then permissioned
+// and directory-synced. Symlinks and non-regular targets are refused, never
+// followed. Tool surfaces share this single safe-write path.
+func WriteRegularFile(abs, content string) error {
+	dir := filepath.Dir(abs)
+	if err := MkdirPrivateAll(dir); err != nil {
+		// Parent creation is best-effort private; fall back to standard mkdir.
+		if mk := os.MkdirAll(dir, 0700); mk != nil {
+			return mk
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".workspace-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Refuse to overwrite symlinks.
+	if info, err := os.Lstat(abs); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("refuses to overwrite special file")
+		}
+	}
+	if err := os.Rename(name, abs); err != nil {
+		return err
+	}
+	if err := os.Chmod(abs, 0600); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer d.Close()
+	_ = d.Sync()
+	_ = syscall.Fsync(int(d.Fd()))
+	return nil
+}
+
 // ReadRegularFile opens abs without following a trailing symlink and reads
 // at most 8 MiB plus one byte (callers treat over-limit as truncation or
 // refusal). Non-regular files fail closed. Tool surfaces share this single

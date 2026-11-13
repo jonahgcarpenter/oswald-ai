@@ -76,7 +76,7 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		if err := CheckSyntax(abs, content, updated); err != nil {
 			return governance.Result{}, err
 		}
-		if err := writeRegularFile(abs, updated); err != nil {
+		if err := WriteRegularFile(abs, updated); err != nil {
 			return governance.Result{}, errors.New("file is unavailable")
 		}
 		ws.NoteWrite(requestID(ctx), abs, FileHash([]byte(updated)))
