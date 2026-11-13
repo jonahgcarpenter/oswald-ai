@@ -225,7 +225,7 @@ func runShell(ctx context.Context, command, dir, scratch, home string, timeoutSe
 	cmd.Dir = dir
 	base := []string{
 		"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
-		"HOME=" + userHome(),
+		"HOME=" + UserHome(),
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + dir,

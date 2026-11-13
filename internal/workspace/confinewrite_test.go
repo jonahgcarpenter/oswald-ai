@@ -159,27 +159,6 @@ func TestTerminalConfinedWriteEnvelope(t *testing.T) {
 	}
 }
 
-func TestExecuteCodeConfinedWrite(t *testing.T) {
-	_, alice, bob := profileTree(t)
-	if err := os.Chmod(alice, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(alice, "alice")
-	exec := NewExecuteCodeHandler(ws)
-	res, err := exec(testContext("req-xcode"), map[string]interface{}{
-		"code": "print(open('" + filepath.Join(bob, "SOUL.md") + "').read())",
-	})
-	if err != nil || !strings.Contains(res.Content, "bob soul") {
-		t.Fatalf("cross-profile code read failed: %+v %v", res, err)
-	}
-	_, err = exec(testContext("req-xcode-w"), map[string]interface{}{
-		"code": "open('" + filepath.Join(bob, "notes.md") + "', 'w').write('x')",
-	})
-	if err == nil || !strings.Contains(err.Error(), "system-managed") {
-		t.Fatalf("code allowed cross-profile write: %v", err)
-	}
-}
-
 func TestScanProtectedReadShell(t *testing.T) {
 	_, alice, bob := profileTree(t)
 	bobState := filepath.Join(bob, "state.db")

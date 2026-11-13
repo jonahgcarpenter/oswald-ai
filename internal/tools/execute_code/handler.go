@@ -1,4 +1,4 @@
-package workspace
+package execcode
 
 import (
 	"bytes"
@@ -9,10 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
@@ -24,7 +26,7 @@ const (
 // NewExecuteCodeHandler returns the stateless Python runner. Each call runs
 // fresh with python3 in the profile working directory; state does not
 // persist across calls unless written to workspace files.
-func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewExecuteCodeHandler(ws *workspace.Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err
@@ -45,10 +47,10 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		if len(code) > 200<<10 {
 			return governance.Result{}, errors.New("code exceeds size limit")
 		}
-		if reason, blocked := ScanConfinedWrite(code, ws.Root(), ws.Root(), false); blocked {
+		if reason, blocked := workspace.ScanConfinedWrite(code, ws.Root(), ws.Root(), false); blocked {
 			return governance.Result{}, errors.New(reason)
 		}
-		if reason, blocked := ScanProtectedRead(code, ws.Root(), ws.Root(), false); blocked {
+		if reason, blocked := workspace.ScanProtectedRead(code, ws.Root(), ws.Root(), false); blocked {
 			return governance.Result{}, errors.New(reason)
 		}
 		reset, err := boolArg(args, "reset", false)
@@ -86,7 +88,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		cmd.Dir = ws.Root()
 		base := []string{
 			"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
-			"HOME=" + userHome(),
+			"HOME=" + workspace.UserHome(),
 			"LANG=C.UTF-8",
 			"TMPDIR=" + scratch,
 			"OSWALD_WORKSPACE=" + ws.Root(),
@@ -127,4 +129,58 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 			Outcome: governance.OutcomeProductive,
 		}, nil
 	}
+}
+
+// The helpers below are intentionally local: every tools/* package owns
+// its own small copies instead of a shared generic helper package.
+
+func rejectUnknown(args map[string]interface{}, allowed ...string) error {
+	keep := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		keep[k] = true
+	}
+	for k := range args {
+		if !keep[k] {
+			return fmt.Errorf("unknown argument %q", k)
+		}
+	}
+	return nil
+}
+
+func stringArg(args map[string]interface{}, key string) (string, bool) {
+	v, ok := args[key].(string)
+	return v, ok
+}
+
+func boolArg(args map[string]interface{}, key string, def bool) (bool, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	v, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return v, nil
+}
+
+func secondsToDuration(secs int) (d time.Duration) {
+	return time.Duration(secs) * time.Second
+}
+
+// limitedWriter caps captured child output at a byte budget.
+type limitedWriter struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	remaining := w.limit - w.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	return w.buf.Write(p)
 }

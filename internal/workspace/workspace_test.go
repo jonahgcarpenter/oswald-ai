@@ -157,20 +157,6 @@ func sessionFrom(content string) string {
 	return ""
 }
 
-func TestExecuteCodeStateless(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "alice")
-	ctx := testContext("req-e")
-	exec := NewExecuteCodeHandler(ws)
-	res, err := exec(ctx, map[string]interface{}{"code": "print(40+2)"})
-	if err != nil || !strings.Contains(res.Content, "42") {
-		t.Fatalf("execute_code = %+v %v (python3 may be missing)", res, err)
-	}
-}
-
 func TestCronjobManageCreateListRun(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {

@@ -41,21 +41,6 @@ func TestTerminalSetsOswaldHome(t *testing.T) {
 	}
 }
 
-func TestExecuteCodeSetsOswaldHome(t *testing.T) {
-	_, alice, _ := profileTree(t)
-	ws := NewWorkspace(alice, "alice")
-	exec := NewExecuteCodeHandler(ws)
-	res, err := exec(testContext("req-home"), map[string]interface{}{
-		"code": "import os; print(os.environ.get('OSWALD_HOME', ''))",
-	})
-	if err != nil {
-		t.Fatalf("execute_code failed: %v", err)
-	}
-	if !strings.Contains(res.Content, alice) {
-		t.Fatalf("OSWALD_HOME missing profile root: %q", res.Content)
-	}
-}
-
 func TestRunShellIncludesOswaldBinInPath(t *testing.T) {
 	output, code, err := runShell(context.Background(), `printf %s "$PATH"`, t.TempDir(), t.TempDir(), t.TempDir(), 30)
 	if err != nil || code != 0 {

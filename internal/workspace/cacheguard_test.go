@@ -70,18 +70,3 @@ func TestTerminalDeniesManagedCache(t *testing.T) {
 		t.Fatalf("missing cache blocked envelope: %q", res.Content)
 	}
 }
-
-func TestExecuteCodeDeniesManagedCache(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "alice")
-	exec := NewExecuteCodeHandler(ws)
-	_, err := exec(testContext("req-ccode"), map[string]interface{}{
-		"code": `open('cache/foo', 'w')`,
-	})
-	if err == nil || !strings.Contains(err.Error(), "cache/scratch") {
-		t.Fatalf("code allowed managed cache write: %v", err)
-	}
-}

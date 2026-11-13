@@ -14,6 +14,7 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	toolprocess "github.com/jonahgcarpenter/oswald-ai/internal/tools/process_manage"
 	toolread "github.com/jonahgcarpenter/oswald-ai/internal/tools/read_file"
+toolexec "github.com/jonahgcarpenter/oswald-ai/internal/tools/execute_code"
 toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
 toolpatch "github.com/jonahgcarpenter/oswald-ai/internal/tools/patch"
 toolsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/search_files"
@@ -37,7 +38,7 @@ func BuiltinDefinitions() []llm.ToolDefinition {
 		toolpatch.Definition(),
 		toolsearch.Definition(),
 		workspace.TerminalDefinition(),
-		workspace.ExecuteCodeDefinition(),
+		toolexec.Definition(),
 		toolprocess.Definition(),
 		workspace.CronjobManageDefinition(),
 	)
