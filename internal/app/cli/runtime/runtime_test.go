@@ -111,3 +111,19 @@ func TestNamedScopeReadsAllowedMutationsDenied(t *testing.T) {
 		t.Fatal("global config mutated by rejected runtime command")
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald runtime") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "runtime", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald runtime "+leaf) {
+			t.Fatalf("runtime %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

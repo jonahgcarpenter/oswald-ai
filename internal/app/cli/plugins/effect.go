@@ -15,12 +15,10 @@ func mustAbs(root string) string {
 }
 
 func effectForChange(root string, oldCfg *config.Config) string {
-	if oldCfg != nil {
-		if nextCfg, err := config.Validate(root); err == nil {
-			if config.ReloadEffect(oldCfg, nextCfg) == "live" {
-				return "applied live"
-			}
-		}
-	}
-	return "restarting service to apply"
+	// Plugin code changes live outside config.yaml, so the effective config
+	// can be identical while a restart is still required. Report it
+	// unconditionally: the operator batches installs then runs
+	// `oswald restart` once when ready.
+	_, _ = root, oldCfg
+	return "restart required - run `oswald restart` to apply"
 }

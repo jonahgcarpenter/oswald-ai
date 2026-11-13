@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -23,12 +24,33 @@ const (
 	exitUsage = 2
 )
 
+// Leaf usage lines double as `--help` pages: `oswald api <command> --help`
+// prints the same text to stdout and exits 0 without resolving scope.
+const (
+	showUsage     = "usage: oswald api show [--profile NAME]"
+	setKeyUsage   = "usage: oswald api set-key --key REF [--profile NAME]"
+	clearKeyUsage = "usage: oswald api clear-key [--profile NAME]"
+)
+
 // Run dispatches the api command group.
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		apiUsage(stderr)
 		return exitUsage
+	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "set-key":
+			fmt.Fprintln(stdout, setKeyUsage)
+			return exitOK
+		case "clear-key":
+			fmt.Fprintln(stdout, clearKeyUsage)
+			return exitOK
+		}
 	}
 	target, err := resolveTarget(root, profile, !(rest[0] == "show"))
 	if err != nil {
@@ -38,7 +60,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald api show [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(target, stdout, stderr)
@@ -46,7 +68,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		return setKey(target, rest[1:], stdout, stderr)
 	case "clear-key":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald api clear-key [--profile NAME]")
+			fmt.Fprintln(stderr, clearKeyUsage)
 			return exitUsage
 		}
 		return clearKey(target, stdout, stderr)
@@ -114,7 +136,7 @@ func setKey(t *target, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 0 || *key == "" {
-		fmt.Fprintln(stderr, "usage: oswald api set-key --key REF [--profile NAME]")
+		fmt.Fprintln(stderr, setKeyUsage)
 		return exitUsage
 	}
 	oldCfg, _ := config.Validate(t.root)
@@ -144,7 +166,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restarting service to apply"
+	return "restart required - run `oswald restart` to apply"
 }
 
 // reportAPIError prints a classified diagnostic without values.

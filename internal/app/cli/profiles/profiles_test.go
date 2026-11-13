@@ -357,3 +357,25 @@ func TestLifecycleDeniedFromNamedScope(t *testing.T) {
 		t.Fatal("charlie profile created by rejected command")
 	}
 }
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	dispatch := func(args ...string) (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := Run(context.Background(), root, args, strings.NewReader(""), &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := dispatch(args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald profile") {
+			t.Fatalf("profile %v = %d %q, want exit 0 with group usage", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"create", "rename", "delete"} {
+		code, out, _ := dispatch(leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald profile "+leaf) {
+			t.Fatalf("profile %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}

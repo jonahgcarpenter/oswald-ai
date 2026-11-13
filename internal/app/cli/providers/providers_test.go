@@ -117,12 +117,11 @@ func bobScope(t *testing.T, root string) {
 	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
 }
 
-func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+func TestCrossProfileReadDeniedMutateDenied(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	bobScope(t, root)
-	code, out, _ := run(t, root, "list", "--profile", "default")
-	if code != 0 || !strings.Contains(out, "fake") {
-		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	if code, _, _ := run(t, root, "list", "--profile", "default"); code == 0 {
+		t.Fatal("cross-profile read accepted")
 	}
 	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if code, _, _ := run(t, root, "add", "--profile", "default", "evil", "--api", "http://127.0.0.1:9998/v1"); code == 0 {
@@ -134,5 +133,21 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 	}
 	if code, _, stderr := run(t, root, "add", "mine", "--api", "http://127.0.0.1:9998/v1"); code != 0 {
 		t.Fatalf("own-scope add rejected: %s", stderr)
+	}
+}
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald providers") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "providers", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"list", "show", "add", "remove"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald providers "+leaf) {
+			t.Fatalf("providers %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
 	}
 }

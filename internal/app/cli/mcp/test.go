@@ -18,6 +18,8 @@ const maxTestTools = 20
 // test dials one MCP server once and lists its tools. It exercises the same
 // connection path as the runtime bridge; stdio entries spawn their
 // operator-configured command. Nothing is persisted.
+const testUsage = "usage: oswald mcp test <server> [--profile NAME] [--timeout DURATION]"
+
 func testCmd(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("oswald mcp test", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -28,7 +30,7 @@ func testCmd(ctx context.Context, root string, args []string, stdout, stderr io.
 		return exitUsage
 	}
 	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
-		fmt.Fprintln(stderr, "usage: oswald mcp test <server> [--profile NAME] [--timeout DURATION]")
+		fmt.Fprintln(stderr, testUsage)
 		return exitUsage
 	}
 	timeout, err := time.ParseDuration(strings.TrimSpace(*timeoutRaw))

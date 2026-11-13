@@ -10,13 +10,20 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 )
 
+// Leaf usage lines double as `--help` pages: `oswald plugins <command> --help`
+// prints the same text to stdout and exits 0 without resolving scope.
+const (
+	installUsage = "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--node-package PKG --node-version VER] [--no-deps] [--force] [--profile NAME]"
+	updateUsage  = "usage: oswald plugins update <name> [--ref SHA] [--profile NAME]"
+	removeUsage  = "usage: oswald plugins remove <name> [--full] [--profile NAME]"
+)
+
 // installCmd clones or copies a plugin into the calling profile's
 // <profile>/plugins/<name>/code tree. Presence means enabled. The node
 // sidecar installs as part of the invocation unless --no-deps opts out;
 // --node-package with --node-version supplies it for repos whose manifest
 // predates the node_package convention.
 func installCmd(ctx context.Context, root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
-	const usage = "usage: oswald plugins install <source> [--ref SHA] [--subdir PATH] [--node-package PKG --node-version VER] [--no-deps] [--force] [--profile NAME]"
 	var source, ref, subdir, nodePackage, nodeVersion string
 	force, noDeps := false, false
 	for i := 0; i < len(rest); i++ {
@@ -47,18 +54,18 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 		case strings.HasPrefix(token, "--node-version="):
 			nodeVersion = strings.TrimPrefix(token, "--node-version=")
 		case strings.HasPrefix(token, "-"):
-			fmt.Fprintln(stderr, usage)
+			fmt.Fprintln(stderr, installUsage)
 			return exitUsage
 		default:
 			if source != "" {
-				fmt.Fprintln(stderr, usage)
+				fmt.Fprintln(stderr, installUsage)
 				return exitUsage
 			}
 			source = token
 		}
 	}
 	if source == "" || (nodePackage == "") != (nodeVersion == "") {
-		fmt.Fprintln(stderr, usage)
+		fmt.Fprintln(stderr, installUsage)
 		return exitUsage
 	}
 	_, target, profileRoot, err := resolveScope(root, flagProfile, true)
@@ -90,15 +97,36 @@ func installCmd(ctx context.Context, root, flagProfile string, rest []string, st
 	deps := ""
 	if result.DepsInstalled {
 		deps = ", node deps installed"
+		if bin := runnableBinName(profileRoot, result.Key); bin != "" {
+			deps += ", '" + bin + "' runnable now"
+		}
 	}
 	fmt.Fprintf(stdout, "%s %s (%s, enabled for %s%s, %s)\n", verb, result.Key, pin, target, deps, effectForChange(mustAbs(root), oldCfg))
 	return exitOK
 }
 
+// runnableBinName returns the bare terminal name for an installed plugin's
+// CLI (node bin or entry key), or "" when the plugin exposes no binary.
+// Shims regenerate during install, so a non-empty name is runnable now.
+func runnableBinName(profileRoot, key string) string {
+	winners := discoverForList(profileRoot)
+	manifest, ok := winners[key]
+	if !ok {
+		return ""
+	}
+	meta, _ := plugins.ReadInstallMetadata(profileRoot, key)
+	if bin := plugins.EffectiveNodeBin(manifest, meta, ""); bin != "" {
+		return bin
+	}
+	if strings.TrimSpace(manifest.Entry) != "" {
+		return key
+	}
+	return ""
+}
+
 // updateCmd refreshes one profile install in place. Pinned installs need an
 // explicit --ref; unpinned installs follow the remote HEAD.
 func updateCmd(ctx context.Context, root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
-	const usage = "usage: oswald plugins update <name> [--ref SHA] [--profile NAME]"
 	var name, ref string
 	for i := 0; i < len(rest); i++ {
 		token := rest[i]
@@ -109,11 +137,11 @@ func updateCmd(ctx context.Context, root, flagProfile string, rest []string, std
 		case strings.HasPrefix(token, "--ref="):
 			ref = strings.TrimPrefix(token, "--ref=")
 		case strings.HasPrefix(token, "-"):
-			fmt.Fprintln(stderr, usage)
+			fmt.Fprintln(stderr, updateUsage)
 			return exitUsage
 		default:
 			if name != "" {
-				fmt.Fprintln(stderr, usage)
+				fmt.Fprintln(stderr, updateUsage)
 				return exitUsage
 			}
 			name = token
@@ -138,14 +166,13 @@ func updateCmd(ctx context.Context, root, flagProfile string, rest []string, std
 	if result.Pinned {
 		pin = "pinned@" + shortSHA(result.Revision)
 	}
-	fmt.Fprintf(stdout, "updated %s (%s, restarting service to apply)\n", key, pin)
+	fmt.Fprintf(stdout, "updated %s (%s, restart required - run `oswald restart` to apply)\n", key, pin)
 	return exitOK
 }
 
 // removeCmd drops one profile plugin. By default only code/ is removed so
 // data/home logins survive; --full also removes data/.
 func removeCmd(root, flagProfile string, rest []string, stdout, stderr io.Writer) int {
-	const usage = "usage: oswald plugins remove <name> [--full] [--profile NAME]"
 	var names []string
 	full := false
 	for _, token := range rest {
@@ -154,14 +181,14 @@ func removeCmd(root, flagProfile string, rest []string, stdout, stderr io.Writer
 			full = true
 		default:
 			if strings.HasPrefix(token, "-") {
-				fmt.Fprintln(stderr, usage)
+				fmt.Fprintln(stderr, removeUsage)
 				return exitUsage
 			}
 			names = append(names, token)
 		}
 	}
 	if len(names) != 1 {
-		fmt.Fprintln(stderr, usage)
+		fmt.Fprintln(stderr, removeUsage)
 		return exitUsage
 	}
 	key := strings.ToLower(strings.TrimSpace(names[0]))

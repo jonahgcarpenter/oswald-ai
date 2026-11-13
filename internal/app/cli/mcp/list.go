@@ -14,6 +14,8 @@ import (
 // list prints one line per configured MCP server: name, transport kind,
 // auth mode, and status. It never dials servers and never prints endpoints,
 // headers, or secrets — names identify entries.
+const listUsage = "usage: oswald mcp list [--profile NAME]"
+
 func listCmd(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("oswald mcp list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -23,7 +25,7 @@ func listCmd(ctx context.Context, root string, args []string, stdout, stderr io.
 		return exitUsage
 	}
 	if len(rest) != 0 {
-		fmt.Fprintln(stderr, "usage: oswald mcp list [--profile NAME]")
+		fmt.Fprintln(stderr, listUsage)
 		return exitUsage
 	}
 	profileCfg, _, profileRoot, err := resolveScope(root, *profile, false)

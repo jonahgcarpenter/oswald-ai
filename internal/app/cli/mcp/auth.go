@@ -14,6 +14,8 @@ import (
 
 // auth runs the interactive OAuth authorization for one profile MCP server
 // and persists the credential into the profile's private token store.
+const authUsage = "usage: oswald mcp auth <server> [--flow browser|device] [--no-browser] [--timeout DURATION] [--profile NAME]"
+
 func auth(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("oswald mcp auth", flag.ContinueOnError)
 	fs.SetOutput(stderr)

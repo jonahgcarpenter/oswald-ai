@@ -195,7 +195,7 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 		"OSWALD_SCRATCH=" + scratch,
 		"OSWALD_HOME=" + m.root,
 	}
-	cmd.Env = append(SandboxEnvForProfile(WithNodeOnPath(baseEnv), m.root), GitHubTokenEnv()...)
+	cmd.Env = append(SandboxEnvForProfile(WithPluginShimsOnPath(WithNodeOnPath(baseEnv), m.root), m.root), GitHubTokenEnv()...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		out.Close()

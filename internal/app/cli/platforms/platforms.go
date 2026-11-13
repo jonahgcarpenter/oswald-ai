@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"gopkg.in/yaml.v3"
 )
@@ -42,10 +43,28 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		platformsUsage(stderr)
 		return exitUsage
 	}
+	// Leaf usage lines double as `--help` pages: `oswald platforms <command>
+	// --help` prints the same text to stdout and exits 0 before any scope checks.
+	if len(args) >= 2 && help.WantsHelp(args[1:]) {
+		switch args[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "enable":
+			fmt.Fprintln(stdout, enableUsage)
+			return exitOK
+		case "disable":
+			fmt.Fprintln(stdout, disableUsage)
+			return exitOK
+		case "set":
+			setUsage(stdout)
+			return exitOK
+		}
+	}
 	switch args[0] {
 	case "show":
 		if len(args) > 2 {
-			fmt.Fprintln(stderr, "usage: oswald platforms show [name]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		name := ""
@@ -61,13 +80,13 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		switch args[0] {
 		case "enable":
 			if len(args) != 2 {
-				fmt.Fprintln(stderr, "usage: oswald platforms enable <discord|bluebubbles|api>")
+				fmt.Fprintln(stderr, enableUsage)
 				return exitUsage
 			}
 			return setEnabledCmd(root, args[1], true, stdout, stderr)
 		case "disable":
 			if len(args) != 2 {
-				fmt.Fprintln(stderr, "usage: oswald platforms disable <discord|bluebubbles|api>")
+				fmt.Fprintln(stderr, disableUsage)
 				return exitUsage
 			}
 			return setEnabledCmd(root, args[1], false, stdout, stderr)
@@ -84,11 +103,23 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	}
 }
 
+const (
+	showUsage    = "usage: oswald platforms show [name]"
+	enableUsage  = "usage: oswald platforms enable <discord|bluebubbles|api>"
+	disableUsage = "usage: oswald platforms disable <discord|bluebubbles|api>"
+)
+
 func platformsUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald platforms <show|enable|disable|set> [options]")
 	fmt.Fprintln(w, "  show [name]                platforms section, secrets redacted")
 	fmt.Fprintln(w, "  enable <name>              enable a gateway platform (applies automatically)")
 	fmt.Fprintln(w, "  disable <name>             disable a gateway platform (applies automatically)")
+	setUsage(w)
+	fmt.Fprintln(w, "    IDS are comma-separated or repeatable --allow/--ban flags")
+}
+
+func setUsage(w io.Writer) {
+	fmt.Fprintln(w, setTopUsage)
 	fmt.Fprintln(w, "  set discord --token REF [--require-mention BOOL] [--allow IDS] [--ban IDS]")
 	fmt.Fprintln(w, "  set bluebubbles --server-url URL --server-password REF [listener flags]")
 	fmt.Fprintln(w, "                             [--require-mention BOOL] [--allow IDS] [--ban IDS]")
@@ -96,7 +127,6 @@ func platformsUsage(w io.Writer) {
 	fmt.Fprintln(w, "                             [--webhook-port N] [--webhook-path P]")
 	fmt.Fprintln(w, "                             [--webhook-callback-host H]")
 	fmt.Fprintln(w, "  set api --host IP --port N")
-	fmt.Fprintln(w, "    IDS are comma-separated or repeatable --allow/--ban flags")
 }
 
 func globalRoot(root string) (string, error) {
@@ -234,7 +264,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restarting service to apply"
+	return "restart required - run `oswald restart` to apply"
 }
 
 // reportPlatformsError prints a classified diagnostic without values.

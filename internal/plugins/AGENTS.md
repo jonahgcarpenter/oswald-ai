@@ -9,8 +9,9 @@ description, entry, requires_env, capabilities, allow_tool_override,
 node_package, node_version, node_bin, manifest_version, api_version,
 requires_plugins, kind` (unknown keys reject); skill frontmatter keys are exactly
 `name, description, version, required_env` (unknown keys ignored); layout is
-exactly `<profile>/plugins/<name>/{code,data}` with presence meaning enabled.
-Explicitly unsupported, now and by design: autoinvoke/visibility flags, skill
+`<profile>/plugins/<name>/{code,data}` plus the generated `<profile>/plugins/.bin`
+shim dir (operator-approved extension for bare-name terminal use) with presence
+meaning enabled. Explicitly unsupported, now and by design: autoinvoke/visibility flags, skill
 permissions, per-skill tool/model scoping, subagent fork, template variables,
 inline shell, blueprints/cron mapping, credential-file mounts, non-secret config
 maps, HTTP catalogs, compat-dir search, options objects, and any TS/Python
@@ -40,15 +41,16 @@ config, and storage all live under the profile — same island rule as `mcp_serv
   `data/` untouched); `RemoveInstall` deletes code by default, everything with
   `full`. Ranges, tags, URLs, and file specs fail closed.
 - `node.go` owns the per-profile Node sidecar (`<profile>/plugins/<name>/code/node_modules`,
-  installed via `install-deps` as the consent gate, profile-fenced): pinned
-  `npm install` with bounded output and timeouts, plus `NodeBinPath` absolute
-  resolution. npm cache/tmp live under `data/cache/node` so `code/` stays a clean
-  copy. The terminal `PATH` stays fixed (plus the server-resolved node dir so
-  shims run); callers invoke the absolute path explicitly.
-- `exec.go` runs one profile-installed plugin binary (`ExecPluginBinary`):
-  fixed base + profile passthrough, `HOME` redirected to `data/home` and
-  `cwd`/`TMPDIR` to `data/` so CLI config files land on the persisted volume,
-  stdin closed, bounded output. Presence means enabled.
+  installed as part of `install` (explicit `--no-deps` opts out), profile-fenced): pinned
+  `npm install` with bounded output and timeouts, plus `NodeBinPath` internal
+  resolution for shim targets. npm cache/tmp live under `data/cache/node` so `code/` stays a clean
+  copy.
+- `shim.go` owns bare-name terminal access: `RegenerateShims` writes one
+  `0700` wrapper per resolvable plugin binary into the fixed
+  `<profile>/plugins/.bin` dir (on the sandbox `PATH`; individual plugin
+  trees never touch `PATH`) with `HOME` set to the per-plugin `data/home`
+  so CLI config persists on the volume. Sorted plugin order, first name
+  wins on collision; unverifiable binaries create no shim.
 - `manager.go` tracks loaded plugins, tool/hook/command/skill registrations, and
   per-profile `plugins/<name>/data` storage (`0700` dirs, `0600` files,
   workspace-protected). `EnabledRequiresEnv` reports each present plugin's
@@ -83,9 +85,8 @@ Code, config, and storage stay per profile. From the calling profile's scope
 ```bash
 oswald plugins install owner/repo --profile jonah  # https URL or local path too
 oswald plugins install owner/repo --node-package agent-data --node-version 0.13.0 --profile jonah  # sidecar for manifests predating node_package
-oswald plugins install-deps demo --profile jonah   # pinned npm deps, per-profile, explicit consent
-oswald plugins bin-path demo --profile jonah       # absolute path for terminal use
-oswald plugins exec demo -- --version --profile jonah  # run for the calling profile (HOME=data/home)
+oswald plugins install --no-deps owner/repo --profile jonah  # skip the sidecar; heal later with a plain reinstall
+demo --version  # run in terminal by bare name (shim on PATH, HOME=data/home)
 oswald plugins update demo [--ref <40-char SHA>] --profile jonah  # pins never move without --ref
 oswald plugins remove demo --profile jonah [--full]  # code only; --full also deletes data/
 ```
@@ -98,12 +99,16 @@ monorepos; unpinned installs follow the remote HEAD on `update`. Manifests at
 `--node-package`/`--node-version` flags (both required together; conflicts with a
 manifest declaration fail closed), or a root `package.json` with a lockfile
 (`npm ci`; a `package.json` without one is ignored). The resolved spec is
-recorded in `code/.install-metadata.json`, so `install-deps`, `bin-path`, and `exec`
-fall back to it when the manifest declares nothing; `update` carries it forward
-and refreshes the sidecar after moving code. Reinstalling the same source is a
-no-op that repairs a missing sidecar. Reads (`list`, `info`, `bin-path`) may name
+recorded in `code/.install-metadata.json`; `update` carries it forward
+and refreshes the sidecar after moving code. Reinstalling the same source is
+idempotent: a no-op when complete, and a `--no-deps` install healed by a plain
+reinstall (no flags needed — the recorded spec is reused, so the bare CLI name
+works right after). Reinstalling with `--no-deps` never strips an existing
+sidecar. Reads (`list`, `info`) may name
 another profile; mutations stay fenced to the calling scope
-(`OSWALD_HOME` mismatch fails closed). Everything plugins-related is restart-classified.
+(`OSWALD_HOME` mismatch fails closed). Plugin code changes need
+`oswald restart` (tool/skill/hook registration); installed CLIs run by bare
+name immediately.
 Old shared `plugins-available/` trees are orphaned and never read; operators may
 delete them by hand. Foreign ecosystems (OpenCode, Hermes, Claude bundles) are
 not installed directly: convert first with the `plugin-convert` skill
@@ -133,13 +138,14 @@ API keys live in the profile `.env` (`oswald env set`), never in `plugin.yaml`.
 Present plugins automatically receive their declared `requires_env` values in sandboxed
 children (terminal, execute_code, background processes) from the acting profile's scope;
 see `internal/workspace/AGENTS.md` for the passthrough contract. Provider credential names
-are always refused. `terminal` never gains plugin directories on `PATH` — invoke plugin
-CLIs via the absolute `bin-path`, or `oswald plugins exec` (same sandbox env plus `HOME`
-redirected to `data/home` so CLI config files persist on the volume).
+are always refused. `terminal` gains exactly one fixed `PATH` entry —
+`<profile>/plugins/.bin` — and the model invokes plugin CLIs by bare name;
+each shim redirects `HOME` to its plugin's `data/home` so CLI config files
+persist on the volume.
 
 ## Tests
 
 Synthetic temp dirs only, never live profiles. Cover manifest validation, profile
 scan and directory-name matching, requires_env gate, data preservation on
-update/remove, override gate, hook order and timeout, storage confinement — not
-rendered prompts.
+update/remove, override gate, hook order and timeout, storage confinement,
+shim generation/collision/pruning — not rendered prompts.

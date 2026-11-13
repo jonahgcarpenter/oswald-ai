@@ -14,7 +14,7 @@ import (
 // refuses the reserved default profile and never follows symlinks.
 func deleteProfile(ctx context.Context, root string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: oswald profile delete <name>")
+		fmt.Fprintln(stderr, deleteUsage)
 		return exitUsage
 	}
 	name := args[0]

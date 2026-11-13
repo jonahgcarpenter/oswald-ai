@@ -67,8 +67,8 @@ type InstallOptions struct {
 
 // InstallMetadata is the provenance record written beside installed code.
 // It carries source, revision, and the resolved node sidecar — never config
-// values or secrets. install-deps, bin-path, and exec fall back to the
-// recorded node fields when the published manifest declares none.
+// values or secrets. Plain reinstalls reuse the recorded node fields
+// when the staged manifest declares none.
 type InstallMetadata struct {
 	Source       string `json:"source"`
 	URL          string `json:"url"`
@@ -219,7 +219,8 @@ func hasLockfileSidecar(dir string) bool {
 
 // ResolveNodeSpec decides the sidecar for an already-installed plugin:
 // the published manifest declaration wins, otherwise the recorded
-// install-time metadata carries. It backs install-deps after the fact.
+// install-time metadata carries. Plain reinstalls of `--no-deps` installs
+// adopt it to heal the missing sidecar without repeated flags.
 func ResolveNodeSpec(manifest Manifest, meta InstallMetadata) (NodeSpec, bool) {
 	if strings.TrimSpace(manifest.NodePackage) != "" {
 		return NodeSpec{Package: manifest.NodePackage, Version: manifest.NodeVersion}, true
@@ -343,6 +344,19 @@ func InstallFromURL(ctx context.Context, profileRoot, raw string, opts InstallOp
 	if err != nil {
 		return InstallResult{}, err
 	}
+	// Idempotent reinstall: when the caller supplies no explicit flags and
+	// the staged source resolves no sidecar, fall back to the recorded
+	// install-time spec. A
+	// `--no-deps` install healed by a plain reinstall then matches its own
+	// provenance instead of failing closed on a spec mismatch. Explicit
+	// conflicting flags keep the fail-closed error below.
+	if !spec.Present() && strings.TrimSpace(opts.NodePackage) == "" && strings.TrimSpace(opts.NodeVersion) == "" {
+		if meta, err := ReadInstallMetadata(profileRoot, manifest.Name); err == nil {
+			if fallback, ok := ResolveNodeSpec(*manifest, meta); ok {
+				spec = fallback
+			}
+		}
+	}
 	// The published directory is always the manifest name so the key stays
 	// canonical: the repo or local path is only a transport.
 	dest := PluginCodeDir(profileRoot, manifest.Name)
@@ -355,6 +369,9 @@ func InstallFromURL(ctx context.Context, profileRoot, raw string, opts InstallOp
 					return InstallResult{}, err
 				} else if repaired {
 					result.DepsInstalled = true
+				}
+				if err := RegenerateShims(profileRoot); err != nil && log != nil {
+					log.Server("plugin.install").Warn("plugin.shim.regen_failed", "plugin shim regeneration failed", config.F("plugin", manifest.Name))
 				}
 				return result, nil
 			}
@@ -398,6 +415,10 @@ func InstallFromURL(ctx context.Context, profileRoot, raw string, opts InstallOp
 	}
 	if log != nil {
 		log.Server("plugin.install").Debug("plugin.install.completed", "installed plugin", config.F("plugin", manifest.Name), config.F("pinned", meta.Pinned))
+	}
+	if err := RegenerateShims(profileRoot); err != nil {
+		_ = os.RemoveAll(dest)
+		return InstallResult{}, err
 	}
 	return InstallResult{Key: manifest.Name, Revision: revision, Pinned: meta.Pinned, DepsInstalled: depsInstalled}, nil
 }
@@ -772,6 +793,9 @@ func UpdateFromURL(ctx context.Context, profileRoot, key, ref string, log *confi
 	if log != nil {
 		log.Server("plugin.install").Debug("plugin.install.updated", "updated plugin", config.F("plugin", key))
 	}
+	if err := RegenerateShims(profileRoot); err != nil {
+		return InstallResult{}, err
+	}
 	return InstallResult{Key: key, Revision: revision, Pinned: meta.Pinned, DepsInstalled: depsInstalled}, nil
 }
 
@@ -790,11 +814,19 @@ func RemoveInstall(profileRoot, key string, full bool) error {
 		if _, err := os.Lstat(dir); err != nil {
 			return fmt.Errorf("unknown plugin %q", key)
 		}
-		return os.RemoveAll(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		_ = RegenerateShims(profileRoot)
+		return nil
 	}
 	dir := PluginCodeDir(profileRoot, key)
 	if _, err := os.Lstat(dir); err != nil {
 		return fmt.Errorf("unknown plugin %q", key)
 	}
-	return os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	_ = RegenerateShims(profileRoot)
+	return nil
 }

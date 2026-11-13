@@ -121,7 +121,7 @@ func TestReloaderAppliesHotAdmissionChange(t *testing.T) {
 	// Debug level keeps the applied telemetry visible; the reload from info
 	// would correctly filter its own DEBUG event under the new level.
 	root, directory, log, output := reloadSetup(t, strings.Replace(reloadFixture, "log_level: info", "log_level: debug", 1))
-	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.settle = 10 * time.Millisecond
 	if _, err := directory.Resolve("discord", "111", true); err != nil {
 		t.Fatalf("fixture identity rejected: %v", err)
@@ -141,7 +141,7 @@ func TestReloaderAppliesHotAdmissionChange(t *testing.T) {
 
 func TestReloaderAppliesLogLevel(t *testing.T) {
 	root, directory, log, _ := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.settle = 10 * time.Millisecond
 	rewrite(t, root, "log_level: info", "log_level: debug")
 	loader.Check()
@@ -152,7 +152,7 @@ func TestReloaderAppliesLogLevel(t *testing.T) {
 
 func TestReloaderRejectsInvalidCandidate(t *testing.T) {
 	root, directory, log, output := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.settle = 10 * time.Millisecond
 	if err := config.AtomicWritePrivateFile(filepath.Join(root, "config.yaml"), []byte("platforms: []\n")); err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestReloaderRejectsInvalidCandidate(t *testing.T) {
 
 func TestReloaderFlagsRestartRequired(t *testing.T) {
 	root, directory, log, output := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.settle = 10 * time.Millisecond
 	rewrite(t, root, "default: fake/model", "default: fake/other")
 	loader.Check()
@@ -186,7 +186,7 @@ func TestReloaderFlagsRestartRequired(t *testing.T) {
 
 func TestReloaderStartStopJoins(t *testing.T) {
 	root, directory, log, _ := reloadSetup(t, reloadFixture)
-	loader := NewReloader(root, mustValidate(t, root), directory, log, nil)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.interval = 5 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	loader.Start(ctx)
@@ -197,47 +197,87 @@ func TestReloaderStartStopJoins(t *testing.T) {
 	_ = io.Discard
 }
 
-func TestReloaderRequestsRebuildOncePerStableChange(t *testing.T) {
-	root, directory, log, _ := reloadSetup(t, reloadFixture)
-	rebuild := make(chan struct{}, 1)
-	loader := NewReloader(root, mustValidate(t, root), directory, log, rebuild)
+func TestReloaderAdvisesRestartOncePerStableChange(t *testing.T) {
+	root, directory, log, output := reloadSetup(t, reloadFixture)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.settle = 10 * time.Millisecond
 	rewrite(t, root, "default: fake/model", "default: fake/other")
 	loader.Check()
-	select {
-	case <-rebuild:
-	default:
-		t.Fatal("validated non-hot change did not request a rebuild")
+	if !strings.Contains(output.String(), `"event":"config.reload.restart_required"`) {
+		t.Fatal("validated non-hot change did not log restart advisory")
 	}
-	// Unchanged fingerprint: no second signal.
+	// Live config stays put until `oswald restart`.
+	profile, ok := directory.Config("default")
+	if !ok || profile.LLMGatewayModel != "fake/model" {
+		t.Fatal("non-hot change went live without a restart")
+	}
+	// Unchanged fingerprint: no second advisory.
+	before := output.String()
 	loader.Check()
-	select {
-	case <-rebuild:
-		t.Fatal("stable fingerprint requested a second rebuild")
-	default:
+	if output.String() != before {
+		t.Fatal("stable fingerprint logged a second advisory")
 	}
 }
 
-func TestReloaderRebuildSkipsHotAndInvalid(t *testing.T) {
-	root, directory, log, _ := reloadSetup(t, reloadFixture)
-	rebuild := make(chan struct{}, 1)
-	loader := NewReloader(root, mustValidate(t, root), directory, log, rebuild)
+func TestReloaderAdvisorySkipsHotAndInvalid(t *testing.T) {
+	root, directory, log, output := reloadSetup(t, reloadFixture)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
 	loader.settle = 10 * time.Millisecond
 	rewrite(t, root, "log_level: info", "log_level: debug")
 	loader.Check()
-	select {
-	case <-rebuild:
-		t.Fatal("hot change requested a rebuild")
-	default:
+	if strings.Contains(output.String(), `"event":"config.reload.restart_required"`) {
+		t.Fatal("hot change logged a restart advisory")
 	}
 	if err := config.AtomicWritePrivateFile(filepath.Join(root, "config.yaml"), []byte("platforms: []\n")); err != nil {
 		t.Fatal(err)
 	}
 	loader.Check()
-	select {
-	case <-rebuild:
-		t.Fatal("invalid candidate requested a rebuild")
-	default:
+	if strings.Contains(output.String(), `"event":"config.reload.restart_required"`) {
+		t.Fatal("invalid candidate logged a restart advisory")
+	}
+	if !strings.Contains(output.String(), `"event":"config.reload.rejected"`) {
+		t.Fatal("invalid candidate did not log rejected")
+	}
+}
+
+func TestReloaderAdvisesOnPluginInstall(t *testing.T) {
+	root, directory, log, output := reloadSetup(t, reloadFixture)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader.settle = 10 * time.Millisecond
+	// Simulate `plugins install`: new code tree with manifest + metadata.
+	codeDir := filepath.Join(root, "plugins", "demo", "code")
+	if err := os.MkdirAll(codeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codeDir, "plugin.yaml"), []byte("name: demo\nversion: \"1.0\"\ndescription: synthetic\nmanifest_version: 2\napi_version: \"1\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codeDir, ".install-metadata.json"), []byte(`{"source":"git","url":"https://example.com/demo.git"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loader.Check()
+	if !strings.Contains(output.String(), `"event":"config.reload.restart_required"`) {
+		t.Fatal("plugin install did not log restart advisory")
+	}
+	// Simulate a sidecar appearing (healed deps): marker changes, config identical.
+	if err := os.MkdirAll(filepath.Join(codeDir, "node_modules"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	loader.Check()
+	if count := strings.Count(output.String(), `"event":"config.reload.restart_required"`); count != 2 {
+		t.Fatalf("node sidecar install advisories = %d, want 2", count)
+	}
+	// Derived shims never trigger an advisory (no fingerprint loop).
+	before := output.String()
+	if err := os.MkdirAll(filepath.Join(root, "plugins", ".bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "plugins", ".bin", "demo"), []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	loader.Check()
+	if output.String() != before {
+		t.Fatal("shim dir change logged an advisory")
 	}
 }
 

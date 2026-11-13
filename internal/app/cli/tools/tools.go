@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -40,6 +41,19 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		toolsUsage(stderr)
 		return exitUsage
 	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "set":
+			setUsage(stdout)
+			return exitOK
+		case "unset":
+			fmt.Fprintln(stdout, unsetUsage)
+			return exitOK
+		}
+	}
 	target, err := resolveTarget(root, profile, !(rest[0] == "show"))
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
@@ -48,7 +62,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	switch rest[0] {
 	case "show":
 		if len(rest) > 2 {
-			fmt.Fprintln(stderr, "usage: oswald tools show [web-search|image|browser] [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		backend := ""
@@ -60,7 +74,7 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		return setCmd(target, rest[1:], stdout, stderr)
 	case "unset":
 		if len(rest) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald tools unset <backend.field> [--profile NAME]")
+			fmt.Fprintln(stderr, unsetUsage)
 			return exitUsage
 		}
 		return unsetField(target, rest[1], stdout, stderr)
@@ -74,16 +88,33 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	}
 }
 
+// Leaf usage lines double as `--help` pages: `oswald tools <command> --help`
+// prints the same text to stdout and exits 0 without resolving scope.
+const (
+	showUsage       = "usage: oswald tools show [web-search|image|browser|terminal] [--profile NAME]"
+	setTopUsage     = "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]"
+	setWebUsage     = "usage: oswald tools set web-search [--brave-key REF] [--searxng-url URL] [--profile NAME]"
+	setImageUsage   = "usage: oswald tools set image [--url URL] [--generation-timeout DUR] [--profile NAME]"
+	setBrowserUsage = "usage: oswald tools set browser [flags] [--profile NAME]"
+	setTermUsage    = "usage: oswald tools set terminal --env-passthrough A,B [--profile NAME]"
+	unsetUsage      = "usage: oswald tools unset <backend.field> [--profile NAME]"
+)
+
 func toolsUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald tools [--profile NAME] <show|set|unset> [options]")
 	fmt.Fprintln(w, "  show [web-search|image|browser|terminal]")
 	fmt.Fprintln(w, "                        tools section, secrets redacted")
+	setUsage(w)
+	fmt.Fprintln(w, "  unset <backend.field>  clear one optional tools leaf")
+}
+
+func setUsage(w io.Writer) {
+	fmt.Fprintln(w, setTopUsage)
 	fmt.Fprintln(w, "  set web-search --brave-key REF --searxng-url URL")
 	fmt.Fprintln(w, "  set image --url URL --generation-timeout DUR")
 	fmt.Fprintln(w, "  set browser [browser flags]")
 	fmt.Fprintln(w, "  set terminal --env-passthrough A,B")
 	fmt.Fprintln(w, "                        staged-validate and atomically write one backend")
-	fmt.Fprintln(w, "  unset <backend.field>  clear one optional tools leaf")
 	fmt.Fprintln(w, "    browser flags: --launch-command CMD --endpoint-url URL")
 	fmt.Fprintln(w, "      --command-timeout DUR --snapshot-threshold N")
 	fmt.Fprintln(w, "      --inactivity-timeout DUR --record-sessions BOOL")
@@ -140,7 +171,7 @@ func show(t *target, backend string, stdout, stderr io.Writer) int {
 
 func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]")
+		fmt.Fprintln(stderr, setTopUsage)
 		return exitUsage
 	}
 	// Backend name accepted in any position.
@@ -163,12 +194,12 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		if len(rest) > 0 {
 			fmt.Fprintf(stderr, "oswald: unknown tools backend %q\n", rest[0])
 		} else {
-			fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]")
+			fmt.Fprintln(stderr, setTopUsage)
 		}
 		return exitUsage
 	}
 	if len(filtered) > 0 {
-		fmt.Fprintln(stderr, "usage: oswald tools set <web-search|image|browser|terminal> [flags] [--profile NAME]")
+		fmt.Fprintln(stderr, setTopUsage)
 		return exitUsage
 	}
 	yamlBackend := backendAliases[backend]
@@ -196,7 +227,7 @@ func setWebSearch(t *target, flagArgs []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 || (*braveKey == "" && *searxngURL == "") {
-		fmt.Fprintln(stderr, "usage: oswald tools set web-search [--brave-key REF] [--searxng-url URL] [--profile NAME]")
+		fmt.Fprintln(stderr, setWebUsage)
 		return exitUsage
 	}
 	set := setFlags(sub)
@@ -226,7 +257,7 @@ func setImage(t *target, flagArgs []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 || (*url == "" && *timeout == "") {
-		fmt.Fprintln(stderr, "usage: oswald tools set image [--url URL] [--generation-timeout DUR] [--profile NAME]")
+		fmt.Fprintln(stderr, setImageUsage)
 		return exitUsage
 	}
 	set := setFlags(sub)
@@ -263,12 +294,12 @@ func setBrowser(t *target, flagArgs []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: oswald tools set browser [flags] [--profile NAME]")
+		fmt.Fprintln(stderr, setBrowserUsage)
 		return exitUsage
 	}
 	set := setFlags(sub)
 	if len(set) == 0 {
-		fmt.Fprintln(stderr, "usage: oswald tools set browser [flags] [--profile NAME]")
+		fmt.Fprintln(stderr, setBrowserUsage)
 		return exitUsage
 	}
 	for _, key := range []string{"record-sessions", "allow-private-urls", "allow-insecure-urls", "restrict-evaluate"} {
@@ -315,7 +346,7 @@ func setTerminal(t *target, flagArgs []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 || !isSet(sub, "env-passthrough") || strings.TrimSpace(*envPassthrough) == "" {
-		fmt.Fprintln(stderr, "usage: oswald tools set terminal --env-passthrough A,B [--profile NAME]")
+		fmt.Fprintln(stderr, setTermUsage)
 		return exitUsage
 	}
 	oldCfg, _ := config.Validate(t.root)
@@ -330,7 +361,7 @@ func setTerminal(t *target, flagArgs []string, stdout, stderr io.Writer) int {
 func unsetField(t *target, dotted string, stdout, stderr io.Writer) int {
 	parts := strings.Split(dotted, ".")
 	if len(parts) != 2 {
-		fmt.Fprintln(stderr, "usage: oswald tools unset <backend.field> [--profile NAME]")
+		fmt.Fprintln(stderr, unsetUsage)
 		fmt.Fprintln(stderr, "  backends: web-search, image, browser, terminal; fields use hyphens, e.g. browser.launch-command")
 		return exitUsage
 	}
@@ -430,7 +461,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restarting service to apply"
+	return "restart required - run `oswald restart` to apply"
 }
 
 // reportToolsError prints a classified diagnostic without values.

@@ -32,7 +32,8 @@ func splitProfile(args []string) (string, []string) {
 	return profile, rest
 }
 
-// scope resolves the target profile root for reads (any existing profile) or
+// scope resolves the target profile root for reads (calling scope only,
+// contradictions fail closed) or
 // mutations (calling scope only, contradictions fail closed). Skills are
 // per-profile files, so on-disk existence is sufficient; routing is not
 // required.

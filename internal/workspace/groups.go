@@ -124,6 +124,12 @@ func Classify(abs, root string) Group {
 	if underPath(abs, filepath.Join(root, "skills")) {
 		return GroupSystem
 	}
+	// Generated plugin shims are tool-managed like the skills tree: the model
+	// runs them by bare name, but only install/update/remove and boot repair
+	// may write them — never direct file edits.
+	if underPath(abs, filepath.Join(root, "plugins", ".bin")) {
+		return GroupSystem
+	}
 	if filepath.Base(abs) == "SOUL.md" {
 		if cross {
 			return GroupSystem

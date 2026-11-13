@@ -110,12 +110,12 @@ func TestResolveReadProfile(t *testing.T) {
 	if got, err := ResolveReadProfile(""); err != nil || got != "bob" {
 		t.Fatalf("env profile = %q %v", got, err)
 	}
-	// Reads may name another profile: visibility is cross-profile.
-	if got, err := ResolveReadProfile("alice"); err != nil || got != "alice" {
-		t.Fatalf("cross-profile read rejected: %q %v", got, err)
+	// Reads stay fenced to the calling scope.
+	if _, err := ResolveReadProfile("alice"); err == nil {
+		t.Fatal("cross-profile read accepted")
 	}
-	if got, err := ResolveReadProfile("default"); err != nil || got != "default" {
-		t.Fatalf("default read rejected: %q %v", got, err)
+	if _, err := ResolveReadProfile("default"); err == nil {
+		t.Fatal("default read accepted from named scope")
 	}
 	// Malformed names still fail.
 	if _, err := ResolveReadProfile("Bad Name!"); err == nil {
@@ -125,6 +125,10 @@ func TestResolveReadProfile(t *testing.T) {
 	t.Setenv(OswaldHomeEnv, "")
 	if got, err := ResolveReadProfile(""); err != nil || got != "default" {
 		t.Fatalf("default profile = %q %v", got, err)
+	}
+	// A local operator invocation without OSWALD_HOME is unaffected.
+	if got, err := ResolveReadProfile("alice"); err != nil || got != "alice" {
+		t.Fatalf("local operator read rejected: %q %v", got, err)
 	}
 }
 

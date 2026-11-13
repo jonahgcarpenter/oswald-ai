@@ -60,7 +60,7 @@ func TestSetModelRoundTrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("set = %d %s", code, stderr)
 	}
-	if !strings.Contains(out, "restarting service to apply") {
+	if !strings.Contains(out, "restart required - run `oswald restart` to apply") {
 		t.Fatalf("set missing applying hint = %q", out)
 	}
 	code, out, _ = run(t, root, "show")
@@ -120,5 +120,21 @@ func TestSetBoundsAndUsage(t *testing.T) {
 	}
 	if code, _, stderr := run(t, root, "set", "--orchestrator", "false"); code != 0 {
 		t.Fatalf("set orchestrator = %d %s", code, stderr)
+	}
+}
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald delegation") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "delegation", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set", "unset"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald delegation "+leaf) {
+			t.Fatalf("delegation %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
 	}
 }

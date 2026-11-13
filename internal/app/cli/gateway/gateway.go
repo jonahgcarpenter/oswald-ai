@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"gopkg.in/yaml.v3"
 )
@@ -34,8 +35,17 @@ const (
 // maxConfigBytes bounds the configuration file, matching the runtime read limit.
 const maxConfigBytes = 256 * 1024
 
-// validRoutePlatforms is the exact set of route platforms in config files.
-var validRoutePlatforms = map[string]bool{"discord": true, "bluebubbles": true}
+const (
+	showUsage         = "usage: oswald gateway show"
+	setMultiplexUsage = "usage: oswald gateway set-multiplex <true|false>"
+	routesListUsage   = "usage: oswald gateway routes list"
+	routesAddUsage    = "usage: oswald gateway routes add --name N --platform discord|bluebubbles|* --user-id ID|* --profile P"
+	routesRemoveUsage = "usage: oswald gateway routes remove <name>"
+)
+
+// validRoutePlatforms is the exact set of route platform keys this command accepts.
+// "*" is a catch-all matching any platform.
+var validRoutePlatforms = map[string]bool{"discord": true, "bluebubbles": true, "*": true}
 
 // retiredPlatforms catches the old spelling so the error can redirect.
 var retiredPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true, "imessage": true}
@@ -53,24 +63,48 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		gatewayUsage(stderr)
 		return exitUsage
 	}
+	// Leaf usage lines double as `--help` pages: `oswald gateway <command> --help`
+	// (or `oswald gateway routes <command> --help`) prints the same text to
+	// stdout and exits 0 before any scope checks.
 	switch args[0] {
 	case "show":
+		if help.WantsHelp(args[1:]) {
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald gateway show")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(root, stdout, stderr)
 	case "set-multiplex":
+		if help.WantsHelp(args[1:]) {
+			fmt.Fprintln(stdout, setMultiplexUsage)
+			return exitOK
+		}
 		if err := config.RequireDefaultScope(); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return exitError
 		}
 		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald gateway set-multiplex <true|false>")
+			fmt.Fprintln(stderr, setMultiplexUsage)
 			return exitUsage
 		}
 		return setMultiplex(root, args[1], stdout, stderr)
 	case "routes":
+		if len(args) >= 2 && help.WantsHelp(args[1:2]) {
+			switch args[1] {
+			case "list":
+				fmt.Fprintln(stdout, routesListUsage)
+				return exitOK
+			case "add":
+				fmt.Fprintln(stdout, routesAddUsage)
+				return exitOK
+			case "remove":
+				fmt.Fprintln(stdout, routesRemoveUsage)
+				return exitOK
+			}
+		}
 		if len(args) >= 2 && (args[1] == "add" || args[1] == "remove") {
 			if err := config.RequireDefaultScope(); err != nil {
 				fmt.Fprintf(stderr, "%v\n", err)
@@ -93,7 +127,7 @@ func gatewayUsage(w io.Writer) {
 	fmt.Fprintln(w, "  show                       gateway routing section")
 	fmt.Fprintln(w, "  set-multiplex <BOOL>       set gateway.multiplex_profiles")
 	fmt.Fprintln(w, "  routes list                list profile routes")
-	fmt.Fprintln(w, "  routes add --name N --platform discord|bluebubbles --user-id ID --profile P")
+	fmt.Fprintln(w, "  routes add --name N --platform discord|bluebubbles|* --user-id ID|* --profile P")
 	fmt.Fprintln(w, "  routes remove <name>      remove a route by name")
 	fmt.Fprintln(w, "  (platform toggles moved to: oswald platforms enable|disable <name>)")
 }
@@ -127,7 +161,7 @@ func show(root string, stdout, stderr io.Writer) int {
 
 func setMultiplex(root, raw string, stdout, stderr io.Writer) int {
 	if raw != "true" && raw != "false" {
-		fmt.Fprintln(stderr, "usage: oswald gateway set-multiplex <true|false>")
+		fmt.Fprintln(stderr, setMultiplexUsage)
 		return exitUsage
 	}
 	abs, _, err := globalPath(root)
@@ -149,10 +183,22 @@ func routesCmd(root string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: oswald gateway routes <list|add|remove> [options]")
 		return exitUsage
 	}
+	if help.WantsHelp(args) {
+		fmt.Fprintln(stdout, "usage: oswald gateway routes <list|add|remove> [options]")
+		fmt.Fprintln(stdout, "  list                   list profile routes")
+		fmt.Fprintln(stdout, "  add --name N --platform discord|bluebubbles|* --user-id ID|* --profile P")
+		fmt.Fprintln(stdout, "                         use user-id * (or platform * with user-id *) as a catch-all")
+		fmt.Fprintln(stdout, "  remove <name>          remove a route by name")
+		return exitOK
+	}
 	switch args[0] {
 	case "list":
+		if help.WantsHelp(args[1:]) {
+			fmt.Fprintln(stdout, routesListUsage)
+			return exitOK
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald gateway routes list")
+			fmt.Fprintln(stderr, routesListUsage)
 			return exitUsage
 		}
 		_, path, err := globalPath(root)
@@ -168,10 +214,18 @@ func routesCmd(root string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, out)
 		return exitOK
 	case "add":
+		if help.WantsHelp(args[1:]) {
+			fmt.Fprintln(stdout, routesAddUsage)
+			return exitOK
+		}
 		return routesAdd(root, args[1:], stdout, stderr)
 	case "remove":
+		if help.WantsHelp(args[1:]) {
+			fmt.Fprintln(stdout, routesRemoveUsage)
+			return exitOK
+		}
 		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald gateway routes remove <name>")
+			fmt.Fprintln(stderr, routesRemoveUsage)
 			return exitUsage
 		}
 		return routesRemove(root, args[1], stdout, stderr)
@@ -196,7 +250,7 @@ func routesAdd(root string, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 0 || *name == "" || *platform == "" || *userID == "" || *profile == "" {
-		fmt.Fprintln(stderr, "usage: oswald gateway routes add --name N --platform discord|bluebubbles --user-id ID --profile P")
+		fmt.Fprintln(stderr, routesAddUsage)
 		return exitUsage
 	}
 	if !validRoutePlatforms[*platform] {
@@ -408,7 +462,7 @@ func effectForChange(root string, oldCfg *config.Config) string {
 			}
 		}
 	}
-	return "restarting service to apply"
+	return "restart required - run `oswald restart` to apply"
 }
 
 // reportGatewayError prints a classified diagnostic without values.

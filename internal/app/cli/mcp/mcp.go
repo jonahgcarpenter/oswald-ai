@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 )
 
 // Exit codes mirror the parent cli convention without importing it.
@@ -20,6 +22,28 @@ func Run(ctx context.Context, root string, args []string, stdin io.Reader, stdou
 	if len(args) == 0 {
 		mcpUsage(stderr)
 		return exitUsage
+	}
+	if len(args) >= 2 && help.WantsHelp(args[1:]) {
+		switch args[0] {
+		case "list":
+			fmt.Fprintln(stdout, listUsage)
+			return exitOK
+		case "add":
+			fmt.Fprintln(stdout, addUsage)
+			return exitOK
+		case "edit":
+			fmt.Fprintln(stdout, editUsage)
+			return exitOK
+		case "remove":
+			fmt.Fprintln(stdout, removeUsage)
+			return exitOK
+		case "test":
+			fmt.Fprintln(stdout, testUsage)
+			return exitOK
+		case "auth":
+			fmt.Fprintln(stdout, authUsage)
+			return exitOK
+		}
 	}
 	switch args[0] {
 	case "list":

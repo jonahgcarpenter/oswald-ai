@@ -71,8 +71,10 @@ installed plugins' manifest `requires_env` (automatic on load) — see
 Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`,
 `OSWALD_*`) can never tunnel into a sandbox; `ResolveEnvValue` skips refused and empty
 names silently. Values resolve per profile at spawn time and are never logged — only
-names and counts. `terminal` `PATH` stays fixed by design: plugin CLIs are invoked via
-their absolute `bin-path`, with API keys arriving through passthrough, not the command line.
+names and counts. `terminal`, `execute_code`, and background processes gain exactly one
+fixed `PATH` entry — `<profile>/plugins/.bin` — so installed plugin CLIs run by bare
+name; each shim sets `HOME` to its plugin's `data/home`, with API keys arriving
+through passthrough, not the command line.
 
 ## Pre-execution chain (order matters)
 

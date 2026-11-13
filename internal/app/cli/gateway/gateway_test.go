@@ -55,6 +55,23 @@ func run(t *testing.T, root string, args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
+func TestRoutesWildcardAddAndRemove(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "guest"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := run(t, root, "routes", "add", "--name", "fallback", "--platform", "*", "--user-id", "*", "--profile", "guest"); code != 0 {
+		t.Fatalf("routes add wildcard = %d %s", code, stderr)
+	}
+	code, out, _ := run(t, root, "routes", "list")
+	if code != 0 || !strings.Contains(out, "guest") {
+		t.Fatalf("routes list = %d %q, want guest entry", code, out)
+	}
+	if code, _, stderr := run(t, root, "routes", "remove", "fallback"); code != 0 {
+		t.Fatalf("routes remove = %d %s", code, stderr)
+	}
+}
+
 func TestShowDisplaysGateway(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	code, out, _ := run(t, root, "show")
@@ -153,5 +170,35 @@ func TestNamedScopeReadsAllowedMutationsDenied(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if string(before) != string(after) {
 		t.Fatal("global config mutated by rejected gateway command")
+	}
+}
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald gateway") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "gateway", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set-multiplex", "routes"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald gateway "+leaf) {
+			t.Fatalf("gateway %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+}
+
+func TestRoutesHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, leaf := range []string{"list", "add", "remove"} {
+		code, out, _ := run(t, root, "routes", leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald gateway routes "+leaf) {
+			t.Fatalf("routes %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
+	}
+	code, out, _ := run(t, root, "routes", "--help")
+	if code != exitOK || !strings.Contains(out, "usage: oswald gateway routes") {
+		t.Fatalf("routes --help = %d %q, want exit 0 with routes usage", code, out)
 	}
 }

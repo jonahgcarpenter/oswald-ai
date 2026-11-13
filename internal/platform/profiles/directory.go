@@ -140,9 +140,13 @@ func NewDirectory(cfg *config.Config, log *config.Logger) (*Directory, error) {
 		if route.Profile != "default" && cfg.Profiles[route.Profile] == nil {
 			return nil, errors.New("undefined profile route target")
 		}
-		identifier, err := config.NormalizeGatewayIdentifier(route.Platform, route.UserID)
-		if err != nil {
-			return nil, err
+		identifier := route.UserID
+		if route.Platform != "*" && identifier != "*" {
+			var err error
+			identifier, err = config.NormalizeGatewayIdentifier(route.Platform, route.UserID)
+			if err != nil {
+				return nil, err
+			}
 		}
 		key := route.Platform + ":" + identifier
 		if _, exists := directory.routes[key]; exists {
@@ -201,7 +205,9 @@ func (d *Directory) Config(name string) (*config.Config, bool) {
 // Resolve enforces admission policy and returns profile ownership for an
 // authenticated transport identity. Banned identities are rejected everywhere;
 // a nonempty allow list admits only listed identities in direct messages.
-// Unrouted but admitted identities fall back to the default profile. It does
+// Routes match most-specific first: exact platform:user, then a per-platform
+// "user_id: *" catch-all, then the global "*/*" catch-all. Unrouted but
+// admitted identities fall back to the default profile. It does
 // not create files, users, or DB rows.
 func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identity.Principal, resultErr error) {
 	started := time.Now()
@@ -248,6 +254,12 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 		return identity.Principal{}, ErrUnmappedIdentity
 	}
 	name, ok := d.routes[platform+":"+identifier]
+	if !ok {
+		name, ok = d.routes[platform+":*"]
+	}
+	if !ok {
+		name, ok = d.routes["*:*"]
+	}
 	if !ok {
 		// Explicit routes select named profiles; every other admitted identity
 		// shares the default profile without creating an account.

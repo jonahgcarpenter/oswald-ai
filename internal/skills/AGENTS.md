@@ -15,8 +15,8 @@ verbatim), `scan.go` walks it (dot-dirs skipped, directory symlinks unfollowed, 
 `catalog.go` resolves it, `index.go` renders the prompt block, `read.go` loads
 bodies, `store.go` binds roots and owns create/update. `hub.go` owns the install
 surface: URL parsing (git shorthand/URLs, local paths), quarantine staging with
-manifest validation, atomic publish, and the per-profile `skills.lock.json`
-provenance sidecar. The model-facing tool
+manifest validation, atomic publish, and the per-skill
+`skills/<name>/.install-metadata.json` provenance sidecar. The model-facing tool
 adapter lives in `internal/tools/skill_manage/`; this package never imports it.
 `library/skills/<name>/` is a static holding area for Oswald-native skill
 sources (one installable bundle per directory; foreign skills arrive via the
@@ -52,10 +52,8 @@ File-scoped `CreateFile`/`UpdateFile`/`RemoveFile` write only single-level paths
 directly under `references/`, `templates/`, `scripts/`, or `assets/` inside
 managed skills (plugin roots refuse with their origin); the 1 MiB and 64-file
 caps, symlink/escape/NUL refusals, and the 64-file listing bound apply to
-writes as well as reads. `remove` never takes `SKILL.md` itself, updates to
-supporting files never bump `version:`, and the install drift hash digests the
-whole skill tree so model edits trip the same `update --force` guard as
-`SKILL.md` edits.
+writes as well as reads. `remove` never takes `SKILL.md` itself and updates to
+supporting files never bump `version:`.
 
 ## Tests
 
@@ -63,4 +61,4 @@ Synthetic temp dirs only, never live profiles. Cover frontmatter fallbacks (dir-
 name, first-body-line description) and foreign-key tolerance, scan skips, precedence/relpath/platform/category
 resolution, index bounds and coaching presence, view matching/ambiguity/confinement,
 create/update validation, file-scoped create/update/remove (bounds, plugin-root
-refusal, `SKILL.md`-remove refusal, whole-tree drift hash) — not rendered-prompt snapshots.
+refusal, `SKILL.md`-remove refusal) — not rendered-prompt snapshots.

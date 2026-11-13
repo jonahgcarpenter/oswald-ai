@@ -12,6 +12,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -27,7 +28,18 @@ var validLevels = map[string]bool{"debug": true, "info": true, "warn": true, "er
 
 // Run dispatches the runtime command group. This group is global-only: it
 // owns the root config.yaml and accepts no --profile flag.
+// Leaf usage lines double as `--help` pages: `oswald runtime <command> --help`
+// prints the same text to stdout and exits 0 without touching scope or flags.
+const (
+	showUsage = "usage: oswald runtime show"
+	setUsage  = "usage: oswald runtime set --log-level LEVEL (debug|info|warn|error)"
+)
+
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
+	if help.WantsHelp(args) {
+		runtimeUsage(stdout)
+		return exitOK
+	}
 	fs := flag.NewFlagSet("runtime", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
@@ -38,10 +50,20 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		runtimeUsage(stderr)
 		return exitUsage
 	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "set":
+			fmt.Fprintln(stdout, setUsage)
+			return exitOK
+		}
+	}
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald runtime show")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(root, stdout, stderr)
@@ -102,12 +124,12 @@ func setCmd(root string, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if sub.NArg() != 0 || *level == "" {
-		fmt.Fprintln(stderr, "usage: oswald runtime set --log-level debug|info|warn|error")
+		fmt.Fprintln(stderr, setUsage)
 		return exitUsage
 	}
 	if !validLevels[*level] {
 		fmt.Fprintf(stderr, "oswald: unknown log level %q\n", *level)
-		fmt.Fprintln(stderr, "usage: oswald runtime set --log-level debug|info|warn|error")
+		fmt.Fprintln(stderr, setUsage)
 		return exitUsage
 	}
 	abs, _, err := globalPath(root)
@@ -120,7 +142,7 @@ func setCmd(root string, args []string, stdout, stderr io.Writer) int {
 		reportRuntimeError(stderr, err)
 		return exitError
 	}
-	effect := "restarting service to apply"
+	effect := "restart required - run `oswald restart` to apply"
 	if oldCfg != nil {
 		if nextCfg, err := config.Validate(abs); err == nil {
 			if config.ReloadEffect(oldCfg, nextCfg) == "live" {

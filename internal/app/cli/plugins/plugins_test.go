@@ -91,26 +91,14 @@ func TestInfoRedacts(t *testing.T) {
 	}
 }
 
-func TestBinPathAndInstallDepsGates(t *testing.T) {
+func TestRemovedExecSurface(t *testing.T) {
 	root := pluginsTestRoot(t)
-	if code, _, _ := pluginsRun(t, root, "bin-path", "ghost"); code == 0 {
-		t.Fatal("unknown bin-path accepted")
-	}
-	if code, _, _ := pluginsRun(t, root, "bin-path", "demo"); code == 0 {
-		t.Fatal("missing install bin-path accepted")
-	}
-	if code, _, _ := pluginsRun(t, root, "install-deps", "ghost"); code == 0 {
-		t.Fatal("unknown install-deps accepted")
-	}
-	if code, _, _ := pluginsRun(t, root, "install-deps", "demo"); code == 0 {
-		t.Fatal("install-deps without node deps accepted")
-	}
-	// Per-profile reads: unknown plugin in another profile fails, not usage.
-	if code, _, _ := pluginsRun(t, root, "install-deps", "demo", "--profile", "alice"); code == 0 {
-		t.Fatal("alice install-deps accepted")
-	}
-	if code, _, _ := pluginsRun(t, root, "bin-path", "demo", "--profile", "alice"); code == 0 {
-		t.Fatal("alice bin-path accepted")
+	// bin-path, exec, and install-deps are gone: deps install with the
+	// plugin, and the model runs bare names in terminal.
+	for _, args := range [][]string{{"bin-path", "demo"}, {"exec", "demo", "--", "x"}, {"install-deps", "demo"}} {
+		if code, _, _ := pluginsRun(t, root, args...); code == 0 {
+			t.Fatalf("%v accepted after removal", args[0])
+		}
 	}
 }
 
@@ -155,6 +143,26 @@ func TestInstallScopeFencing(t *testing.T) {
 	// Contradicting --profile flag fails closed.
 	if code, _, _ := pluginsRun(t, root, "install", src, "--profile", "default"); code == 0 {
 		t.Fatal("contradicting profile install accepted")
+	}
+}
+
+func TestInstallHealsNoDepsWithoutFlags(t *testing.T) {
+	root := pluginsTestRoot(t)
+	src := installSourceFixture(t, "healed")
+	if code, _, stderr := pluginsRun(t, root, "install", src, "--node-package", "agent-data", "--node-version", "0.13.0", "--no-deps"); code != 0 {
+		t.Fatalf("install = %d %s", code, stderr)
+	}
+	// Fake the sidecar binary so the healing path verifies without npm.
+	binDir := filepath.Join(plugins.PluginCodeDir(root, "healed"), "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "agent-data"), []byte("#!/bin/sh\necho synthetic\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No flags, no --force: the recorded spec is reused.
+	if code, out, stderr := pluginsRun(t, root, "install", src); code != 0 || !strings.Contains(out, "already installed healed") {
+		t.Fatalf("healing reinstall = %d %q %s", code, out, stderr)
 	}
 }
 
@@ -210,31 +218,6 @@ func TestRemoveAndUpdateGates(t *testing.T) {
 	}
 }
 
-func execFixture(t *testing.T, root, name string) {
-	t.Helper()
-	manifestDir := plugins.PluginCodeDir(root, name)
-	writePluginManifest(t, manifestDir, "name: "+name+"\nversion: \"1.0\"\ndescription: synthetic exec plugin\nmanifest_version: 2\napi_version: \"1\"\n")
-	binDir := filepath.Join(manifestDir, "node_modules", ".bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\necho exec-output\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestExecGatesAndRuns(t *testing.T) {
-	root := pluginsTestRoot(t)
-	if code, _, _ := pluginsRun(t, root, "exec", "ghost", "--", "x"); code == 0 {
-		t.Fatal("unknown exec accepted")
-	}
-	execFixture(t, root, "tool")
-	code, out, stderr := pluginsRun(t, root, "exec", "tool", "--bin", "tool", "--", "x")
-	if code != 0 || !strings.Contains(out, "exec-output") {
-		t.Fatalf("exec = %d %q %s", code, out, stderr)
-	}
-}
-
 func TestInstallNodeFlagsEndToEnd(t *testing.T) {
 	root := pluginsTestRoot(t)
 	src := installSourceFixture(t, "flagged")
@@ -245,11 +228,6 @@ func TestInstallNodeFlagsEndToEnd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("info = %d %q", code, out)
 	}
-	// Metadata fallback: bin-path resolves the recorded package base.
-	code, out, _ = pluginsRun(t, root, "bin-path", "flagged")
-	if code == 0 {
-		t.Fatalf("bin-path succeeded without installed deps: %q", out)
-	}
 	if code, _, _ := pluginsRun(t, root, "install", src, "--node-package", "agent-data"); code == 0 {
 		t.Fatal("half node flags accepted")
 	}
@@ -259,5 +237,21 @@ func TestInstallNodeFlagsEndToEnd(t *testing.T) {
 	}
 	if code, _, _ := pluginsRun(t, root, "install", src, "--node-package", "other", "--node-version", "9.9.9", "--no-deps"); code == 0 {
 		t.Fatal("node mismatch accepted without --force")
+	}
+}
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := pluginsRun(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald plugins") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "plugins", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"list", "info", "install", "update", "remove"} {
+		code, out, _ := pluginsRun(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald plugins "+leaf) {
+			t.Fatalf("plugins %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
 	}
 }

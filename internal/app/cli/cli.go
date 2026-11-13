@@ -21,10 +21,10 @@ import (
 	cliplugins "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/plugins"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/providers"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/restart"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
 	cliskills "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/skills"
-	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/start"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
@@ -62,8 +62,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	switch rest[0] {
 	case "setup":
 		return setup.Run(ctx, root, rest[1:], stdout, stderr)
-	case "start":
-		return start.Run(ctx, root, stdout)
+	case "restart":
+		return restart.Run(ctx, root, rest[1:], stdout, stderr)
 	case "profile":
 		return profiles.Run(ctx, root, rest[1:], stdin, stdout, stderr)
 	case "mcp":
@@ -107,7 +107,7 @@ func usage(w io.Writer) {
 
 commands:
   setup                  seed a first-install configuration root
-  start                  run the oswald service
+  restart                restart the running oswald-server (same pod)
   profile create <name>  create a private operator profile
   profile delete <name>  delete an operator profile and its data
   mcp auth <server>      authorize a profile MCP server with OAuth
@@ -127,8 +127,6 @@ commands:
   plugins list|info           manage profile plugins (presence means enabled)
   plugins install|update|remove
                           install from URL, refresh, or remove per-profile plugin code
-  plugins install-deps|bin-path
-                          install pinned npm deps / print a plugin binary path
   skills list|info|install|update|remove
                           manage per-profile skills
   api show|set-key|clear-key

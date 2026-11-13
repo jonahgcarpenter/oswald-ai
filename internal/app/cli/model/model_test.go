@@ -60,7 +60,7 @@ func TestSetDefaultRoundTrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("set = %d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(out, "restarting service to apply") {
+	if !strings.Contains(out, "restart required - run `oswald restart` to apply") {
 		t.Fatalf("set missing applying hint = %q", out)
 	}
 	code, out, _ = run(t, root, "show")
@@ -96,7 +96,7 @@ func TestSetRejectsMultipleFields(t *testing.T) {
 	}
 }
 
-func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
+func TestCrossProfileReadDeniedMutateDenied(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	if err := os.MkdirAll(filepath.Join(root, "profiles", "bob"), 0700); err != nil {
 		t.Fatal(err)
@@ -105,9 +105,8 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("OSWALD_HOME", filepath.Join(root, "profiles", "bob"))
-	code, out, _ := run(t, root, "show", "--profile", "default")
-	if code != 0 || !strings.Contains(out, "fake/model") {
-		t.Fatalf("cross-profile read rejected: %d %q", code, out)
+	if code, _, _ := run(t, root, "show", "--profile", "default"); code == 0 {
+		t.Fatal("cross-profile read accepted")
 	}
 	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if code, _, _ := run(t, root, "set", "--profile", "default", "--default", "fake/evil"); code == 0 {
@@ -116,5 +115,21 @@ func TestCrossProfileReadAllowedMutateDenied(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("default config mutated by rejected set")
+	}
+}
+
+func TestHelpPages(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		code, out, _ := run(t, root, args...)
+		if code != exitOK || !strings.Contains(out, "usage: oswald model") {
+			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "model", args, code, out)
+		}
+	}
+	for _, leaf := range []string{"show", "set"} {
+		code, out, _ := run(t, root, leaf, "--help")
+		if code != exitOK || !strings.Contains(out, "usage: oswald model "+leaf) {
+			t.Fatalf("model %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
+		}
 	}
 }

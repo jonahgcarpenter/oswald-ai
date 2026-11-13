@@ -67,6 +67,8 @@ func serverBoolFlags() map[string]bool {
 // add inserts a new mcp_servers.<name> entry through staged validation.
 // Secrets travel on argv; they are never echoed or logged, matching the
 // operator visibility posture of `oswald env set`.
+const addUsage = "usage: oswald mcp add <server> [--profile NAME] (--url URL | --command CMD) [options]"
+
 func add(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	_ = ctx
 	fs := flag.NewFlagSet("oswald mcp add", flag.ContinueOnError)
@@ -81,7 +83,7 @@ func add(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 		return exitUsage
 	}
 	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
-		fmt.Fprintln(stderr, "usage: oswald mcp add <server> [--profile NAME] (--url URL | --command CMD) [options]")
+		fmt.Fprintln(stderr, addUsage)
 		return exitUsage
 	}
 	if f.enable && f.disable {

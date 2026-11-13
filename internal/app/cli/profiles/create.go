@@ -16,7 +16,7 @@ import (
 // existing profile and rolls back partial state on failure.
 func create(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: oswald profile create <name>")
+		fmt.Fprintln(stderr, createUsage)
 		return exitUsage
 	}
 	name := args[0]

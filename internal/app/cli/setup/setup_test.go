@@ -120,3 +120,14 @@ func TestSetupRejectsSymlinkedRoot(t *testing.T) {
 		t.Fatal("setup wrote through a symlinked root")
 	}
 }
+
+func TestHelpPage(t *testing.T) {
+	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(context.Background(), t.TempDir(), args, &stdout, &stderr); code != exitOK {
+			t.Fatalf("setup %v = %d, want exit 0", args, code)
+		} else if out := stdout.String(); !strings.Contains(out, "usage: oswald setup") {
+			t.Fatalf("setup %v missing usage: %q", args, out)
+		}
+	}
+}

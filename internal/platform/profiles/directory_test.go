@@ -46,6 +46,59 @@ func TestProfileAdmissionIsNotAnAdministratorGrant(t *testing.T) {
 	}
 }
 
+func TestWildcardRoutesCatchUnroutedIdentities(t *testing.T) {
+	cfg := &config.Config{ProfileRoot: "synthetic", ProfileName: "default", DiscordToken: "synthetic", BlueBubblesListenPort: "1234", Profiles: map[string]*config.Config{"alice": {ProfileName: "alice"}, "guest": {ProfileName: "guest"}}, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "123", Profile: "alice"}, {Platform: "discord", UserID: "*", Profile: "guest"}, {Platform: "*", UserID: "*", Profile: "guest"}}, DiscordPolicy: config.AdmissionPolicy{}, BlueBubblesPolicy: config.AdmissionPolicy{}}
+	directory, err := NewDirectory(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, platform, id, want string
+		direct                   bool
+	}{
+		{"exact beats platform wildcard", "discord", "123", "alice", true},
+		{"platform wildcard catches discord", "discord", "456", "guest", true},
+		{"platform wildcard applies in groups", "discord", "456", "guest", false},
+		{"global wildcard catches imessage", "imessage", "+15557654321", "guest", true},
+		{"global wildcard applies in groups", "imessage", "+15557654321", "guest", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := directory.Resolve(tc.platform, tc.id, tc.direct)
+			if err != nil || principal.CanonicalUserID != tc.want || !principal.Authenticated() {
+				t.Fatalf("resolved %+v err=%v, want profile %q", principal, err, tc.want)
+			}
+		})
+	}
+	// Implicit default fallback still applies with no wildcard remaining:
+	// drop the guest routes and the same strangers land on default.
+	plain := &config.Config{ProfileRoot: "synthetic", ProfileName: "default", DiscordToken: "synthetic", BlueBubblesListenPort: "1234", Profiles: map[string]*config.Config{}, ProfileRoutes: nil, DiscordPolicy: config.AdmissionPolicy{}, BlueBubblesPolicy: config.AdmissionPolicy{}}
+	plainDirectory, err := NewDirectory(plain, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := plainDirectory.Resolve("discord", "456", true)
+	if err != nil || principal.CanonicalUserID != "default" {
+		t.Fatalf("implicit default fallback lost: %+v err=%v", principal, err)
+	}
+	// Bans still win over wildcards.
+	banned := &config.Config{ProfileRoot: "synthetic", ProfileName: "default", DiscordToken: "synthetic", Profiles: map[string]*config.Config{"guest": {ProfileName: "guest"}}, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "*", Profile: "guest"}}, DiscordPolicy: config.AdmissionPolicy{Banned: []string{"456"}}}
+	bannedDirectory, err := NewDirectory(banned, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bannedDirectory.Resolve("discord", "456", true); !errors.Is(err, ErrUnmappedIdentity) {
+		t.Fatal("banned identity admitted despite wildcard")
+	}
+	if _, err := NewDirectory(cfg, nil); err != nil {
+		t.Fatal("valid wildcard directory rejected on rebuild", err)
+	}
+	// Duplicate wildcards fail closed.
+	dup := &config.Config{ProfileRoot: "synthetic", ProfileName: "default", DiscordToken: "synthetic", Profiles: map[string]*config.Config{"guest": {ProfileName: "guest"}}, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "*", Profile: "guest"}, {Platform: "discord", UserID: "*", Profile: "guest"}}}
+	if _, err := NewDirectory(dup, nil); err == nil {
+		t.Fatal("duplicate wildcard route accepted")
+	}
+}
+
 func TestAdmittedIdentityWithoutRouteFallsBackToDefault(t *testing.T) {
 	cfg := &config.Config{ProfileRoot: "synthetic", ProfileName: "default", DiscordToken: "synthetic", BlueBubblesListenPort: "1234", Profiles: map[string]*config.Config{"alice": {ProfileName: "alice"}}, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "123", Profile: "alice"}}, DiscordPolicy: config.AdmissionPolicy{}, BlueBubblesPolicy: config.AdmissionPolicy{}}
 	directory, err := NewDirectory(cfg, nil)

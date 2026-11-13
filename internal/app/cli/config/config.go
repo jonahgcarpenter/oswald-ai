@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
@@ -21,6 +22,14 @@ const (
 	exitUsage = 2
 )
 
+// Leaf usage lines double as `--help` pages: `oswald config <command> --help`
+// prints the same text to stdout and exits 0 without resolving scope.
+const (
+	showUsage     = "usage: oswald config show [--path P] [--profile NAME]"
+	getUsage      = "usage: oswald config get <path> [--profile NAME]"
+	validateUsage = "usage: oswald config validate [--profile NAME]"
+)
+
 // Run dispatches the config command group. --profile and --path are accepted
 // in any position.
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
@@ -28,6 +37,19 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	if len(rest) == 0 {
 		configUsage(stderr)
 		return exitUsage
+	}
+	if len(rest) >= 2 && help.WantsHelp(rest[1:]) {
+		switch rest[0] {
+		case "show":
+			fmt.Fprintln(stdout, showUsage)
+			return exitOK
+		case "get":
+			fmt.Fprintln(stdout, getUsage)
+			return exitOK
+		case "validate":
+			fmt.Fprintln(stdout, validateUsage)
+			return exitOK
+		}
 	}
 	if showPath != "" && rest[0] != "show" {
 		fmt.Fprintln(stderr, "oswald: --path applies to config show only")
@@ -41,19 +63,19 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald config show [--path P] [--profile NAME]")
+			fmt.Fprintln(stderr, showUsage)
 			return exitUsage
 		}
 		return show(target, showPath, stdout, stderr)
 	case "get":
 		if len(rest) != 2 {
-			fmt.Fprintln(stderr, "usage: oswald config get <path> [--profile NAME]")
+			fmt.Fprintln(stderr, getUsage)
 			return exitUsage
 		}
 		return show(target, rest[1], stdout, stderr)
 	case "validate":
 		if len(rest) != 1 {
-			fmt.Fprintln(stderr, "usage: oswald config validate [--profile NAME]")
+			fmt.Fprintln(stderr, validateUsage)
 			return exitUsage
 		}
 		return validate(target, stdout, stderr)

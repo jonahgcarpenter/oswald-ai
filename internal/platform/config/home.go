@@ -64,16 +64,21 @@ func ResolveGlobalRoot(flagRoot string) (string, error) {
 }
 
 // ResolveReadProfile resolves the operator profile for read-only CLI
-// invocations (`show`, `get`, `list`, `validate`, `test`). Unlike
-// ResolveProfile it permits naming another profile: reads are visible
-// cross-profile while every mutation stays fenced to the calling scope.
-// Malformed names fail here; unknown names fail closed downstream when the
-// profile file is located.
+// invocations (`show`, `get`, `list`, `validate`, `test`). Reads stay fenced
+// to the calling scope exactly like mutations: an explicit flag contradicting
+// a valid named OSWALD_HOME fails closed so an agent cannot read another
+// profile's files. Malformed names fail here; unknown names fail closed
+// downstream when the profile file is located.
 func ResolveReadProfile(flagProfile string) (string, error) {
 	if strings.TrimSpace(flagProfile) != "" {
 		name := strings.TrimSpace(flagProfile)
 		if name != "default" && !ValidProfileName(name) {
 			return "", fmt.Errorf("invalid profile name %q", flagProfile)
+		}
+		if _, inferred, ok := InferScopeFromHome(os.Getenv(OswaldHomeEnv)); ok {
+			if inferred != "default" && name != inferred {
+				return "", fmt.Errorf("oswald: --profile %q does not match current profile %q", name, inferred)
+			}
 		}
 		return name, nil
 	}

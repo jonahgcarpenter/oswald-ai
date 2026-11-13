@@ -18,7 +18,7 @@ import (
 // them for the new name.
 func renameProfile(ctx context.Context, root string, args []string, stdout, stderr io.Writer) int {
 	if len(args) != 2 {
-		fmt.Fprintln(stderr, "usage: oswald profile rename <old> <new>")
+		fmt.Fprintln(stderr, renameUsage)
 		return exitUsage
 	}
 	oldName, newName := args[0], args[1]
