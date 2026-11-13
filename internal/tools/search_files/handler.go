@@ -1,7 +1,8 @@
-package workspace
+package searchfiles
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,10 +14,11 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // NewSearchFilesHandler returns content and filename search inside the workspace.
-func NewSearchFilesHandler(ws *Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewSearchFilesHandler(ws *workspace.Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err
@@ -77,8 +79,8 @@ func NewSearchFilesHandler(ws *Workspace) func(context.Context, map[string]inter
 		}
 		searchRoot, err := ws.ResolveDir(base)
 		if err != nil {
-			if rel, category, ok := AsDeny(err); ok {
-				return governance.Result{}, errors.New(DenyMessage(rel, category, false))
+			if rel, category, ok := workspace.AsDeny(err); ok {
+				return governance.Result{}, errors.New(workspace.DenyMessage(rel, category, false))
 			}
 			return governance.Result{}, err
 		}
@@ -93,12 +95,12 @@ func NewSearchFilesHandler(ws *Workspace) func(context.Context, map[string]inter
 	}
 }
 
-func searchSingleFile(ctx context.Context, ws *Workspace, abs, pattern, outputMode string, contextLines int) (governance.Result, error) {
+func searchSingleFile(ctx context.Context, ws *workspace.Workspace, abs, pattern, outputMode string, contextLines int) (governance.Result, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return governance.Result{}, errors.New("pattern is not a valid regex")
 	}
-	data, err := ReadRegularFile(abs)
+	data, err := workspace.ReadRegularFile(abs)
 	if err != nil {
 		return governance.Result{}, errors.New("file is unavailable")
 	}
@@ -124,7 +126,7 @@ func searchSingleFile(ctx context.Context, ws *Workspace, abs, pattern, outputMo
 	}
 }
 
-func searchFilenames(ctx context.Context, ws *Workspace, root, glob, order string, limit, offset int) (governance.Result, error) {
+func searchFilenames(ctx context.Context, ws *workspace.Workspace, root, glob, order string, limit, offset int) (governance.Result, error) {
 	type entry struct {
 		rel     string
 		modTime int64
@@ -200,7 +202,7 @@ func searchFilenames(ctx context.Context, ws *Workspace, root, glob, order strin
 	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
 }
 
-func searchContents(ctx context.Context, ws *Workspace, root, pattern, fileGlob, outputMode string, contextLines, limit, offset int) (governance.Result, error) {
+func searchContents(ctx context.Context, ws *workspace.Workspace, root, pattern, fileGlob, outputMode string, contextLines, limit, offset int) (governance.Result, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return governance.Result{}, errors.New("pattern is not a valid regex")
@@ -241,7 +243,7 @@ func searchContents(ctx context.Context, ws *Workspace, root, pattern, fileGlob,
 			skipped++
 			return nil
 		}
-		data, rerr := ReadRegularFile(path)
+		data, rerr := workspace.ReadRegularFile(path)
 		if rerr != nil {
 			return nil
 		}
@@ -301,7 +303,7 @@ func matchLines(content string, re *regexp.Regexp, contextLines int) []string {
 			continue
 		}
 		if contextLines == 0 {
-			out = append(out, fmt.Sprintf("%d:%s", i+1, TruncateRunes(line, 500)))
+			out = append(out, fmt.Sprintf("%d:%s", i+1, workspace.TruncateRunes(line, 500)))
 			continue
 		}
 		start := i - contextLines
@@ -317,7 +319,7 @@ func matchLines(content string, re *regexp.Regexp, contextLines int) []string {
 			if j == i {
 				prefix = ">"
 			}
-			out = append(out, fmt.Sprintf("%s%d:%s", prefix, j+1, TruncateRunes(lines[j], 500)))
+			out = append(out, fmt.Sprintf("%s%d:%s", prefix, j+1, workspace.TruncateRunes(lines[j], 500)))
 		}
 		out = append(out, "--")
 		if len(out) > 200 {
@@ -343,4 +345,51 @@ func resultOutcome(found bool) governance.Outcome {
 		return governance.OutcomeProductive
 	}
 	return governance.OutcomeUnproductive
+}
+
+// The arg helpers below are intentionally local: every tools/* package owns
+// its own small copies instead of a shared generic helper package.
+
+func rejectUnknown(args map[string]interface{}, allowed ...string) error {
+	keep := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		keep[k] = true
+	}
+	for k := range args {
+		if !keep[k] {
+			return fmt.Errorf("unknown argument %q", k)
+		}
+	}
+	return nil
+}
+
+func stringArg(args map[string]interface{}, key string) (string, bool) {
+	v, ok := args[key].(string)
+	return v, ok
+}
+
+func intArg(args map[string]interface{}, key string, def int) (int, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	switch v := raw.(type) {
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(v), nil
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", key)
+		}
+		return int(n), nil
+	default:
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
 }

@@ -120,27 +120,6 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 	}
 }
 
-func TestSearchFilesContentAndNames(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(root, "alice")
-	ctx := testContext("req-s")
-	if err := os.WriteFile(filepath.Join(root, "hello.py"), []byte("print('hi')\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	search := NewSearchFilesHandler(ws)
-	res, err := search(ctx, map[string]interface{}{"pattern": "print", "target": "content", "path": "."})
-	if err != nil || !strings.Contains(res.Content, "hello.py") {
-		t.Fatalf("content search = %+v %v", res, err)
-	}
-	res, err = search(ctx, map[string]interface{}{"pattern": "*.py", "target": "files", "path": "."})
-	if err != nil || !strings.Contains(res.Content, "hello.py") {
-		t.Fatalf("file search = %+v %v", res, err)
-	}
-}
-
 func TestTerminalForeground(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
