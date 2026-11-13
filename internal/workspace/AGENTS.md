@@ -6,13 +6,12 @@ Applies on top of the root `AGENTS.md` (operator-state and never-log-rules).
 
 `workspace.go::Workspace` binds one profile's working directory (`default` = profile root, named =
 `profiles/<name>/`) and every file/shell operation resolves through `Resolve()` — absolute, `~/`
-(workspace-rooted, never the OS home), and CWD-relative inputs alike. `read_file` / `write_file` /
-`patch` / `search_files` are the file tools; `terminal` runs foreground `/bin/sh -c` with a minimal
-environment (`PATH` includes `/opt/oswald` so the agent can run the operator CLI,
-`TMPDIR=<cwd>/cache/scratch/` plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN` only, plus sandbox
-passthrough names resolved against the acting profile's dotenv scope); `execute_code` runs stateless `python3` per call with no cross-call
-kernel state; `process_manage` polls tracked sessions owned by `process/`; `cronjob_manage` owns
-schedules. `groups.go` owns the file-group classifier, `guard.go` / `shellscan.go` /
+(workspace-rooted, never the OS home), and CWD-relative inputs alike. The model-facing tool
+surfaces (`read_file` / `write_file` / `patch` / `search_files`, `terminal`, `execute_code`,
+`process_manage`, `cronjob_manage`) live in `tools/<name>/`; this package owns the sandbox
+primitives they call into — resolution, the pre-execution chain, the reviewer and approved
+replay, `process/` tracked sessions, scratch/cache mechanics — plus the guarded terminal
+execution entry `command.go::ExecuteCommand` shared with no other caller. `groups.go` owns the file-group classifier, `guard.go` / `shellscan.go` /
 `fetchscan.go` / `confinewrite.go` implement the pre-execution chain, `review.go` the LLM reviewer,
 and `approve_exec.go` the approved replay. `process/sandboxenv.go` owns the sandbox
 environment contract: deny-by-default passthrough (skill `required_env`, config
