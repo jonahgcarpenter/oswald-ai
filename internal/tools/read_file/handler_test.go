@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
@@ -118,7 +119,7 @@ func TestReadWriteGate(t *testing.T) {
 	}
 	ws := workspace.NewWorkspace(root, "alice")
 	ctx := testContext("req-1")
-	write := workspace.NewWriteFileHandler(ws)
+	write := writefile.NewWriteFileHandler(ws)
 	read := NewReadFileHandler(ws)
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hello"), 0600); err != nil {
 		t.Fatal(err)
@@ -151,7 +152,7 @@ func TestDenyMessagesCategorized(t *testing.T) {
 	}
 	ws := workspace.NewWorkspace(root, "default")
 	read := NewReadFileHandler(ws)
-	write := workspace.NewWriteFileHandler(ws)
+	write := writefile.NewWriteFileHandler(ws)
 	for _, p := range []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "MEMORY.md"), filepath.Join("profiles", "alice", "x"), filepath.Join("skills", "review", "SKILL.md")} {
 		full := filepath.Join(root, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
