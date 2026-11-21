@@ -50,7 +50,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	if isGroup {
 		selectedMessageGUID = msg.GUID
 	}
-	mentionEnd := g.leadingMention(text)
+	mentionStart, mentionEnd := g.splitLeadingMention(text)
 	hasLeadingMention := mentionEnd >= 0
 	mentionsBot := hasLeadingMention
 	if isGroup && !g.Links.RequiresMention("imessage") {
@@ -58,7 +58,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	}
 	textWithoutMention := text
 	if hasLeadingMention {
-		textWithoutMention = strings.TrimSpace(text[mentionEnd:])
+		textWithoutMention = strings.TrimSpace(text[:mentionStart] + text[mentionEnd:])
 	}
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
 	// Group-thread admission and enrichment share the newest prior message,
@@ -326,7 +326,8 @@ func (m webhookMessage) primaryChat() messageChat {
 }
 
 // defaultMentionPatterns preserves the built-in mention forms. A mention must
-// be the first thing the sender says, so the patterns are anchored.
+// lead its bubble, so the patterns are anchored. Coalesced turns join one
+// sender's rapid bubbles with newlines, so any part may carry the invocation.
 var defaultMentionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^(?:<@Oswald>|@?Oswald\b)`),
 }
@@ -334,17 +335,49 @@ var defaultMentionPatterns = []*regexp.Regexp{
 // leadingMention reports whether the trimmed message begins with a mention and,
 // if so, the byte offset just past the longest matching prefix.
 func (g *Gateway) leadingMention(trimmed string) int {
+	_, end := g.splitLeadingMention(trimmed)
+	return end
+}
+
+// splitLeadingMention reports the mention span in the trimmed message: the
+// start of the mention and the offset just past it. Any newline-separated
+// part may carry the invocation, since coalescing joins rapid bubbles from
+// one sender into a single turn. It returns (-1, -1) when no part invokes.
+// Non-invoking parts stay in the prompt; callers keep text[:start]+text[end:].
+func (g *Gateway) splitLeadingMention(trimmed string) (int, int) {
 	patterns := g.MentionPatterns
 	if len(patterns) == 0 {
 		patterns = defaultMentionPatterns
 	}
-	end := -1
-	for _, pattern := range patterns {
-		if loc := pattern.FindStringIndex(trimmed); loc != nil && loc[0] == 0 && loc[1] > end {
-			end = loc[1]
+	matchAt := func(s string) int {
+		end := -1
+		for _, pattern := range patterns {
+			if loc := pattern.FindStringIndex(s); loc != nil && loc[0] == 0 && loc[1] > end {
+				end = loc[1]
+			}
 		}
+		return end
 	}
-	return end
+	pos := 0
+	for pos <= len(trimmed) {
+		lineEnd := pos
+		for lineEnd < len(trimmed) && trimmed[lineEnd] != '\n' {
+			lineEnd++
+		}
+		line := trimmed[pos:lineEnd]
+		stripped := strings.TrimLeft(line, " \t\r")
+		gap := len(line) - len(stripped)
+		if stripped != "" {
+			if end := matchAt(stripped); end >= 0 {
+				return pos + gap, pos + gap + end
+			}
+		}
+		if lineEnd >= len(trimmed) {
+			break
+		}
+		pos = lineEnd + 1
+	}
+	return -1, -1
 }
 
 // parentInvokedBot reports whether a replied-to message itself invoked the

@@ -25,6 +25,9 @@ Private messages need no mention; group messages and group commands require the 
 a recognized bot reply — and the mention must lead the message (leading whitespace trimmed).
 Discord checks leading native `<@ID>`/`<@!ID>` tokens; BlueBubbles uses anchored
 `mention_pattern` regexes (default `@?Oswald\b`), stripped before the model call.
+iMessage coalesces one sender's rapid bubbles into a single turn with newlines,
+so any part may carry the invocation (e.g. a pasted link arrives as its own
+bubble ahead of the typed text); non-invoking parts stay in the prompt.
 `require_mention` (default true) gates group invocation only. Transport scope and reply context
 never change sender ownership, and admission (bans first, then allow-list, then mention check)
 runs before attachment downloads and reply lookups.
