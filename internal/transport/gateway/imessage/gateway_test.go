@@ -103,6 +103,58 @@ func TestIMessageGroupMentionMustLeadMessage(t *testing.T) {
 	}
 }
 
+func TestIMessageLinkFirstMentionStillInvokes(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+
+	// iMessage delivers a pasted link as its own bubble ahead of the typed
+	// text. Coalescing joins them link-first, which must not bury the mention.
+	g.processIncomingMessage(webhookMessage{
+		GUID: "link-first", Text: "https://x.com/gamegpu_com/status/123\nOswald does the data support this?",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+	requests := model.primaryRequests()
+	if len(requests) != 1 {
+		t.Fatalf("link-first mention was ignored: requests=%d", len(requests))
+	}
+	got := requests[0].Messages[len(requests[0].Messages)-1].Content
+	if !strings.Contains(got, "https://x.com/gamegpu_com/status/123") || !strings.Contains(got, "does the data support this?") {
+		t.Fatalf("link context lost from prompt: %q", got)
+	}
+	if strings.Contains(got, "Oswald does the data") {
+		t.Fatalf("mention not stripped after link prefix: %q", got)
+	}
+
+	// A bare link with no mention must still be ignored in groups.
+	before := len(model.primaryRequests())
+	g.processIncomingMessage(webhookMessage{
+		GUID: "link-only", Text: "https://x.com/gamegpu_com/status/123",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+	if len(model.primaryRequests()) != before {
+		t.Fatal("link without mention invoked the agent")
+	}
+
+	// Any coalesced part may carry the invocation, not just a link prefix.
+	g.processIncomingMessage(webhookMessage{
+		GUID: "second-part", Text: "some context\nOswald help with this",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+	requests = model.primaryRequests()
+	if len(requests) != before+1 {
+		t.Fatalf("second-part mention was ignored: requests=%d", len(requests))
+	}
+	got = requests[before].Messages[len(requests[before].Messages)-1].Content
+	if !strings.Contains(got, "some context") || !strings.Contains(got, "help with this") {
+		t.Fatalf("coalesced context lost from prompt: %q", got)
+	}
+}
+
 func TestIMessageLeadingMentionInDirectMessageIsStrippedNotGated(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()
