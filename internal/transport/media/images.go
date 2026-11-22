@@ -15,7 +15,9 @@ import (
 
 	_ "github.com/jdeng/goheif"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	_ "golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
 
@@ -36,6 +38,8 @@ var decodableImageMIMETypes = map[string]struct{}{
 	"image/png":           {},
 	"image/gif":           {},
 	"image/webp":          {},
+	"image/bmp":           {},
+	"image/tiff":          {},
 	"image/heic":          {},
 	"image/heif":          {},
 	"image/heic-sequence": {},

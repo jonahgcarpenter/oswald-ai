@@ -80,7 +80,7 @@ type Gateway struct {
 	APIBaseURL     string
 	HTTPClient     *http.Client
 	DocCache       *docache.Cache
-	MotionCache    *docache.Cache
+	MediaCache     *docache.Cache
 	replyMu        sync.RWMutex
 	replyIndex     map[string]replyContext
 	labelMu        sync.RWMutex

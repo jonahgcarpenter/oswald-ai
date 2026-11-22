@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 func TestNormalizeInputImageDoesNotResizeSmallJPEG(t *testing.T) {
@@ -291,5 +293,28 @@ func fillTestImage(img *image.RGBA, transparent bool) {
 			}
 			img.SetRGBA(x, y, color.RGBA{R: uint8(x % 256), G: uint8(y % 256), B: uint8((x + y) % 256), A: alpha})
 		}
+	}
+}
+
+func TestNormalizeInputImageAcceptsBMPAndTIFF(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	fillTestImage(img, false)
+
+	var bmpBuf bytes.Buffer
+	if err := bmp.Encode(&bmpBuf, img); err != nil {
+		t.Fatal(err)
+	}
+	result, err := NormalizeInputImageFromBytes(nil, "image/bmp", bmpBuf.Bytes(), "photo.bmp")
+	if err != nil || result.DetectedMIME != "image/bmp" {
+		t.Fatalf("bmp normalize = %+v %v", result, err)
+	}
+
+	var tiffBuf bytes.Buffer
+	if err := tiff.Encode(&tiffBuf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	result, err = NormalizeInputImageFromBytes(nil, "image/tiff", tiffBuf.Bytes(), "photo.tiff")
+	if err != nil || result.DetectedMIME != "image/tiff" {
+		t.Fatalf("tiff normalize = %+v %v", result, err)
 	}
 }

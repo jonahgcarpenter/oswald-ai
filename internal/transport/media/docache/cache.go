@@ -1,5 +1,5 @@
 // Package docache stores short-lived, private per-user inbound file
-// downloads: documents (extractable text) and motion media (GIF/video).
+// downloads: documents (extractable text) and media (GIF/video).
 package docache
 
 import (
@@ -29,19 +29,19 @@ type kind int
 
 const (
 	kindDocuments kind = iota
-	kindMotion
+	kindMedia
 )
 
 var userName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 var docName = regexp.MustCompile(`^[a-f0-9]{32}\.(pdf|txt|md|csv|log|json|docx|xlsx)$`)
-var motionName = regexp.MustCompile(`^[a-f0-9]{32}\.(gif|mp4|webm|mov|m4v|mkv)$`)
+
+// mediaName accepts any safe short extension: the media lane holds AV files
+// and catch-all attachments, all sanitized by the gateways before Save.
+var mediaName = regexp.MustCompile(`^[a-f0-9]{32}(\.[a-z0-9]{1,8})?$`)
+var safeMediaExt = regexp.MustCompile(`^\.[a-z0-9]{1,8}$`)
 
 var documentExtensions = map[string]struct{}{
 	".pdf": {}, ".txt": {}, ".md": {}, ".csv": {}, ".log": {}, ".json": {}, ".docx": {}, ".xlsx": {},
-}
-
-var motionExtensions = map[string]struct{}{
-	".gif": {}, ".mp4": {}, ".webm": {}, ".mov": {}, ".m4v": {}, ".mkv": {},
 }
 
 var errUnsafeDirectory = errors.New("document cache directory is not private")
@@ -63,9 +63,9 @@ type Cache struct {
 // New constructs a document cache at root.
 func New(root string) *Cache { return &Cache{root: root, now: time.Now} }
 
-// NewMotion constructs a motion-media cache at root.
-func NewMotion(root string) *Cache {
-	return &Cache{root: root, kind: kindMotion, now: time.Now}
+// NewMedia constructs a raw media/attachment cache at root.
+func NewMedia(root string) *Cache {
+	return &Cache{root: root, kind: kindMedia, now: time.Now}
 }
 
 // NewProfileCache owns documents directly below one manually provisioned profile.
@@ -73,36 +73,33 @@ func NewProfileCache(root, profile string) *Cache {
 	return &Cache{root: root, profile: profile, now: time.Now}
 }
 
-// NewProfileMotionCache owns motion media directly below one manually
+// NewProfileMediaCache owns media directly below one manually
 // provisioned profile.
-func NewProfileMotionCache(root, profile string) *Cache {
-	return &Cache{root: root, profile: profile, kind: kindMotion, now: time.Now}
+func NewProfileMediaCache(root, profile string) *Cache {
+	return &Cache{root: root, profile: profile, kind: kindMedia, now: time.Now}
 }
 
 func (c *Cache) subdir() string {
-	if c != nil && c.kind == kindMotion {
-		return "videos"
+	if c != nil && c.kind == kindMedia {
+		return "media"
 	}
 	return "documents"
 }
 
 func (c *Cache) namePattern() *regexp.Regexp {
-	if c != nil && c.kind == kindMotion {
-		return motionName
+	if c != nil && c.kind == kindMedia {
+		return mediaName
 	}
 	return docName
 }
 
 func (c *Cache) extensions() map[string]struct{} {
-	if c != nil && c.kind == kindMotion {
-		return motionExtensions
-	}
 	return documentExtensions
 }
 
 func (c *Cache) maxBytes() int {
-	if c != nil && c.kind == kindMotion {
-		return media.MaxMotionBytes
+	if c != nil && c.kind == kindMedia {
+		return media.MaxMediaBytes
 	}
 	return media.MaxDocumentBytes
 }
@@ -118,9 +115,9 @@ func RepairProfile(root, profile string) {
 	repairKind(root, profile, kindDocuments)
 }
 
-// RepairMotionProfile tightens permissions on existing cached motion media.
-func RepairMotionProfile(root, profile string) {
-	repairKind(root, profile, kindMotion)
+// RepairMediaProfile tightens permissions on existing cached media.
+func RepairMediaProfile(root, profile string) {
+	repairKind(root, profile, kindMedia)
 }
 
 func repairKind(root, profile string, k kind) {
@@ -244,11 +241,14 @@ func (c *Cache) validate(filename string, data []byte) (string, error) {
 		return "", errors.New("file size out of bounds")
 	}
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filename)))
-	if _, ok := c.extensions()[ext]; ok {
+	if c.kind == kindMedia {
+		if ext != "" && !safeMediaExt.MatchString(ext) {
+			return "", errors.New("unsupported media type")
+		}
 		return ext, nil
 	}
-	if c.kind == kindMotion {
-		return "", errors.New("unsupported motion media type")
+	if _, ok := c.extensions()[ext]; ok {
+		return ext, nil
 	}
 	sniffed := http.DetectContentType(data)
 	if !strings.HasPrefix(sniffed, "text/") {

@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func samplePNG(t *testing.T) []byte {

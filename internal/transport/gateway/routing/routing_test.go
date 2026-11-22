@@ -143,17 +143,28 @@ func TestBuildPromptImageOnlyAndReplyImageLimit(t *testing.T) {
 	}
 }
 
-func TestBuildPromptDescribesMotionMedia(t *testing.T) {
+func TestBuildPromptDescribesMedia(t *testing.T) {
 	video := media.DocumentRef{Path: "/private/ab12.mp4", Filename: "clip.mp4", MIMEType: "video/mp4", DurationSeconds: 12.4, Width: 720, Height: 1280}
-	want := "what happens?\n\n[Video attached at: /private/ab12.mp4 ('clip.mp4', 0:12, 720×1280)]\n" + media.MotionRecipeNote
+	want := "what happens?\n\n[Video attached at: /private/ab12.mp4 ('clip.mp4', 0:12, 720×1280)]\n" + media.MediaRecipeNote
 	if got := BuildPrompt("what happens?", nil, nil, nil, []media.DocumentRef{video}); got != want {
 		t.Fatalf("prompt = %q, want %q", got, want)
 	}
 
 	gif := media.DocumentRef{Path: "/private/cd34.gif", Filename: "funny.gif", MIMEType: "image/gif", DurationSeconds: 3.2, Width: 480, Height: 270}
-	want = "[GIF attached at: /private/cd34.gif ('funny.gif', 0:03, 480×270)]\n" + media.MotionRecipeNote
+	want = "[GIF attached at: /private/cd34.gif ('funny.gif', 0:03, 480×270)]\n" + media.MediaRecipeNote
 	if got := BuildPrompt("", nil, nil, nil, []media.DocumentRef{gif}); got != want {
 		t.Fatalf("gif prompt = %q, want %q", got, want)
+	}
+
+	audio := media.DocumentRef{Path: "/private/ef12.m4a", Filename: "voice.m4a", MIMEType: "audio/mp4", Lane: media.LaneMedia, DurationSeconds: 7.2}
+	want = "[Audio attached at: /private/ef12.m4a ('voice.m4a', 0:07)]\n" + media.MediaRecipeNote
+	if got := BuildPrompt("", nil, nil, nil, []media.DocumentRef{audio}); got != want {
+		t.Fatalf("audio prompt = %q, want %q", got, want)
+	}
+
+	attachment := media.DocumentRef{Path: "/private/gh34.zip", Filename: "bundle.zip", MIMEType: "application/zip", Lane: media.LaneAttachment}
+	if got := BuildPrompt("", nil, nil, nil, []media.DocumentRef{attachment}); got != "[Attachment cached at: /private/gh34.zip ('bundle.zip')]" {
+		t.Fatalf("attachment prompt = %q", got)
 	}
 }
 

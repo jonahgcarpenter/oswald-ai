@@ -122,16 +122,16 @@ func combineImages(currentImages []llm.InputImage, currentUnsupported []string, 
 
 func combineDocuments(current []media.DocumentRef, reply *ReplyContext) []media.DocumentRef {
 	docs := make([]media.DocumentRef, 0, len(current))
-	files, motion := 0, 0
+	files, mediaRefs := 0, 0
 	accept := func(ref media.DocumentRef) bool {
 		if strings.TrimSpace(ref.Path) == "" {
 			return false
 		}
-		if ref.IsMotion() {
-			if motion >= media.MaxMotionPerRequest {
+		if ref.IsMedia() {
+			if mediaRefs >= media.MaxMediaPerRequest {
 				return false
 			}
-			motion++
+			mediaRefs++
 			return true
 		}
 		if files >= media.MaxDocumentsPerRequest {

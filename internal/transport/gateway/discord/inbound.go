@@ -114,28 +114,30 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 	}
 	images, unsupported := dg.loadImages(msg.Attachments, log)
 	embedImageCount := 0
-	var embedMotion []media.DocumentRef
+	var embedMedia []media.DocumentRef
 	if len(msg.Embeds) > 0 {
 		embedImages, embedDocs, embedUnsupported := dg.loadEmbedImagesLimit(msg.Embeds, media.MaxImagesPerRequest-len(images), principal.CanonicalUserID, log)
 		embedImageCount = len(embedImages)
-		embedMotion = embedDocs
+		embedMedia = embedDocs
 		images = append(images, embedImages...)
 		unsupported = append(unsupported, embedUnsupported...)
 	}
 	documents, docUnsupported := dg.loadDocuments(msg.Attachments, principal.CanonicalUserID, log)
-	documents = append(documents, embedMotion...)
+	documents = append(documents, embedMedia...)
 	unsupported = append(unsupported, docUnsupported...)
-	motion, motionUnsupported := dg.loadMotion(msg.Attachments, principal.CanonicalUserID, log)
-	documents = append(documents, motion...)
-	unsupported = append(unsupported, motionUnsupported...)
+	mediaRefs, mediaUnsupported := dg.loadMedia(msg.Attachments, principal.CanonicalUserID, log)
+	documents = append(documents, mediaRefs...)
+	unsupported = append(unsupported, mediaUnsupported...)
+	unsupported = dropAttachedLabels(unsupported, mediaRefs)
+	unsupported = compactAttachmentLabels(unsupported)
 	if len(msg.Attachments)+len(msg.Embeds) > 0 {
 		status := "ok"
 		if len(unsupported) > 0 {
 			status = "degraded"
 		}
-		log.Debug("gateway.attachment.processed", "normalized discord input attachments and embeds", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("accepted_document_count", len(documents)), config.F("accepted_motion_count", len(motion)), config.F("downgraded_document_count", len(docUnsupported)+len(motionUnsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("declared_embed_count", len(msg.Embeds)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
+		log.Debug("gateway.attachment.processed", "normalized discord input attachments and embeds", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("accepted_document_count", len(documents)), config.F("accepted_media_count", len(mediaRefs)), config.F("downgraded_document_count", len(docUnsupported)+len(mediaUnsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("declared_embed_count", len(msg.Embeds)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
 	}
-	if embedImageCount > 0 || len(embedMotion) > 0 {
+	if embedImageCount > 0 || len(embedMedia) > 0 {
 		text = stripEmbedURLsFromText(text, msg.Embeds)
 	}
 

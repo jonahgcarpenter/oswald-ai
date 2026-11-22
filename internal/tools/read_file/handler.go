@@ -74,8 +74,8 @@ func readFileCall(ctx context.Context, ws *workspace.Workspace, docs *docache.Ca
 		}
 		return governance.Result{}, err
 	}
-	if media.IsMotionExtension(abs) {
-		return governance.Result{}, errors.New("cannot read motion media — extract frames with terminal ffmpeg into cache/scratch, then vision_analyze the frames")
+	if media.IsMediaExtension(abs) {
+		return governance.Result{}, errors.New("cannot read media — extract frames with terminal ffmpeg into cache/scratch, then vision_analyze the frames")
 	}
 	data, err := workspace.ReadRegularFile(abs)
 	if err != nil {

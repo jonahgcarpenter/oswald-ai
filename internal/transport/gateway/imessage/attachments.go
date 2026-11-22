@@ -35,8 +35,8 @@ func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int, scope
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
-		if media.LooksLikeMotionMIME(attachment.MimeType) || media.IsMotionExtension(attachment.TransferName) {
-			continue // GIF/video attachments stay with the motion lane.
+		if media.LooksLikeMediaMIME(attachment.MimeType) || media.IsMediaExtension(attachment.TransferName) {
+			continue // GIF/video attachments stay with the media lane.
 		}
 		if len(images) >= maxImages {
 			if isDocumentCandidate(attachment.TransferName, attachment.MimeType) {
@@ -95,12 +95,12 @@ func attachmentLabels(attachments []attachment) []string {
 	return labels
 }
 
-// unsupportedImageLabels reports non-motion labels when the image lane is
-// closed; GIF/video attachments belong to the motion lane.
+// unsupportedImageLabels reports non-media labels when the image lane is
+// closed; GIF/video attachments belong to the media lane.
 func unsupportedImageLabels(attachments []attachment) []string {
 	labels := make([]string, 0, len(attachments))
 	for _, attachment := range attachments {
-		if media.LooksLikeMotionMIME(attachment.MimeType) || media.IsMotionExtension(attachment.TransferName) {
+		if media.LooksLikeMediaMIME(attachment.MimeType) || media.IsMediaExtension(attachment.TransferName) {
 			continue
 		}
 		labels = append(labels, media.AttachmentLabel(attachment.TransferName, attachment.MimeType))
@@ -108,10 +108,11 @@ func unsupportedImageLabels(attachments []attachment) []string {
 	return labels
 }
 
-// loadMotion downloads GIF and video attachments into the private motion
-// cache. Nothing is inlined: prompts carry the cache path plus best-effort
-// duration/dimensions, and the agent extracts frames with its own ffmpeg.
-func (g *Gateway) loadMotion(attachments []attachment, userID string, scoped ...*config.Logger) ([]media.DocumentRef, []string) {
+// loadMedia admits every raw inbound file into the private media cache:
+// GIF/video/audio for agent ffmpeg inspection, and a catch-all bucket for
+// everything the image and document lanes did not claim. Nothing is inlined:
+// prompts carry the cache path plus best-effort duration/dimensions.
+func (g *Gateway) loadMedia(attachments []attachment, userID string, scoped ...*config.Logger) ([]media.DocumentRef, []string) {
 	log := g.log(scoped...)
 	if len(attachments) == 0 {
 		return nil, nil
@@ -121,50 +122,61 @@ func (g *Gateway) loadMotion(attachments []attachment, userID string, scoped ...
 	total := 0
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
-		if !media.LooksLikeMotionMIME(attachment.MimeType) && !media.IsMotionExtension(attachment.TransferName) {
+		av := media.LooksLikeMediaMIME(attachment.MimeType) || media.IsMediaExtension(attachment.TransferName)
+		if !av && !mediaCatchAll(attachment.TransferName, attachment.MimeType) {
 			continue
 		}
-		if len(refs) >= media.MaxMotionPerRequest {
+		if len(refs) >= media.MaxMediaPerRequest {
 			unsupported = append(unsupported, label)
 			continue
 		}
-		if attachment.TotalBytes > media.MaxMotionBytes {
+		if attachment.TotalBytes > media.MaxMediaBytes {
 			unsupported = append(unsupported, label)
 			continue
 		}
-		if total+attachment.TotalBytes > media.MaxTotalMotionBytes {
+		if total+attachment.TotalBytes > media.MaxTotalMediaBytes {
 			unsupported = append(unsupported, label)
 			continue
 		}
-		if g.MotionCache == nil {
+		if g.MediaCache == nil {
 			unsupported = append(unsupported, label)
 			continue
 		}
-		data, err := g.fetchMotionBytes(attachment)
+		data, err := g.fetchMediaBytes(attachment)
 		if err != nil {
-			log.Debug("gateway.motion.rejected", "rejected imessage motion media", config.F("status", "degraded"))
+			log.Debug("gateway.media.rejected", "rejected imessage media", config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
 		total += len(data)
-		if total > media.MaxTotalMotionBytes {
+		if total > media.MaxTotalMediaBytes {
 			unsupported = append(unsupported, label)
 			continue
 		}
-		name, mime, err := media.SniffMotion(attachment.TransferName, attachment.MimeType, data)
+		lane := media.LaneAttachment
+		var name, mime string
+		if av {
+			lane = media.LaneMedia
+			name, mime, err = media.SniffMedia(attachment.TransferName, attachment.MimeType, data)
+		} else {
+			name, mime, err = media.SniffAttachment(attachment.TransferName, attachment.MimeType, data)
+		}
 		if err != nil {
-			log.Debug("gateway.motion.rejected", "rejected imessage motion media", config.F("status", "degraded"))
+			log.Debug("gateway.media.rejected", "rejected imessage media", config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
-		path, err := g.MotionCache.Save(context.Background(), userID, name, data)
+		path, err := g.MediaCache.Save(context.Background(), userID, name, data)
 		if err != nil {
-			log.Debug("gateway.motion.rejected", "rejected imessage motion media", config.F("status", "degraded"))
+			log.Debug("gateway.media.rejected", "rejected imessage media", config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
-		duration, width, height := media.ProbeMotion(context.Background(), "", path)
-		refs = append(refs, media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data)), DurationSeconds: duration, Width: width, Height: height})
+		ref := media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data)), Lane: lane}
+		if av {
+			ref.DurationSeconds, ref.Width, ref.Height = media.ProbeMedia(context.Background(), "", path)
+		}
+		refs = append(refs, ref)
 	}
 	if len(refs) == 0 {
 		return nil, unsupported
@@ -172,7 +184,21 @@ func (g *Gateway) loadMotion(attachments []attachment, userID string, scoped ...
 	return refs, unsupported
 }
 
-func (g *Gateway) fetchMotionBytes(attachment attachment) ([]byte, error) {
+// mediaCatchAll reports whether an attachment belongs to the catch-all raw
+// bucket: not claimed by the image lane (declared image MIME or an image
+// extension hint) and not an extractable document.
+func mediaCatchAll(filename, contentType string) bool {
+	if contentType != "" {
+		if media.LooksLikeImageMIME(contentType) {
+			return false
+		}
+	} else if media.LooksLikeImageExtension(filename) {
+		return false
+	}
+	return !isDocumentCandidate(filename, contentType)
+}
+
+func (g *Gateway) fetchMediaBytes(attachment attachment) ([]byte, error) {
 	if strings.TrimSpace(attachment.GUID) == "" {
 		return nil, fmt.Errorf("attachment GUID is empty")
 	}
@@ -192,12 +218,12 @@ func (g *Gateway) fetchMotionBytes(attachment attachment) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("download BlueBubbles attachment failed with status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxMotionBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxMediaBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read BlueBubbles attachment: %w", err)
 	}
-	if len(body) > media.MaxMotionBytes {
-		return nil, fmt.Errorf("attachment exceeds %d bytes", media.MaxMotionBytes)
+	if len(body) > media.MaxMediaBytes {
+		return nil, fmt.Errorf("attachment exceeds %d bytes", media.MaxMediaBytes)
 	}
 	if len(body) == 0 {
 		return nil, fmt.Errorf("attachment is empty")
@@ -448,4 +474,19 @@ func (g *Gateway) postCommandAttachment(chatGUID, selectedMessageGUID string, at
 		return "", fmt.Errorf("decode BlueBubbles attachment response: %w", err)
 	}
 	return result.Data.GUID, nil
+}
+
+// compactAttachmentLabels keeps one label per file: lanes that all declined
+// the same attachment never inflate the reported count.
+func compactAttachmentLabels(labels []string) []string {
+	seen := make(map[string]struct{}, len(labels))
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	return out
 }

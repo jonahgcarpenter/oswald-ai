@@ -9,11 +9,11 @@ import (
 )
 
 // SweepHook registers the cache sweep on the shared per-profile cleanup
-// worker. Documents and motion media register separate hooks.
+// worker. Documents and media register separate hooks.
 func SweepHook(c *Cache, log *config.Logger) prune.Hook {
 	name := "documents"
-	if c != nil && c.kind == kindMotion {
-		name = "motion"
+	if c != nil && c.kind == kindMedia {
+		name = "media"
 	}
 	return prune.Hook{
 		Name:            name,

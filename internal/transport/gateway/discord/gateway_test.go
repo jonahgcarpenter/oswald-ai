@@ -1119,7 +1119,7 @@ func TestDiscordMixedEmbedsStripOnlyDirectMediaURL(t *testing.T) {
 	}
 }
 
-func TestDiscordGIFVEmbedCachesMotion(t *testing.T) {
+func TestDiscordGIFVEmbedCachesMedia(t *testing.T) {
 	videoPayload := []byte("mock mp4")
 	requestedThumbnail := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1135,9 +1135,9 @@ func TestDiscordGIFVEmbedCachesMotion(t *testing.T) {
 	}))
 	defer server.Close()
 	dg := &Gateway{
-		HTTPClient:  server.Client(),
-		MotionCache: docache.NewMotion(t.TempDir()),
-		Log:         config.NewLogger(config.LevelError),
+		HTTPClient: server.Client(),
+		MediaCache: docache.NewMedia(t.TempDir()),
+		Log:        config.NewLogger(config.LevelError),
 	}
 	embed := Embed{
 		Type:      "gifv",
@@ -1145,15 +1145,15 @@ func TestDiscordGIFVEmbedCachesMotion(t *testing.T) {
 		Thumbnail: EmbedImage{ProxyURL: server.URL + "/thumbnail.jpg"},
 	}
 
-	images, motion, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1, "alice")
-	if len(images) != 0 || len(motion) != 1 || len(unsupported) != 0 {
-		t.Fatalf("images=%d motion=%d unsupported=%v", len(images), len(motion), unsupported)
+	images, mediaRefs, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1, "alice")
+	if len(images) != 0 || len(mediaRefs) != 1 || len(unsupported) != 0 {
+		t.Fatalf("images=%d media=%d unsupported=%v", len(images), len(mediaRefs), unsupported)
 	}
-	if motion[0].MIMEType != "video/mp4" || motion[0].Path == "" || motion[0].Size != int64(len(videoPayload)) {
-		t.Fatalf("motion ref = %+v", motion[0])
+	if mediaRefs[0].MIMEType != "video/mp4" || mediaRefs[0].Path == "" || mediaRefs[0].Size != int64(len(videoPayload)) {
+		t.Fatalf("media ref = %+v", mediaRefs[0])
 	}
 	if requestedThumbnail {
-		t.Fatal("static thumbnail was requested after successful motion caching")
+		t.Fatal("static thumbnail was requested after successful media caching")
 	}
 }
 
@@ -1182,9 +1182,9 @@ func TestDiscordGIFVEmbedFallsBackToStaticThumbnail(t *testing.T) {
 		Thumbnail: EmbedImage{URL: server.URL + "/thumbnail.jpg"},
 	}
 
-	images, motion, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1, "alice")
-	if len(images) != 1 || len(motion) != 0 || len(unsupported) != 0 || !requestedThumbnail {
-		t.Fatalf("images=%d motion=%d unsupported=%v thumbnail_requested=%t", len(images), len(motion), unsupported, requestedThumbnail)
+	images, mediaRefs, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1, "alice")
+	if len(images) != 1 || len(mediaRefs) != 0 || len(unsupported) != 0 || !requestedThumbnail {
+		t.Fatalf("images=%d media=%d unsupported=%v thumbnail_requested=%t", len(images), len(mediaRefs), unsupported, requestedThumbnail)
 	}
 }
 
@@ -1452,22 +1452,44 @@ func discordMessage(id, channelID, guildID, authorID, username, content string) 
 	return msg
 }
 
-func TestDiscordMotionAttachmentCachesRaw(t *testing.T) {
+func TestDiscordMediaAttachmentCachesRaw(t *testing.T) {
 	payload := []byte("synthetic video bytes")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(payload)
 	}))
 	defer server.Close()
-	dg := &Gateway{HTTPClient: server.Client(), MotionCache: docache.NewMotion(t.TempDir()), Log: config.NewLogger(config.LevelError)}
-	refs, unsupported := dg.loadMotion([]Attachment{{Filename: "clip.mp4", ContentType: "video/mp4", URL: server.URL + "/clip.mp4", Size: len(payload)}}, "alice")
+	dg := &Gateway{HTTPClient: server.Client(), MediaCache: docache.NewMedia(t.TempDir()), Log: config.NewLogger(config.LevelError)}
+	refs, unsupported := dg.loadMedia([]Attachment{{Filename: "clip.mp4", ContentType: "video/mp4", URL: server.URL + "/clip.mp4", Size: len(payload)}}, "alice")
 	if len(refs) != 1 || len(unsupported) != 0 {
 		t.Fatalf("refs=%d unsupported=%v", len(refs), unsupported)
 	}
 	if refs[0].MIMEType != "video/mp4" || refs[0].Size != int64(len(payload)) || !strings.HasSuffix(refs[0].Path, ".mp4") {
 		t.Fatalf("ref = %+v", refs[0])
 	}
-	oversized := Attachment{Filename: "big.mp4", ContentType: "video/mp4", URL: server.URL + "/big.mp4", Size: media.MaxMotionBytes + 1}
-	if _, unsupported := dg.loadMotion([]Attachment{oversized}, "alice"); len(unsupported) != 1 {
+	oversized := Attachment{Filename: "big.mp4", ContentType: "video/mp4", URL: server.URL + "/big.mp4", Size: media.MaxMediaBytes + 1}
+	if _, unsupported := dg.loadMedia([]Attachment{oversized}, "alice"); len(unsupported) != 1 {
 		t.Fatalf("oversize unsupported = %v", unsupported)
+	}
+}
+
+func TestDiscordMediaLaneAcceptsAudioAndCatchAll(t *testing.T) {
+	payload := []byte("PK\x03\x04 synthetic")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	dg := &Gateway{HTTPClient: server.Client(), MediaCache: docache.NewMedia(t.TempDir()), Log: config.NewLogger(config.LevelError)}
+	refs, unsupported := dg.loadMedia([]Attachment{
+		{Filename: "voice.m4a", ContentType: "audio/mp4", URL: server.URL + "/voice", Size: len(payload)},
+		{Filename: "bundle.zip", ContentType: "application/zip", URL: server.URL + "/zip", Size: len(payload)},
+	}, "alice")
+	if len(refs) != 2 || len(unsupported) != 0 {
+		t.Fatalf("refs=%d unsupported=%v", len(refs), unsupported)
+	}
+	if refs[0].Lane != media.LaneMedia || refs[0].MIMEType != "audio/mp4" {
+		t.Fatalf("audio ref = %+v", refs[0])
+	}
+	if refs[1].Lane != media.LaneAttachment || refs[1].MIMEType != "application/zip" {
+		t.Fatalf("catch-all ref = %+v", refs[1])
 	}
 }

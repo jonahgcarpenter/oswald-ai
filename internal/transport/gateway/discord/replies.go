@@ -75,18 +75,18 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 			} else {
 				reply.Unsupported = unsupportedImageLabels(cached.Attachments)
 			}
-			if motion, motionUnsupported := dg.loadMotion(cached.Attachments, userID, log); len(motion) > 0 || len(motionUnsupported) > 0 {
-				reply.Documents = append(reply.Documents, motion...)
-				reply.Unsupported = append(reply.Unsupported, motionUnsupported...)
+			if mediaRefs, mediaUnsupported := dg.loadMedia(cached.Attachments, userID, log); len(mediaRefs) > 0 || len(mediaUnsupported) > 0 {
+				reply.Documents = append(reply.Documents, mediaRefs...)
+				reply.Unsupported = append(reply.Unsupported, mediaUnsupported...)
 			}
 		}
 		if len(cached.Embeds) > 0 {
 			remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
-			embedImages, embedMotion, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots, userID, log)
+			embedImages, embedMedia, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots, userID, log)
 			reply.Images = append(reply.Images, embedImages...)
-			reply.Documents = append(reply.Documents, embedMotion...)
+			reply.Documents = append(reply.Documents, embedMedia...)
 			reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
-			if len(embedImages) > 0 || len(embedMotion) > 0 {
+			if len(embedImages) > 0 || len(embedMedia) > 0 {
 				reply.Text = stripEmbedURLsFromText(reply.Text, cached.Embeds)
 			}
 		}
@@ -111,18 +111,18 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 		} else {
 			reply.Unsupported = unsupportedImageLabels(referenced.Attachments)
 		}
-		if motion, motionUnsupported := dg.loadMotion(referenced.Attachments, userID, log); len(motion) > 0 || len(motionUnsupported) > 0 {
-			reply.Documents = append(reply.Documents, motion...)
-			reply.Unsupported = append(reply.Unsupported, motionUnsupported...)
+		if mediaRefs, mediaUnsupported := dg.loadMedia(referenced.Attachments, userID, log); len(mediaRefs) > 0 || len(mediaUnsupported) > 0 {
+			reply.Documents = append(reply.Documents, mediaRefs...)
+			reply.Unsupported = append(reply.Unsupported, mediaUnsupported...)
 		}
 	}
 	if len(referenced.Embeds) > 0 {
 		remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
-		embedImages, embedMotion, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots, userID, log)
+		embedImages, embedMedia, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots, userID, log)
 		reply.Images = append(reply.Images, embedImages...)
-		reply.Documents = append(reply.Documents, embedMotion...)
+		reply.Documents = append(reply.Documents, embedMedia...)
 		reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
-		if len(embedImages) > 0 || len(embedMotion) > 0 {
+		if len(embedImages) > 0 || len(embedMedia) > 0 {
 			reply.Text = stripEmbedURLsFromText(reply.Text, referenced.Embeds)
 		}
 	}
@@ -141,18 +141,18 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 				} else {
 					reply.Unsupported = unsupportedImageLabels(fetched.Attachments)
 				}
-				if motion, motionUnsupported := dg.loadMotion(fetched.Attachments, userID, log); len(motion) > 0 || len(motionUnsupported) > 0 {
-					reply.Documents = append(reply.Documents, motion...)
-					reply.Unsupported = append(reply.Unsupported, motionUnsupported...)
+				if mediaRefs, mediaUnsupported := dg.loadMedia(fetched.Attachments, userID, log); len(mediaRefs) > 0 || len(mediaUnsupported) > 0 {
+					reply.Documents = append(reply.Documents, mediaRefs...)
+					reply.Unsupported = append(reply.Unsupported, mediaUnsupported...)
 				}
 			}
 			if len(fetched.Embeds) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
-				embedImages, embedMotion, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots, userID, log)
+				embedImages, embedMedia, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots, userID, log)
 				reply.Images = append(reply.Images, embedImages...)
-				reply.Documents = append(reply.Documents, embedMotion...)
+				reply.Documents = append(reply.Documents, embedMedia...)
 				reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
-				if len(embedImages) > 0 || len(embedMotion) > 0 {
+				if len(embedImages) > 0 || len(embedMedia) > 0 {
 					reply.Text = stripEmbedURLsFromText(reply.Text, fetched.Embeds)
 				}
 			}
