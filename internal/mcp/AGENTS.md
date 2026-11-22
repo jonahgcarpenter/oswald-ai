@@ -10,7 +10,8 @@ sees; `naming.go` parses `mcp__<server>__<remote>` qualified names (legacy `serv
 resolve for history attribution only, never for execution); `schema.go` projects remote schemas;
 `result.go` flattens results within rune bounds; `profile_configuration.go` / `validate.go` /
 `http_transport.go` enforce the server config rules; `stdio_resolve.go` resolves `npx -y <pkg>`
-to the installed npm-cache binary (conservative fallback to plain `npx` so cold machines still
+to the installed npm-cache binary, checking the acting profile's `~/.npm` before the
+service process cache (conservative fallback to plain `npx` so cold machines still
 install) and names missing stdio binaries per server. `oauth*.go` implement discovery, browser and
 device flows, and the token store with cross-process refresh fencing.
 

@@ -98,12 +98,12 @@ func TestExecuteCodeSetsOswaldHome(t *testing.T) {
 	}
 }
 
-func TestExecuteCodeHomeAndCacheAreProfileRooted(t *testing.T) {
+func TestExecuteCodeHomeAndUserInstallEnv(t *testing.T) {
 	_, alice, _ := profilePair(t)
 	ws := workspace.NewWorkspace(alice, "alice")
 	exec := NewExecuteCodeHandler(ws)
 	res, err := exec(testContext("req-home2"), map[string]interface{}{
-		"code": "import os; print(os.environ.get('HOME', '')); print(os.environ.get('XDG_CACHE_HOME', '')); print(os.environ.get('OSWALD_WORKSPACE', 'absent'))",
+		"code": "import os; print(os.environ.get('HOME', '')); print(os.environ.get('npm_config_prefix', '')); print(os.environ.get('XDG_CACHE_HOME', 'absent')); print(os.environ.get('OSWALD_WORKSPACE', 'absent'))",
 	})
 	if err != nil {
 		t.Fatalf("execute_code failed: %v", err)
@@ -111,11 +111,11 @@ func TestExecuteCodeHomeAndCacheAreProfileRooted(t *testing.T) {
 	if !strings.Contains(res.Content, alice+"\n") {
 		t.Fatalf("HOME missing profile root: %q", res.Content)
 	}
-	if !strings.Contains(res.Content, filepath.Join(alice, "cache", "xdg")) {
-		t.Fatalf("XDG_CACHE_HOME missing: %q", res.Content)
+	if !strings.Contains(res.Content, filepath.Join(alice, ".local")+"\n") {
+		t.Fatalf("npm_config_prefix missing: %q", res.Content)
 	}
-	if !strings.Contains(res.Content, "absent") {
-		t.Fatalf("legacy OSWALD_WORKSPACE still set: %q", res.Content)
+	if strings.Count(res.Content, "absent") != 2 {
+		t.Fatalf("legacy vars still set: %q", res.Content)
 	}
 }
 

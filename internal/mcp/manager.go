@@ -253,7 +253,7 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 	var session *gomcp.ClientSession
 	var closeFn func() error
 	if strings.TrimSpace(cfg.Command) != "" {
-		session, closeFn, err = connectStdio(ctx, cfg)
+		session, closeFn, err = connectStdio(ctx, cfg, m.profileRoot)
 	} else {
 		if _, err := parseAndValidateURL(ctx, cfg.URL, m.resolver); err != nil {
 			m.rememberError(key, cfg, generation, err)
@@ -380,7 +380,7 @@ func connectSSE(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, fu
 	return session, closeFn, nil
 }
 
-func connectStdio(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
+func connectStdio(ctx context.Context, cfg ServerConfig, profileRoot string) (*gomcp.ClientSession, func() error, error) {
 	command := strings.TrimSpace(cfg.Command)
 	if command == "" {
 		return nil, nil, fmt.Errorf("MCP stdio server %q has no command", cfg.Name)
@@ -389,7 +389,7 @@ func connectStdio(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, 
 	// A cached npx package spawns its binary directly instead of keeping an
 	// npx parent resident per server; a miss keeps plain npx.
 	if launcherBase(command) == "npx" {
-		if bin, rest := npxCachedBin(cfg.Args); bin != "" {
+		if bin, rest := npxCachedBin(cfg.Args, profileRoot); bin != "" {
 			command, stdioArgs = bin, rest
 		}
 	}

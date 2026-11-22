@@ -58,7 +58,7 @@ func TestConnectStdioRoundTrip(t *testing.T) {
 	cfg := ServerConfig{Name: "local", Transport: TransportStdio, Command: helper.Path, Args: helper.Args[1:], Env: map[string]string{"OSWALD_TEST_STDIO_HELPER": "1"}, Enabled: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	session, closeFn, err := connectStdio(ctx, cfg)
+	session, closeFn, err := connectStdio(ctx, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestConnectStdioRoundTrip(t *testing.T) {
 func TestConnectStdioRejectsMissingCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "oswald-definitely-missing-binary"})
+	_, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "oswald-definitely-missing-binary"}, "")
 	if err == nil {
 		t.Fatal("missing stdio command accepted")
 	}
@@ -99,7 +99,7 @@ func TestConnectStdioRejectsMissingCommand(t *testing.T) {
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("missing stdio error must wrap exec.ErrNotFound: %v", err)
 	}
-	if _, _, err := connectStdio(ctx, ServerConfig{Name: "local"}); err == nil {
+	if _, _, err := connectStdio(ctx, ServerConfig{Name: "local"}, ""); err == nil {
 		t.Fatal("empty stdio command accepted")
 	}
 }

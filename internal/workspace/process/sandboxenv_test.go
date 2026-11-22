@@ -84,54 +84,46 @@ func TestSandboxEnvOnlyAllowlisted(t *testing.T) {
 	}
 }
 
-func TestWithNodeOnPath(t *testing.T) {
-	base := []string{"PATH=/usr/bin:/bin", "HOME=/nowhere"}
-	out := WithNodeOnPath(base)
-	if len(out) != len(base) || out[1] != "HOME=/nowhere" {
-		t.Fatalf("base mutated: %q", out)
+func TestSandboxPath(t *testing.T) {
+	profile := filepath.Join("tmp", ".oswald", "profiles", "alice")
+	parts := strings.Split(SandboxPath(profile), string(os.PathListSeparator))
+	if len(parts) < 6 {
+		t.Fatalf("path too short: %q", parts)
 	}
-	found := false
-	for _, entry := range out {
-		if strings.HasPrefix(entry, "PATH=") {
-			found = true
-			if !strings.Contains(entry, "/usr/bin:/bin") {
-				t.Fatalf("base PATH lost: %q", entry)
-			}
+	// User installs come first, Ubuntu-style.
+	if parts[0] != filepath.Join(profile, ".local", "bin") {
+		t.Fatalf("first entry = %q", parts[0])
+	}
+	if parts[1] != filepath.Join(profile, ".cargo", "bin") {
+		t.Fatalf("second entry = %q", parts[1])
+	}
+	joined := "|" + strings.Join(parts, "|") + "|"
+	for _, want := range []string{"/opt/oswald", "/usr/bin", "/bin", "/usr/local/bin"} {
+		if !strings.Contains(joined, "|"+want+"|") {
+			t.Fatalf("missing %q in %q", want, joined)
 		}
 	}
-	if !found {
-		t.Fatal("PATH entry missing")
+	// go/bin and the curated shims close the list.
+	if parts[len(parts)-2] != filepath.Join(profile, "go", "bin") {
+		t.Fatalf("go/bin not second to last: %q", parts)
 	}
-	// Idempotent: a second pass never stacks another prefix.
-	again := WithNodeOnPath(out)
-	if len(again) != len(out) {
-		t.Fatalf("not idempotent: %q", again)
+	if parts[len(parts)-1] != filepath.Join(profile, "plugins", ".bin") {
+		t.Fatalf("shim dir not last: %q", parts)
 	}
-}
-
-func TestWithPluginShimsOnPath(t *testing.T) {
-	profile := filepath.Join("tmp", ".oswald")
-	base := []string{"PATH=/opt/oswald:/usr/bin:/bin", "HOME=/nowhere"}
-	out := WithPluginShimsOnPath(WithNodeOnPath(base), profile)
-	var pathLine string
-	for _, entry := range out {
-		if strings.HasPrefix(entry, "PATH=") {
-			pathLine = entry
+	// First occurrence wins; nothing repeats (the node dir may coincide with
+	// a system dir).
+	seen := map[string]bool{}
+	for _, part := range parts {
+		if seen[part] {
+			t.Fatalf("duplicate entry %q in %q", part, parts)
 		}
+		seen[part] = true
 	}
-	want := filepath.Join(profile, "plugins", ".bin")
-	if !strings.HasSuffix(pathLine, string(os.PathListSeparator)+want) {
-		t.Fatalf("shim dir not appended at end: %q", pathLine)
-	}
-	if !strings.Contains(pathLine, "/opt/oswald:/usr/bin:/bin") {
-		t.Fatalf("base PATH lost: %q", pathLine)
-	}
-	// Idempotent and empty-root safe.
-	if again := WithPluginShimsOnPath(out, profile); len(again) != len(out) {
-		t.Fatalf("not idempotent: %q", again)
-	}
-	if same := WithPluginShimsOnPath(base, ""); len(same) != len(base) {
-		t.Fatalf("empty root changed base: %q", same)
+	// An empty root keeps the machine PATH without profile entries.
+	for _, part := range strings.Split(SandboxPath(""), string(os.PathListSeparator)) {
+		if strings.Contains(part, ".local") || strings.Contains(part, ".cargo") || strings.Contains(part, "plugins") {
+			t.Fatalf("profile entry without a root: %q", part)
+		}
 	}
 }
 

@@ -30,7 +30,7 @@ func TestSpawnUsesProfileHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := NewManager(root)
-	info, err := m.Spawn("req-env", `printf '%s|%s|%s|%s' "$HOME" "$OSWALD_HOME" "$XDG_CACHE_HOME" "$PATH"`, root, filepath.Join(root, "cache", "scratch"), 30)
+	info, err := m.Spawn("req-env", `printf '%s|%s|%s|%s|%s' "$HOME" "$OSWALD_HOME" "$npm_config_prefix" "${PATH%%:*}" "$PATH"`, root, filepath.Join(root, "cache", "scratch"), 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestSpawnUsesProfileHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := root + "|" + root + "|" + filepath.Join(root, "cache", "xdg") + "|"
+	want := root + "|" + root + "|" + filepath.Join(root, ".local") + "|" + filepath.Join(root, ".local", "bin") + "|"
 	if !strings.Contains(tail, want) {
 		t.Fatalf("background env = %q, want prefix %q", tail, want)
 	}

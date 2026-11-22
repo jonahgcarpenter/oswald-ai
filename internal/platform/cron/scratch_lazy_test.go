@@ -70,7 +70,7 @@ func TestRunScriptFileAlignsEnvWithTerminal(t *testing.T) {
 	if err := os.MkdirAll(scripts, 0700); err != nil {
 		t.Fatal(err)
 	}
-	body := "#!/bin/sh\nprintf '%s|%s|%s|%s|%s' \"$HOME\" \"$OSWALD_HOME\" \"$XDG_CACHE_HOME\" \"$PATH\" \"$OSWALD_WORKSPACE\"\n"
+	body := "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s' \"$HOME\" \"$OSWALD_HOME\" \"$npm_config_prefix\" \"${PATH%%:*}\" \"$OSWALD_WORKSPACE\" \"$PATH\"\n"
 	if err := os.WriteFile(filepath.Join(scripts, "env.sh"), []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -80,14 +80,11 @@ func TestRunScriptFileAlignsEnvWithTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("script failed: %v", err)
 	}
-	prefix := root + "|" + root + "|" + filepath.Join(root, "cache", "xdg") + "|"
-	if !strings.HasPrefix(out, prefix) {
-		t.Fatalf("cron env = %q, want prefix %q", out, prefix)
+	prefix := root + "|" + root + "|" + filepath.Join(root, ".local") + "|" + filepath.Join(root, ".local", "bin") + "|"
+	if !strings.HasPrefix(out, prefix+"|") {
+		t.Fatalf("cron env = %q, want prefix %q (with empty OSWALD_WORKSPACE)", out, prefix+"|")
 	}
 	if !strings.Contains(out, "/opt/oswald") {
 		t.Fatalf("cron PATH missing /opt/oswald: %q", out)
-	}
-	if !strings.HasSuffix(out, "|") {
-		t.Fatalf("legacy OSWALD_WORKSPACE still set: %q", out)
 	}
 }

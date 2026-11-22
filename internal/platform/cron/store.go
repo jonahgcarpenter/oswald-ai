@@ -637,14 +637,17 @@ func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int)
 	if r != nil && r.Root != "" {
 		cmd.Dir = r.Root
 	}
-	env := []string{"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8"}
+	profileRoot := ""
+	if r != nil {
+		profileRoot = r.Root
+	}
+	env := []string{"PATH=" + process.SandboxPath(profileRoot), "LANG=C.UTF-8"}
 	if r != nil {
 		if r.Root != "" {
 			env = append(env,
 				"HOME="+r.Root,
 				"OSWALD_HOME="+r.Root,
-				"XDG_CACHE_HOME="+filepath.Join(r.Root, "cache", "xdg"),
-				"npm_config_cache="+filepath.Join(r.Root, "cache", "npm"),
+				"npm_config_prefix="+filepath.Join(r.Root, ".local"),
 			)
 		}
 		if r.Scratch != "" {
@@ -652,7 +655,6 @@ func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int)
 			env = append(env, "TMPDIR="+r.Scratch)
 		}
 		if r.Root != "" {
-			env = process.WithPluginShimsOnPath(process.WithNodeOnPath(env), r.Root)
 			env = process.SandboxEnvForProfile(env, r.Root)
 			env = append(env, process.GitHubTokenEnv()...)
 		}

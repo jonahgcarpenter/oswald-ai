@@ -57,12 +57,13 @@ environment: see Sandbox environment below.
 ## Sandbox environment (terminal, execute_code, background)
 
 `runShell`, `execute_code`, `process.Manager.Spawn`, and cron script runs share one fixed
-base (`PATH` with `/opt/oswald` plus the server-resolved node dir and the profile shim dir,
-`HOME` set to the profile root, `LANG`, `TMPDIR`, `OSWALD_HOME`,
-`XDG_CACHE_HOME`/`npm_config_cache` under `<root>/cache/`, plus allowlisted
-`GH_TOKEN`/`GITHUB_TOKEN`) plus a deny-by-default passthrough allowlist resolved against the
-acting profile's own dotenv pair (global overlaid with the profile's own; `os.Getenv`
-fallback only for declared names). Three sources register names:
+base: `PATH` from `SandboxPath` (profile `.local/bin` and `.cargo/bin` first, then the
+server-resolved node dir, `/opt/oswald`, system dirs, profile `go/bin`, and the profile
+shim dir last), `HOME` set to the profile root, `LANG`, `TMPDIR`, `OSWALD_HOME`,
+`npm_config_prefix` at `<root>/.local`, plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN`, plus a
+deny-by-default passthrough allowlist resolved against the acting profile's own dotenv pair
+(global overlaid with the profile's own; `os.Getenv` fallback only for declared names).
+Three sources register names:
 skill frontmatter `required_env` (on `skill_view`), operator config
 `tools.terminal.env_passthrough` (per profile, restart to apply, staged validation), and
 installed plugins' manifest `requires_env` (automatic on load) — see
@@ -72,10 +73,14 @@ installed plugins' manifest `requires_env` (automatic on load) — see
 Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`,
 `OSWALD_*`) can never tunnel into a sandbox; `ResolveEnvValue` skips refused and empty
 names silently. Values resolve per profile at spawn time and are never logged — only
-names and counts. `terminal`, `execute_code`, and background processes gain exactly one
-fixed `PATH` entry — `<profile>/plugins/.bin` — so installed plugin CLIs run by bare
-name; each shim sets `HOME` to its plugin's `data/home`, with API keys arriving
-through passthrough, not the command line.
+names and counts. The fixed `SandboxPath` gives every surface the same Ubuntu-style
+user land: `<profile>/.local/bin` and `.cargo/bin` first (curl, `npm -g`, `pip --user`,
+and cargo installs run by bare name), the node dir, `/opt/oswald`, system dirs, profile
+`go/bin`, and `<profile>/plugins/.bin` last for curated plugin CLIs; each shim sets `HOME`
+to its plugin's `data/home`, with API keys arriving through passthrough, not the command
+line. `npm_config_prefix` keeps global npm installs inside `~/.local`; npm's cache and
+`npx` (`~/.npm`) and other tool caches (`~/.cache`) stay native and persistent under the
+profile root — only Oswald-managed `cache/` artifacts are pruned.
 
 `~` and `$HOME` name the acting profile root on every surface — file tools, shell text
 scans, runtime expansion, and cron scripts. The true OS home is outside the workspace:

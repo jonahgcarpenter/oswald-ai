@@ -48,7 +48,7 @@ func TestNpxCachedBinHit(t *testing.T) {
 		`{"bin":{"serve":"./dist/index.js"}}`)
 	bin := filepath.Join(entry, "node_modules", ".bin", "serve")
 	writeCacheBin(t, bin)
-	got, rest := npxCachedBin([]string{"-y", "@scope/server", "--port", "1"})
+	got, rest := npxCachedBin([]string{"-y", "@scope/server", "--port", "1"}, "")
 	if got != bin {
 		t.Fatalf("npxCachedBin = %q, want %q", got, bin)
 	}
@@ -66,7 +66,7 @@ func TestNpxCachedBinStringBin(t *testing.T) {
 		`{"bin":"./dist/index.js"}`)
 	bin := filepath.Join(entry, "node_modules", ".bin", "server")
 	writeCacheBin(t, bin)
-	got, rest := npxCachedBin([]string{"--yes", "server"})
+	got, rest := npxCachedBin([]string{"--yes", "server"}, "")
 	if got != bin || len(rest) != 0 {
 		t.Fatalf("npxCachedBin = %q %+v, want %q []", got, rest, bin)
 	}
@@ -89,7 +89,7 @@ func TestNpxCachedBinMiss(t *testing.T) {
 		{"-y", "./local/server"},
 		{"-y", "uninstalled"},
 	} {
-		if got, _ := npxCachedBin(args); got != "" {
+		if got, _ := npxCachedBin(args, ""); got != "" {
 			t.Fatalf("npxCachedBin(%+v) = %q, want miss", args, got)
 		}
 	}
@@ -102,7 +102,35 @@ func TestNpxCachedBinAmbiguousManifest(t *testing.T) {
 	writeCacheJSON(t, filepath.Join(entry, "package.json"), `{"dependencies":{"server":"*"}}`)
 	writeCacheJSON(t, filepath.Join(entry, "node_modules", "server", "package.json"),
 		`{"bin":{"a":"./a.js","b":"./b.js"}}`)
-	if got, _ := npxCachedBin([]string{"-y", "server"}); got != "" {
+	if got, _ := npxCachedBin([]string{"-y", "server"}, ""); got != "" {
 		t.Fatalf("multi-bin manifest must miss, got %q", got)
+	}
+}
+
+func TestNpxCachedBinPrefersProfileRoot(t *testing.T) {
+	serverCache := t.TempDir()
+	t.Setenv("npm_config_cache", serverCache)
+	profile := t.TempDir()
+
+	// Only the profile cache holds the package: resolution must find it.
+	profileEntry := filepath.Join(profile, ".npm", "_npx", "profile123")
+	writeCacheJSON(t, filepath.Join(profileEntry, "package.json"), `{"dependencies":{"server":"*"}}`)
+	writeCacheJSON(t, filepath.Join(profileEntry, "node_modules", "server", "package.json"),
+		`{"bin":"./dist/index.js"}`)
+	profileBin := filepath.Join(profileEntry, "node_modules", ".bin", "server")
+	writeCacheBin(t, profileBin)
+	if got, _ := npxCachedBin([]string{"-y", "server"}, profile); got != profileBin {
+		t.Fatalf("profile cache not preferred: got %q, want %q", got, profileBin)
+	}
+
+	// A profile miss still falls through to the server cache.
+	serverEntry := filepath.Join(serverCache, "_npx", "server456")
+	writeCacheJSON(t, filepath.Join(serverEntry, "package.json"), `{"dependencies":{"other":"*"}}`)
+	writeCacheJSON(t, filepath.Join(serverEntry, "node_modules", "other", "package.json"),
+		`{"bin":"./bin.js"}`)
+	serverBin := filepath.Join(serverEntry, "node_modules", ".bin", "other")
+	writeCacheBin(t, serverBin)
+	if got, _ := npxCachedBin([]string{"-y", "other"}, profile); got != serverBin {
+		t.Fatalf("server cache fallback failed: got %q, want %q", got, serverBin)
 	}
 }

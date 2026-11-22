@@ -32,15 +32,14 @@ func runShell(ctx context.Context, command, dir, scratch, home string, timeoutSe
 	cmd := exec.CommandContext(runCtx, shell, "-c", command)
 	cmd.Dir = dir
 	base := []string{
-		"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
+		"PATH=" + process.SandboxPath(home),
 		"HOME=" + home,
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,
 		"OSWALD_HOME=" + home,
-		"XDG_CACHE_HOME=" + filepath.Join(home, "cache", "xdg"),
-		"npm_config_cache=" + filepath.Join(home, "cache", "npm"),
+		"npm_config_prefix=" + filepath.Join(home, ".local"),
 	}
-	cmd.Env = append(process.SandboxEnvForProfile(process.WithPluginShimsOnPath(process.WithNodeOnPath(base), home), home), process.GitHubTokenEnv()...)
+	cmd.Env = append(process.SandboxEnvForProfile(base, home), process.GitHubTokenEnv()...)
 	var buf bytes.Buffer
 	cmd.Stdout = &limitedWriter{buf: &buf, limit: maxTerminalOutput}
 	cmd.Stderr = &limitedWriter{buf: &buf, limit: maxTerminalOutput}
