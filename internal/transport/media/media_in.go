@@ -186,6 +186,58 @@ func mediaExtensionForMIME(mimeType string) string {
 	}
 }
 
+// OutputMediaMIME maps a filename extension accepted for MEDIA: delivery to
+// its media MIME type. It covers still images, GIF, video, and audio so the
+// model can attach any media type from a cache path or workspace path.
+func OutputMediaMIME(name string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(filepath.Ext(name))) {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".gif":
+		return "image/gif", true
+	case ".webp":
+		return "image/webp", true
+	case ".bmp":
+		return "image/bmp", true
+	case ".tif", ".tiff":
+		return "image/tiff", true
+	case ".heic":
+		return "image/heic", true
+	case ".heif":
+		return "image/heif", true
+	case ".mp4", ".m4v":
+		return "video/mp4", true
+	case ".webm":
+		return "video/webm", true
+	case ".mov":
+		return "video/quicktime", true
+	case ".mkv":
+		return "video/x-matroska", true
+	case ".mp3":
+		return "audio/mpeg", true
+	case ".m4a":
+		return "audio/mp4", true
+	case ".aac":
+		return "audio/aac", true
+	case ".wav":
+		return "audio/wav", true
+	case ".ogg", ".oga":
+		return "audio/ogg", true
+	case ".opus":
+		return "audio/opus", true
+	case ".flac":
+		return "audio/flac", true
+	case ".caf":
+		return "audio/x-caf", true
+	case ".wma":
+		return "audio/x-ms-wma", true
+	default:
+		return "", false
+	}
+}
+
 // ProbeMedia reports best-effort duration and dimensions for one media file.
 // Audio yields duration with zero dimensions. A missing ffprobe, timeout, or
 // unparsable output returns zeros: admission never fails for missing metadata.

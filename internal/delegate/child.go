@@ -120,6 +120,7 @@ func (m *Manager) runOnce(ctx context.Context, spec childSpec) (summary string, 
 	child := agent.NewAgent(spec.client, m.registry, spec.model, spec.provider, m.soul, nil, budget.NewContextBudget(m.window), governance.DefaultGlobalPolicy(), m.log, m.mcp)
 	child.SetWorkspace(m.profileRoot)
 	child.SetImageCache(m.images)
+	child.SetMediaCache(m.media)
 	child.SetBillingBaseURL(spec.billingURL)
 	req := agent.Request{
 		RequestID:         spec.requestID,

@@ -30,9 +30,10 @@ func TestResultValidateAttachments(t *testing.T) {
 	attachment := func(name string, size int) Attachment {
 		return Attachment{Filename: name, MIMEType: "application/octet-stream", Data: bytes.Repeat([]byte("x"), size)}
 	}
+	perFile := MaxTotalAttachmentBytes / MaxAttachments
 	valid := make([]Attachment, MaxAttachments)
 	for i := range valid {
-		valid[i] = attachment("part"+string(rune('a'+i)), MaxAttachmentBytes)
+		valid[i] = attachment("part"+string(rune('a'+i)), perFile)
 	}
 	if err := (Result{Attachments: valid}).ValidateAttachments(); err != nil {
 		t.Fatalf("exact aggregate limit rejected: %v", err)

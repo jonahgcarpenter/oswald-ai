@@ -70,7 +70,7 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 			t.Fatalf("protected path allowed: %q", raw)
 		}
 	}
-	for _, raw := range []string{"state.db", "SOUL.md", "memories/MEMORY.md", "cache/images/a.png", "cache/scratch/a.txt", "notes.md"} {
+	for _, raw := range []string{"state.db", "SOUL.md", "memories/MEMORY.md", "cache/media/a.png", "cache/scratch/a.txt", "notes.md"} {
 		if _, _, err := ws.Resolve(raw); err != nil {
 			t.Fatalf("read denied: %q: %v", raw, err)
 		}
@@ -81,7 +81,7 @@ func TestSameAndCrossProfileGroups(t *testing.T) {
 	if _, _, err := ws.ResolveWrite("notes.md"); err != nil {
 		t.Fatalf("same-profile notes write denied: %v", err)
 	}
-	for _, raw := range []string{"config.yaml", "state.db", "memories/MEMORY.md", "cache/images/a.png", ".env"} {
+	for _, raw := range []string{"config.yaml", "state.db", "memories/MEMORY.md", "cache/media/a.png", ".env"} {
 		if _, _, err := ws.ResolveWrite(raw); err == nil {
 			t.Fatalf("protected write allowed: %q", raw)
 		}

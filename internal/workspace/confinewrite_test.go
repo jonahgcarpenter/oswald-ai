@@ -48,7 +48,7 @@ func TestScanConfinedWriteShell(t *testing.T) {
 		"sed -i s/a/b/ config.yaml":                     "oswald providers",
 		"cp new.yaml config.yaml":                       "oswald providers",
 		"echo x | tee cache/foo":                        "cache/scratch",
-		"rm -rf cache/images":                           "cache/scratch",
+		"rm -rf cache/media":                            "cache/scratch",
 		"mkdir cache/scratch_go":                        "cache/scratch",
 		"cat config.yaml > /tmp/out.txt":                "system-managed",
 		"echo x > .env":                                 "protected",

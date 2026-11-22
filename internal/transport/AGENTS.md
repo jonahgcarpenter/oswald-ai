@@ -79,15 +79,16 @@ Media in: at most 4 images, 10 MiB each (JPEG/PNG/WebP/HEIC/HEIF/BMP/TIFF), norm
 ≤2560 longest edge / 280 KiB JPEG/PNG. One raw media lane carries everything not inlined:
 GIF/video/audio (GIF/MP4/WebM/MOV/M4V/MKV/MP3/M4A/AAC/WAV/OGG/OGA/OPUS/FLAC/CAF/WMA) plus a
 catch-all bucket for any other bounded attachment (≤4 per message, 25 MiB each, 60 MiB total).
-Raw bytes land in the private `cache/media/` (0700, 24h sweep); the prompt carries the cache path
+Raw bytes and normalized image pins share the private `cache/media/` (0700, 24h sweep); the prompt carries the cache path
 plus best-effort duration/dimensions from one bounded ffprobe. The agent inspects AV files itself
 with its sandbox ffmpeg (frames → `cache/scratch` → `vision_analyze`; audio can be probed,
 trimmed, and transcoded but there is no listening or transcription capability), and opens
 catch-all attachments with terminal tools. Link-shared GIFs (Discord gifv embeds) use the AV lane;
 a failed media download falls back to the static embed preview. Orientation is corrected before
 resize — all eight EXIF orientations for JPEG/EXIF-bearing PNG/WebP, ordered `irot`/`imir` for
-HEIC/HEIF with container transforms winning so pixels are never double-rotated. Out: ≤8 MiB each,
-10 files / 80 MiB total, safe unique basenames. `MEDIA:/absolute/path` (images) and
+HEIC/HEIF with container transforms winning so pixels are never double-rotated. Out: ≤25 MiB each,
+10 files / 80 MiB total, safe unique basenames. `MEDIA:/absolute/path` (any image, GIF, video, or
+audio; managed cache or readable workspace path) and
 `FILE:/absolute/path` (any file type) tokens resolve against the sender's cache first (MEDIA only),
 then raw absolute
 paths under the file groups (protected names sealed, managed cache via the cache resolver), and

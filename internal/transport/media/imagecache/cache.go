@@ -42,7 +42,7 @@ type Counts struct {
 	RemovedBytes int64
 }
 
-// Cache owns only files in root/<user>/cache/images.
+// Cache owns only files in root/<user>/cache/media.
 type Cache struct {
 	root    string
 	profile string
@@ -68,7 +68,7 @@ func RepairProfile(root, profile string) {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(profile) == "" {
 		return
 	}
-	dir := filepath.Join(root, "cache", "images")
+	dir := filepath.Join(root, "cache", "media")
 	if info, err := os.Lstat(dir); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0077 != 0 {
 		before := info.Mode()
 		if err := os.Chmod(dir, 0700); err == nil {
@@ -113,7 +113,7 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 	if err != nil {
 		return -1, "", err
 	}
-	path := filepath.Join(root, user, "cache", "images")
+	path := filepath.Join(root, user, "cache", "media")
 	if c.profile != "" {
 		if user != c.profile {
 			return -1, "", errors.New("image cache profile mismatch")
@@ -123,7 +123,7 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 			return -1, "", err
 		}
 		unix.Close(profileFD)
-		path = filepath.Join(root, "cache", "images")
+		path = filepath.Join(root, "cache", "media")
 	}
 	fd, err := openDirectory(ctx, path, create, 3)
 	return fd, path, err
@@ -493,7 +493,7 @@ func (c *Cache) walkImages(ctx context.Context, user string, remove func(int, st
 	if err != nil {
 		return err
 	}
-	d := os.NewFile(uintptr(dup), "images")
+	d := os.NewFile(uintptr(dup), "media")
 	names, err := d.Readdirnames(-1)
 	d.Close()
 	if err != nil {

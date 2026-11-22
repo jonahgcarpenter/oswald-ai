@@ -228,7 +228,7 @@ func TestDenyMessagesGrouped(t *testing.T) {
 	if msg := DenyMessage(filepath.Join("skills", "review", "SKILL.md"), GroupSystem, true); !strings.Contains(msg, "skill_manage tool") {
 		t.Fatalf("skill write: %q", msg)
 	}
-	if msg := DenyMessage("cache/images/a.png", GroupSystem, true); !strings.Contains(msg, "cache/scratch") {
+	if msg := DenyMessage("cache/media/a.png", GroupSystem, true); !strings.Contains(msg, "cache/scratch") {
 		t.Fatalf("cache write: %q", msg)
 	}
 }
