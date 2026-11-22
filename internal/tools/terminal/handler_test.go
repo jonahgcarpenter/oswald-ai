@@ -414,6 +414,21 @@ func TestTerminalHomeAndCacheAreProfileRooted(t *testing.T) {
 	}
 }
 
+func TestTerminalDropsLegacySandboxVars(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-legacy-vars"), map[string]interface{}{
+		"command": `printf '%s|%s' "$OSWALD_WORKSPACE" "$OSWALD_SCRATCH"`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	if !strings.Contains(res.Content, "exit_code: 0\n|") {
+		t.Fatalf("legacy sandbox vars still set: %q", res.Content)
+	}
+}
+
 func TestTerminalTildeWriteLandsInProfileRoot(t *testing.T) {
 	_, alice, _ := profileTree(t)
 	ws := workspace.NewWorkspace(alice, "alice")

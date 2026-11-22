@@ -91,8 +91,6 @@ func NewExecuteCodeHandler(ws *workspace.Workspace) func(context.Context, map[st
 			"HOME=" + ws.Root(),
 			"LANG=C.UTF-8",
 			"TMPDIR=" + scratch,
-			"OSWALD_WORKSPACE=" + ws.Root(),
-			"OSWALD_SCRATCH=" + scratch,
 			"OSWALD_HOME=" + ws.Root(),
 			"XDG_CACHE_HOME=" + filepath.Join(ws.Root(), "cache", "xdg"),
 			"npm_config_cache=" + filepath.Join(ws.Root(), "cache", "npm"),

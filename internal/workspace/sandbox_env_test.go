@@ -39,11 +39,11 @@ func TestRunShellHomeIsProfileRoot(t *testing.T) {
 	if err := os.Chmod(home, 0700); err != nil {
 		t.Fatal(err)
 	}
-	output, code, err := runShell(context.Background(), `printf '%s|%s' "$HOME" "$OSWALD_HOME"`, home, filepath.Join(home, "cache", "scratch"), home, 30)
+	output, code, err := runShell(context.Background(), `printf '%s|%s|%s|%s' "$HOME" "$OSWALD_HOME" "$OSWALD_WORKSPACE" "$OSWALD_SCRATCH"`, home, filepath.Join(home, "cache", "scratch"), home, 30)
 	if err != nil || code != 0 {
 		t.Fatalf("runShell = code %d err %v output %q", code, err, output)
 	}
-	if want := home + "|" + home; output != want {
+	if want := home + "|" + home + "||"; output != want {
 		t.Fatalf("sandbox home vars = %q, want %q", output, want)
 	}
 }

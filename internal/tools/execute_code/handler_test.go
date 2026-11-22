@@ -103,7 +103,7 @@ func TestExecuteCodeHomeAndCacheAreProfileRooted(t *testing.T) {
 	ws := workspace.NewWorkspace(alice, "alice")
 	exec := NewExecuteCodeHandler(ws)
 	res, err := exec(testContext("req-home2"), map[string]interface{}{
-		"code": "import os; print(os.environ.get('HOME', '')); print(os.environ.get('XDG_CACHE_HOME', ''))",
+		"code": "import os; print(os.environ.get('HOME', '')); print(os.environ.get('XDG_CACHE_HOME', '')); print(os.environ.get('OSWALD_WORKSPACE', 'absent'))",
 	})
 	if err != nil {
 		t.Fatalf("execute_code failed: %v", err)
@@ -113,6 +113,9 @@ func TestExecuteCodeHomeAndCacheAreProfileRooted(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, filepath.Join(alice, "cache", "xdg")) {
 		t.Fatalf("XDG_CACHE_HOME missing: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "absent") {
+		t.Fatalf("legacy OSWALD_WORKSPACE still set: %q", res.Content)
 	}
 }
 

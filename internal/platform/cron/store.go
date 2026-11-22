@@ -643,7 +643,6 @@ func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int)
 			env = append(env,
 				"HOME="+r.Root,
 				"OSWALD_HOME="+r.Root,
-				"OSWALD_WORKSPACE="+r.Root,
 				"XDG_CACHE_HOME="+filepath.Join(r.Root, "cache", "xdg"),
 				"npm_config_cache="+filepath.Join(r.Root, "cache", "npm"),
 			)

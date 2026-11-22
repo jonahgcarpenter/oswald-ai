@@ -80,7 +80,8 @@ through passthrough, not the command line.
 `~` and `$HOME` name the acting profile root on every surface — file tools, shell text
 scans, runtime expansion, and cron scripts. The true OS home is outside the workspace:
 readable under the same-trust model, write-denied. The default profile's root plays the
-`/root` role; named profile roots are user homes.
+`/root` role; named profile roots are user homes. `OSWALD_WORKSPACE` and `OSWALD_SCRATCH`
+are retired from the env but stay on the refusal list so nothing can re-inject them.
 
 ## Pre-execution chain (order matters)
 
