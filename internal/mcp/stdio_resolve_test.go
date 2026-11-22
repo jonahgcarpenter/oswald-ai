@@ -107,6 +107,37 @@ func TestNpxCachedBinAmbiguousManifest(t *testing.T) {
 	}
 }
 
+func TestProfileLocalBin(t *testing.T) {
+	profile := t.TempDir()
+	binDir := filepath.Join(profile, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(binDir, "truenas-mcp")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := profileLocalBin("truenas-mcp", profile); got != exe {
+		t.Fatalf("profileLocalBin = %q, want %q", got, exe)
+	}
+	dull := filepath.Join(binDir, "dull")
+	if err := os.WriteFile(dull, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ command, root string }{
+		{"dull", profile},                  // present but not executable
+		{"missing", profile},               // absent
+		{"truenas-mcp", ""},                // no profile root
+		{"", profile},                      // empty command
+		{"/abs/path/truenas-mcp", profile}, // absolute stays the operator's choice
+		{"./relative", profile},            // relative stays the operator's choice
+	} {
+		if got := profileLocalBin(tc.command, tc.root); got != "" {
+			t.Fatalf("profileLocalBin(%q, %q) = %q, want empty", tc.command, tc.root, got)
+		}
+	}
+}
+
 func TestNpxCachedBinPrefersProfileRoot(t *testing.T) {
 	serverCache := t.TempDir()
 	t.Setenv("npm_config_cache", serverCache)

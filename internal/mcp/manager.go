@@ -392,6 +392,10 @@ func connectStdio(ctx context.Context, cfg ServerConfig, profileRoot string) (*g
 		if bin, rest := npxCachedBin(cfg.Args, profileRoot); bin != "" {
 			command, stdioArgs = bin, rest
 		}
+	} else if bin := profileLocalBin(command, profileRoot); bin != "" {
+		// A bare command name may be an agent install in the profile's
+		// ~/.local/bin; resolve it there before the service process PATH.
+		command = bin
 	}
 	if _, err := exec.LookPath(command); err != nil {
 		return nil, nil, fmt.Errorf("MCP stdio server %q needs missing command %q in PATH: %w", cfg.Name, command, err)

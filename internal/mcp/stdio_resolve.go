@@ -47,6 +47,26 @@ func npmCacheRoots(profileRoot string) []string {
 	return roots
 }
 
+// profileLocalBin resolves a bare stdio command against the acting
+// profile's ~/.local/bin — the same user-install directory the sandbox PATH
+// puts first — so agent installs launch servers by bare name. Absolute or
+// relative spellings and missing or non-executable files return "" so the
+// caller keeps its own resolution and error naming.
+func profileLocalBin(command, profileRoot string) string {
+	name := strings.TrimSpace(command)
+	root := strings.TrimSpace(profileRoot)
+	if name == "" || root == "" || strings.ContainsRune(name, '/') ||
+		strings.ContainsRune(name, os.PathSeparator) || strings.ContainsRune(name, '\\') {
+		return ""
+	}
+	candidate := filepath.Join(root, ".local", "bin", name)
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return ""
+	}
+	return candidate
+}
+
 // npxCachedBin resolves `npx -y <pkg> ...` to the already-installed binary in
 // an npm cache, checking the acting profile's cache first. It stays
 // conservative by design: a cache miss, version pin, extra npx flag,

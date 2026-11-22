@@ -12,7 +12,9 @@ resolve for history attribution only, never for execution); `schema.go` projects
 `http_transport.go` enforce the server config rules; `stdio_resolve.go` resolves `npx -y <pkg>`
 to the installed npm-cache binary, checking the acting profile's `~/.npm` before the
 service process cache (conservative fallback to plain `npx` so cold machines still
-install) and names missing stdio binaries per server. `oauth*.go` implement discovery, browser and
+install), resolves bare stdio commands against the acting profile's `~/.local/bin`
+before the service PATH (agent installs launch by bare name; absolute or relative
+spellings stay the operator's choice), and names missing stdio binaries per server. `oauth*.go` implement discovery, browser and
 device flows, and the token store with cross-process refresh fencing.
 
 ## Bridge protocol (what the model actually sees)
