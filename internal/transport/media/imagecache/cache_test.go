@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func samplePNG(t *testing.T) []byte {
@@ -49,7 +49,7 @@ func TestSaveResolveSweepAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(path) || !strings.HasPrefix(path, filepath.Join(root, "alice", "cache", "images")+string(os.PathSeparator)) {
+	if !filepath.IsAbs(path) || !strings.HasPrefix(path, filepath.Join(root, "alice", "cache", "media")+string(os.PathSeparator)) {
 		t.Fatalf("wrong path: %q", path)
 	}
 	got, mime, err := c.Resolve(ctx, "alice", path)
@@ -67,7 +67,7 @@ func TestSaveResolveSweepAndDelete(t *testing.T) {
 	if _, err := c.Save(ctx, "alice", []byte("not an image"), ""); err == nil {
 		t.Fatal("accepted invalid image")
 	}
-	other := filepath.Join(root, "alice", "cache", "images", "unrelated.txt")
+	other := filepath.Join(root, "alice", "cache", "media", "unrelated.txt")
 	if err := os.WriteFile(other, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestValidationAndUnsafeSweep(t *testing.T) {
 	if _, err := c.Sweep(ctx, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("unsafe cache blocked sweep: %v", err)
 	}
-	if _, _, err := c.Resolve(ctx, "bob", filepath.Join(c.root, "bob", "cache", "images", filepath.Base(gifPath))); err == nil {
+	if _, _, err := c.Resolve(ctx, "bob", filepath.Join(c.root, "bob", "cache", "media", filepath.Base(gifPath))); err == nil {
 		t.Fatal("resolved through symlink")
 	}
 	if err := os.Mkdir(filepath.Join(c.root, "carol"), 0700); err != nil {
@@ -317,7 +317,7 @@ func TestValidationAndUnsafeSweep(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(c.root, "carol", "cache"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(c.root, "carol", "cache", "images")); err != nil {
+	if err := os.Symlink(t.TempDir(), filepath.Join(c.root, "carol", "cache", "media")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Sweep(ctx, time.Now().Add(48*time.Hour)); err != nil {

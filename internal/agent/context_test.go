@@ -314,7 +314,7 @@ func TestPlatformNotesPerGateway(t *testing.T) {
 		t.Fatalf("imessage platform notes = %q", imessage)
 	}
 	for _, notes := range []string{discord, imessage} {
-		for _, want := range []string{"MEDIA:/absolute/path/to/file", "FILE:/absolute/path/to/file", ".gif", "Files of any type"} {
+		for _, want := range []string{"MEDIA:/absolute/path/to/file", "FILE:/absolute/path/to/file", "GIF, video, or audio", "files of any type"} {
 			if !strings.Contains(notes, want) {
 				t.Fatalf("platform notes missing %q: %q", want, notes)
 			}

@@ -26,7 +26,7 @@ func TestCacheReadsAllowedWritesDenied(t *testing.T) {
 		"cache/scratch_go/x",
 		"cache/scratch-gopath/x",
 		"cache/processes/x",
-		"cache/images/x",
+		"cache/media/x",
 		"cache/foo",
 		"cache/browser/scratch-abc.txt",
 		"cache/browser/profile-abc",

@@ -328,7 +328,7 @@ func RepairCache(root, profile string, log *config.Logger) {
 		{filepath.Join(root, "cache"), "cache"},
 		{filepath.Join(root, "cache", "scratch"), "cache/scratch"},
 		{filepath.Join(root, "cache", "browser"), "cache/browser"},
-		{filepath.Join(root, "cache", "images"), "cache/images"},
+		{filepath.Join(root, "cache", "media"), "cache/media"},
 		{filepath.Join(root, "cache", "documents"), "cache/documents"},
 		{filepath.Join(root, "cache", "processes"), "cache/processes"},
 	}

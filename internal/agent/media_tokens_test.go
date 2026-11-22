@@ -15,6 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 )
 
 func TestStripMediaTokens(t *testing.T) {
@@ -176,7 +177,7 @@ func TestMediaTokenRejectsOutsideAndSecretCWDPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	managed := filepath.Join(ws, "cache", "images")
+	managed := filepath.Join(ws, "cache", "media")
 	if err := os.MkdirAll(managed, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -284,4 +285,60 @@ func sessionKeyToID(t *testing.T, store *memory.ProfileStore, owner, key string)
 		t.Fatalf("active session id: %v", err)
 	}
 	return id
+}
+
+func TestMediaTokenAttachesAnyMediaType(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.Chmod(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(ws, "cache", "scratch")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	videoPath := filepath.Join(scratch, "clip.mp4")
+	if err := os.WriteFile(videoPath, []byte("synthetic video bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audioPath := filepath.Join(scratch, "voice.mp3")
+	if err := os.WriteFile(audioPath, append([]byte("ID3"), []byte("synthetic audio")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	zipPath := filepath.Join(scratch, "bundle.zip")
+	if err := os.WriteFile(zipPath, []byte("PK\x03\x04"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := docache.NewProfileMediaCache(ws, "alice")
+	cachedPath, err := cache.Save(context.Background(), "alice", "cached.mp4", []byte("cached video bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a, _ := newTestAgent(t, &fakeChatter{}, nil, registry.New(config.NewLogger(config.LevelError)))
+	a.SetWorkspace(ws)
+	a.SetMediaCache(cache)
+	for _, tc := range []struct {
+		name   string
+		path   string
+		attach bool
+		mime   string
+	}{
+		{"scratch video", videoPath, true, "video/mp4"},
+		{"scratch audio", audioPath, true, "audio/mpeg"},
+		{"media cache video", cachedPath, true, ""},
+		{"non media zip", zipPath, false, ""},
+	} {
+		_, attached := a.resolveResponseMedia(context.Background(), config.NewLogger(config.LevelError), "discord", "alice", "See MEDIA:"+tc.path, nil)
+		if tc.attach {
+			if len(attached) != 1 {
+				t.Fatalf("%s: expected attachment, got %d", tc.name, len(attached))
+			}
+			if tc.mime != "" && attached[0].MIMEType != tc.mime {
+				t.Fatalf("%s: mime = %q, want %q", tc.name, attached[0].MIMEType, tc.mime)
+			}
+		} else if len(attached) != 0 {
+			t.Fatalf("%s: expected drop, got %d attachments", tc.name, len(attached))
+		}
+	}
 }

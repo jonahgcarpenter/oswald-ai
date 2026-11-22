@@ -24,7 +24,7 @@ func TestProfileCacheUsesDirectRootAndSweepsOnlyOwnImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(path, filepath.Join(root, "cache", "images")+string(os.PathSeparator)) {
+	if !strings.HasPrefix(path, filepath.Join(root, "cache", "media")+string(os.PathSeparator)) {
 		t.Fatal("incorrect profile image path")
 	}
 	if _, _, err := cache.Resolve(ctx, "bob", path); err == nil {

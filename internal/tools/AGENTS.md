@@ -79,9 +79,9 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   `background:true` runs async with a handle receipt and later new-turn
   delivery; nested orchestrator calls run inline. Full history, searchable results.
 - `read_file` — paginated text read (`LINE_NUM|CONTENT`, 1-indexed offset, 2000-line
-  default/max, ~100K-char budget with `next_offset` continuation); binary containers
-  (`.docx/.xlsx/.ppt/.pdf`/Office/OpenDocument/RTF/EPUB/SQLite) auto-extract to text,
-  images refuse with a `vision_analyze` redirect; similar-filename suggestions on miss.
+  default/max, ~100K-char budget with `next_offset` continuation); `.docx/.xlsx/.pdf`
+  auto-extract to text, images refuse with a `vision_analyze` redirect, GIF/video/audio
+  refuse with the terminal-ffmpeg recipe; similar-filename suggestions on miss.
   Inbound document cache paths resolve first.
 - `write_file` — whole-file replace with read-before-write gate (refuses without a
   current full read or on external modification), syntax-checked (new errors only),

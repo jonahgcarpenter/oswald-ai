@@ -23,6 +23,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
@@ -99,6 +100,7 @@ type Manager struct {
 	mcp      mcp.ProviderView
 	soul     *soul.Store
 	images   *imagecache.Cache
+	media    *docache.Cache
 	window   int
 	vkey     string
 	cfg      *config.Config
@@ -143,6 +145,7 @@ type Deps struct {
 	MCP         mcp.ProviderView
 	Soul        *soul.Store
 	Images      *imagecache.Cache
+	Media       *docache.Cache
 	Window      int
 	VirtualKey  string
 	Config      *config.Config
@@ -163,6 +166,7 @@ func NewManager(deps Deps) *Manager {
 		mcp:          deps.MCP,
 		soul:         deps.Soul,
 		images:       deps.Images,
+		media:        deps.Media,
 		window:       deps.Window,
 		vkey:         deps.VirtualKey,
 		cfg:          deps.Config,

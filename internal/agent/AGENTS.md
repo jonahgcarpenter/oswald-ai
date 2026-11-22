@@ -65,8 +65,10 @@ finalize: pick final content, resolve MEDIA/FILE, AppendPendingSessionTurn (skip
   window); the valve caps are a 500-execution / 200 tool-response backstop. Halted and
   valve-exhausted loops both finish with a tools-disabled final answer.
 - **Generated images never auto-deliver.** The model delivers one only by emitting a
-  `MEDIA:/absolute/path` token in its final response (resolved against the managed cache first,
-  then raw absolute paths under the file groups); at most 4 logical images per request. Previews ride tool results;
+  `MEDIA:/absolute/path` token in its final response for any image, GIF, video, or audio file
+  (resolved against the managed image then media cache, then raw absolute paths under the file
+  groups); at most 4 logical images per request. The outbound attachment cap is 25 MiB per file,
+  80 MiB aggregate. Previews ride tool results;
   follow-ups replay text only. Generic workspace files deliver via `FILE:/absolute/path`
   (same confinement, no image validation, any MIME).
 - **Reasoning is never persisted** in conversation or tool history. Summaries and tool history are

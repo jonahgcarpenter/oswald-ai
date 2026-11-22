@@ -117,12 +117,17 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	images, unsupported := g.loadImages(msg.Attachments, log)
 	documents, docUnsupported := g.loadDocuments(msg.Attachments, principal.CanonicalUserID, log)
 	unsupported = append(unsupported, docUnsupported...)
+	mediaRefs, mediaUnsupported := g.loadMedia(msg.Attachments, principal.CanonicalUserID, log)
+	documents = append(documents, mediaRefs...)
+	unsupported = append(unsupported, mediaUnsupported...)
+	unsupported = dropAttachedLabels(unsupported, mediaRefs)
+	unsupported = compactAttachmentLabels(unsupported)
 	if len(msg.Attachments) > 0 {
 		status := "ok"
 		if len(unsupported) > 0 {
 			status = "degraded"
 		}
-		log.Debug("gateway.attachment.processed", "normalized imessage input attachments", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("accepted_document_count", len(documents)), config.F("downgraded_document_count", len(docUnsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
+		log.Debug("gateway.attachment.processed", "normalized imessage input attachments", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("accepted_document_count", len(documents)), config.F("accepted_media_count", len(mediaRefs)), config.F("downgraded_document_count", len(docUnsupported)+len(mediaUnsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 && len(documents) == 0 {
 		if len(unsupported) == 0 {
@@ -194,6 +199,10 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 				if docs, docUnsupported := g.loadDocuments(realAttachments, canonicalUserID, log); len(docs) > 0 || len(docUnsupported) > 0 {
 					reply.Documents = docs
 					reply.Unsupported = dropAttachedLabels(append(reply.Unsupported, docUnsupported...), docs)
+				}
+				if mediaRefs, mediaUnsupported := g.loadMedia(realAttachments, canonicalUserID, log); len(mediaRefs) > 0 || len(mediaUnsupported) > 0 {
+					reply.Documents = append(reply.Documents, mediaRefs...)
+					reply.Unsupported = dropAttachedLabels(append(reply.Unsupported, mediaUnsupported...), mediaRefs)
 				}
 			}
 			log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", len(reply.Images)), config.F("reply_document_count", len(reply.Documents)))

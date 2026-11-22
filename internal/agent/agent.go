@@ -30,6 +30,7 @@ import (
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
@@ -87,6 +88,7 @@ type Agent struct {
 	userMemory     SessionStore
 	fileMemory     *files.Store
 	imageCache     *imagecache.Cache
+	mediaCache     *docache.Cache
 	toolPolicy     governance.GlobalPolicy
 	summarizer     MarkdownSummarizer
 	workspaceRoot  string
@@ -116,6 +118,14 @@ func (a *Agent) SetPluginSkills(roots []skills.PluginRoot) {
 func (a *Agent) SetImageCache(cache *imagecache.Cache) {
 	if a != nil {
 		a.imageCache = cache
+	}
+}
+
+// SetMediaCache installs the private per-user media cache so MEDIA: tokens can
+// re-attach cached GIF/video/audio files.
+func (a *Agent) SetMediaCache(cache *docache.Cache) {
+	if a != nil {
+		a.mediaCache = cache
 	}
 }
 

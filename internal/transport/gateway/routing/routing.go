@@ -97,9 +97,9 @@ func UnsupportedFilesNote(labels []string) string {
 		return ""
 	}
 	if len(labels) == 1 {
-		return fmt.Sprintf("[User sent an unsupported attachment: %s. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]", labels[0])
+		return fmt.Sprintf("[User sent an unsupported attachment: %s. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, an image, a GIF, or a video).]", labels[0])
 	}
-	return fmt.Sprintf("[User sent unsupported attachments: %s. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]", strings.Join(labels, ", "))
+	return fmt.Sprintf("[User sent unsupported attachments: %s. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, an image, a GIF, or a video).]", strings.Join(labels, ", "))
 }
 
 func combineImages(currentImages []llm.InputImage, currentUnsupported []string, reply *ReplyContext) ([]llm.InputImage, []string) {
@@ -121,21 +121,37 @@ func combineImages(currentImages []llm.InputImage, currentUnsupported []string, 
 }
 
 func combineDocuments(current []media.DocumentRef, reply *ReplyContext) []media.DocumentRef {
-	docs := append([]media.DocumentRef(nil), current...)
-	if len(docs) > media.MaxDocumentsPerRequest {
-		docs = docs[:media.MaxDocumentsPerRequest]
+	docs := make([]media.DocumentRef, 0, len(current))
+	files, mediaRefs := 0, 0
+	accept := func(ref media.DocumentRef) bool {
+		if strings.TrimSpace(ref.Path) == "" {
+			return false
+		}
+		if ref.IsMedia() {
+			if mediaRefs >= media.MaxMediaPerRequest {
+				return false
+			}
+			mediaRefs++
+			return true
+		}
+		if files >= media.MaxDocumentsPerRequest {
+			return false
+		}
+		files++
+		return true
+	}
+	for _, ref := range current {
+		if accept(ref) {
+			docs = append(docs, ref)
+		}
 	}
 	if reply == nil {
 		return docs
 	}
-	for _, doc := range reply.Documents {
-		if len(docs) >= media.MaxDocumentsPerRequest {
-			break
+	for _, ref := range reply.Documents {
+		if accept(ref) {
+			docs = append(docs, ref)
 		}
-		if strings.TrimSpace(doc.Path) == "" {
-			continue
-		}
-		docs = append(docs, doc)
 	}
 	return docs
 }
@@ -206,47 +222,21 @@ func fileDescription(docs []media.DocumentRef) string {
 }
 
 func imageOnlyNote(images []llm.InputImage) string {
-	count := len(images)
-	gifCount := gifContactSheetCount(images)
-	switch {
-	case count == 1 && gifCount == 1:
-		return "[User sent a GIF; the attached image is a contact sheet showing its contents over time]"
-	case count > 1 && gifCount == count:
-		return fmt.Sprintf("[User sent %d GIFs; the attached images are contact sheets showing their contents over time]", count)
-	case gifCount > 0:
-		return fmt.Sprintf("[User sent %d images, including GIF contact sheets showing their contents over time]", count)
-	case count == 1:
+	switch len(images) {
+	case 0:
+		return ""
+	case 1:
 		return "[User sent an image]"
 	default:
-		return fmt.Sprintf("[User sent %d images]", count)
+		return fmt.Sprintf("[User sent %d images]", len(images))
 	}
 }
 
 func imageDescription(images []llm.InputImage) string {
-	count := len(images)
-	gifCount := gifContactSheetCount(images)
-	switch {
-	case count == 1 && gifCount == 1:
-		return "GIF contact sheet showing its contents over time"
-	case count > 1 && gifCount == count:
-		return fmt.Sprintf("%d GIF contact sheets showing their contents over time", count)
-	case gifCount > 0:
-		return fmt.Sprintf("%d images, including GIF contact sheets showing their contents over time", count)
-	case count == 1:
+	if len(images) == 1 {
 		return "image"
-	default:
-		return fmt.Sprintf("%d images", count)
 	}
-}
-
-func gifContactSheetCount(images []llm.InputImage) int {
-	count := 0
-	for _, image := range images {
-		if image.IsGIFContactSheet {
-			count++
-		}
-	}
-	return count
+	return fmt.Sprintf("%d images", len(images))
 }
 
 func compactLabels(labels []string) []string {

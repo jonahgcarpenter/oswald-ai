@@ -63,6 +63,7 @@ type profileRuntime struct {
 	soul     *soul.Store
 	client   llm.Chatter
 	cache    *imagecache.Cache
+	media    *docache.Cache
 }
 
 // newSessionCanceller ends the open session, then interrupts the profile's
@@ -297,6 +298,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cron.RepairProfile(profile.ProfileRoot, name)
 		imagecache.RepairProfile(profile.ProfileRoot, name)
 		docache.RepairProfile(profile.ProfileRoot, name)
+		docache.RepairMediaProfile(profile.ProfileRoot, name)
 		plugins.RepairProfile(profile.ProfileRoot)
 		store, err := memory.NewProfileStore(ctx, profile.ProfileRoot, name, rootLog)
 		if err != nil {
@@ -306,6 +308,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		maintenanceStops = append(maintenanceStops, store.StartMaintenance())
 		fileStore := files.NewProfileStore(profile.ProfileRoot, name)
 		cache := imagecache.NewProfileCache(profile.ProfileRoot, name)
+		mediaCache := docache.NewProfileMediaCache(profile.ProfileRoot, name)
 		registry, err := tools.NewRegistryWithImageCache(profile, fileStore, store, cache, rootLog, stores)
 		if err != nil {
 			return &Error{Event: "app.tools.init_failed", Message: "failed to initialize profile tools", Cause: err}
@@ -337,6 +340,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetBillingBaseURL(profile.LLMGatewayURL)
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
+		engine.SetMediaCache(mediaCache)
 		engine.SetPluginHooks(pluginManager)
 		engine.SetMarkdownSummarizer(summarizer)
 		engine.SetWorkspace(profile.ProfileRoot)
@@ -344,16 +348,17 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		processor.agents[name] = engine
 		runtimes[name] = &profileRuntime{
 			registry: registry, mcp: mcpProvider, soul: soulStore,
-			client: client, cache: cache,
+			client: client, cache: cache, media: mediaCache,
 		}
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))
 		cleanup.Add(docache.SweepHook(docache.NewProfileCache(profile.ProfileRoot, name), rootLog))
+		cleanup.Add(docache.SweepHook(docache.NewProfileMediaCache(profile.ProfileRoot, name), rootLog))
 		cleanup.Add(workspace.SweepHook(profile.ProfileRoot, rootLog))
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
 		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))
 		cleanup.Add(workspace.CacheChildrenHook(profile.ProfileRoot, rootLog, map[string]struct{}{
-			"scratch": {}, "images": {}, "documents": {}, "processes": {}, "browser": {},
+			"scratch": {}, "documents": {}, "media": {}, "processes": {}, "browser": {},
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)
@@ -397,6 +402,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 				MCP:        rt.mcp,
 				Soul:       rt.soul,
 				Images:     rt.cache,
+				Media:      rt.media,
 				Window:     profile.ModelContextWindow,
 				VirtualKey: profile.LLMGatewayVirtualKey,
 				Config:     profile,

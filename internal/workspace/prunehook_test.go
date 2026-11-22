@@ -43,7 +43,7 @@ func TestCacheChildrenHookPrunesUnknownSubdirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := CacheChildrenHook(root, config.NewLogger(config.LevelError), map[string]struct{}{
-		"scratch": {}, "images": {}, "processes": {},
+		"scratch": {}, "media": {}, "processes": {},
 	})
 	counts, err := hook.Sweep(context.Background(), now)
 	if err != nil || counts.RemovedFiles != 1 {

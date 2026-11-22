@@ -205,3 +205,21 @@ func TestDenyMessagesCategorized(t *testing.T) {
 		}
 	}
 }
+
+func TestReadFileRedirectsMedia(t *testing.T) {
+	wsRoot := t.TempDir()
+	if err := os.Chmod(wsRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := workspace.NewWorkspace(wsRoot, "alice")
+	for _, name := range []string{"clip.mp4", "funny.gif", "voice.mp3"} {
+		if err := os.WriteFile(filepath.Join(wsRoot, name), []byte("media bytes"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		read := NewReadFileHandler(ws)
+		_, err := read(testContext("req-media"), map[string]interface{}{"path": name})
+		if err == nil || !strings.Contains(err.Error(), "terminal ffmpeg") {
+			t.Fatalf("%s read = %v, want ffmpeg recipe redirect", name, err)
+		}
+	}
+}

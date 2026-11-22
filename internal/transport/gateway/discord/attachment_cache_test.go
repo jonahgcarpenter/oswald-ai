@@ -75,7 +75,7 @@ func TestAttachmentReplyCached(t *testing.T) {
 		} `json:"author"`
 	}{ID: "message-1"}
 	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
-	reply := dg.resolveReplyContext(msg, re, nil, "request")
+	reply := dg.resolveReplyContext(msg, re, nil, "request", "alice")
 	if reply == nil || !reply.IsFromBot {
 		t.Fatalf("reply to attachment did not resolve as bot reply: %+v", reply)
 	}

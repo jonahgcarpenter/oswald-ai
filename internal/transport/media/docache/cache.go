@@ -1,4 +1,5 @@
-// Package docache stores short-lived, private per-user document downloads.
+// Package docache stores short-lived, private per-user inbound file
+// downloads: documents (extractable text) and media (GIF/video).
 package docache
 
 import (
@@ -23,8 +24,25 @@ import (
 
 const lifetime = 24 * time.Hour
 
+// kind selects the owned subdirectory, extension set, and size cap.
+type kind int
+
+const (
+	kindDocuments kind = iota
+	kindMedia
+)
+
 var userName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 var docName = regexp.MustCompile(`^[a-f0-9]{32}\.(pdf|txt|md|csv|log|json|docx|xlsx)$`)
+
+// mediaName accepts any safe short extension: the media lane holds AV files
+// and catch-all attachments, all sanitized by the gateways before Save.
+var mediaName = regexp.MustCompile(`^[a-f0-9]{32}(\.[a-z0-9]{1,8})?$`)
+var safeMediaExt = regexp.MustCompile(`^\.[a-z0-9]{1,8}$`)
+
+var documentExtensions = map[string]struct{}{
+	".pdf": {}, ".txt": {}, ".md": {}, ".csv": {}, ".log": {}, ".json": {}, ".docx": {}, ".xlsx": {},
+}
 
 var errUnsafeDirectory = errors.New("document cache directory is not private")
 
@@ -34,22 +52,59 @@ type Counts struct {
 	RemovedBytes int64
 }
 
-// Cache owns only files in root/<user>/cache/documents.
+// Cache owns only files in root/<user>/cache/<kind dir>.
 type Cache struct {
 	root    string
 	profile string
+	kind    kind
 	now     func() time.Time
 }
 
-// New constructs a cache at root.
+// New constructs a document cache at root.
 func New(root string) *Cache { return &Cache{root: root, now: time.Now} }
+
+// NewMedia constructs a raw media/attachment cache at root.
+func NewMedia(root string) *Cache {
+	return &Cache{root: root, kind: kindMedia, now: time.Now}
+}
 
 // NewProfileCache owns documents directly below one manually provisioned profile.
 func NewProfileCache(root, profile string) *Cache {
 	return &Cache{root: root, profile: profile, now: time.Now}
 }
 
-func logDocRepair(profile, artifact string, before os.FileMode) {
+// NewProfileMediaCache owns media directly below one manually
+// provisioned profile.
+func NewProfileMediaCache(root, profile string) *Cache {
+	return &Cache{root: root, profile: profile, kind: kindMedia, now: time.Now}
+}
+
+func (c *Cache) subdir() string {
+	if c != nil && c.kind == kindMedia {
+		return "media"
+	}
+	return "documents"
+}
+
+func (c *Cache) namePattern() *regexp.Regexp {
+	if c != nil && c.kind == kindMedia {
+		return mediaName
+	}
+	return docName
+}
+
+func (c *Cache) extensions() map[string]struct{} {
+	return documentExtensions
+}
+
+func (c *Cache) maxBytes() int {
+	if c != nil && c.kind == kindMedia {
+		return media.MaxMediaBytes
+	}
+	return media.MaxDocumentBytes
+}
+
+func logCacheRepair(profile, artifact string, before os.FileMode) {
 	config.NewLogger(config.LevelWarn).Server("docache").Warn("docache.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", profile))
 }
 
@@ -57,14 +112,24 @@ func logDocRepair(profile, artifact string, before os.FileMode) {
 // creating anything. Missing paths stay missing; symlinks and foreign-owned
 // paths are left for the fail-closed checks.
 func RepairProfile(root, profile string) {
+	repairKind(root, profile, kindDocuments)
+}
+
+// RepairMediaProfile tightens permissions on existing cached media.
+func RepairMediaProfile(root, profile string) {
+	repairKind(root, profile, kindMedia)
+}
+
+func repairKind(root, profile string, k kind) {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(profile) == "" {
 		return
 	}
-	dir := filepath.Join(root, "cache", "documents")
+	c := &Cache{root: root, profile: profile, kind: k}
+	dir := filepath.Join(root, "cache", c.subdir())
 	if info, err := os.Lstat(dir); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0077 != 0 {
 		before := info.Mode()
 		if err := os.Chmod(dir, 0700); err == nil {
-			logDocRepair(profile, "documents_dir", before)
+			logCacheRepair(profile, c.subdir()+"_dir", before)
 		}
 	}
 	entries, err := os.ReadDir(dir)
@@ -72,7 +137,7 @@ func RepairProfile(root, profile string) {
 		return
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !docName.MatchString(entry.Name()) {
+		if entry.IsDir() || !c.namePattern().MatchString(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -84,7 +149,7 @@ func RepairProfile(root, profile string) {
 		if err := os.Chmod(path, 0600); err != nil {
 			continue
 		}
-		logDocRepair(profile, "documents_file", before)
+		logCacheRepair(profile, c.subdir()+"_file", before)
 	}
 }
 
@@ -103,7 +168,7 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 	if err != nil {
 		return -1, "", err
 	}
-	path := filepath.Join(root, user, "cache", "documents")
+	path := filepath.Join(root, user, "cache", c.subdir())
 	if c.profile != "" {
 		if user != c.profile {
 			return -1, "", errors.New("document cache profile mismatch")
@@ -113,11 +178,11 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 			return -1, "", err
 		}
 		unix.Close(profileFD)
-		path = filepath.Join(root, "cache", "documents")
+		path = filepath.Join(root, "cache", c.subdir())
 	} else if user == "default" {
-		path = filepath.Join(root, "cache", "documents")
+		path = filepath.Join(root, "cache", c.subdir())
 	} else if info, err := os.Lstat(filepath.Join(root, "profiles", user)); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		path = filepath.Join(root, "profiles", user, "cache", "documents")
+		path = filepath.Join(root, "profiles", user, "cache", c.subdir())
 	}
 	fd, err := openDirectory(ctx, path, create, 3)
 	return fd, path, err
@@ -171,25 +236,28 @@ func openDirectory(ctx context.Context, path string, create bool, privateParts i
 	return fd, nil
 }
 
-func validate(filename string, data []byte) (string, error) {
-	if len(data) == 0 || len(data) > media.MaxDocumentBytes {
-		return "", errors.New("document size out of bounds")
+func (c *Cache) validate(filename string, data []byte) (string, error) {
+	if len(data) == 0 || len(data) > c.maxBytes() {
+		return "", errors.New("file size out of bounds")
 	}
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filename)))
-	switch ext {
-	case ".pdf", ".txt", ".md", ".csv", ".log", ".json", ".docx", ".xlsx":
-	default:
-		sniffed := http.DetectContentType(data)
-		if !strings.HasPrefix(sniffed, "text/") {
-			return "", errors.New("unsupported document type")
+	if c.kind == kindMedia {
+		if ext != "" && !safeMediaExt.MatchString(ext) {
+			return "", errors.New("unsupported media type")
 		}
-		if ext == "" {
-			ext = ".txt"
-		} else {
-			return "", errors.New("unsupported document type")
-		}
+		return ext, nil
 	}
-	return ext, nil
+	if _, ok := c.extensions()[ext]; ok {
+		return ext, nil
+	}
+	sniffed := http.DetectContentType(data)
+	if !strings.HasPrefix(sniffed, "text/") {
+		return "", errors.New("unsupported document type")
+	}
+	if ext == "" {
+		return ".txt", nil
+	}
+	return "", errors.New("unsupported document type")
 }
 
 func token() (string, error) {
@@ -200,9 +268,9 @@ func token() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// Save atomically publishes a validated document and returns its absolute cache path.
+// Save atomically publishes a validated file and returns its absolute cache path.
 func (c *Cache) Save(ctx context.Context, userID, filename string, data []byte) (string, error) {
-	ext, err := validate(filename, data)
+	ext, err := c.validate(filename, data)
 	if err != nil {
 		return "", err
 	}
@@ -254,8 +322,8 @@ func (c *Cache) Resolve(ctx context.Context, userID, path string) ([]byte, strin
 	}
 	defer unix.Close(fd)
 	name := filepath.Base(path)
-	if !filepath.IsAbs(path) || filepath.Clean(path) != filepath.Join(dir, name) || !docName.MatchString(name) {
-		return nil, "", errors.New("path is not a user cache document")
+	if !filepath.IsAbs(path) || filepath.Clean(path) != filepath.Join(dir, name) || !c.namePattern().MatchString(name) {
+		return nil, "", errors.New("path is not a user cache file")
 	}
 	fileFD, err := unix.Openat(fd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -268,17 +336,17 @@ func (c *Cache) Resolve(ctx context.Context, userID, path string) ([]byte, strin
 		return nil, "", err
 	}
 	now := c.now()
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > media.MaxDocumentBytes || info.ModTime().After(now) || now.Sub(info.ModTime()) >= lifetime {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > int64(c.maxBytes()) || info.ModTime().After(now) || now.Sub(info.ModTime()) >= lifetime {
 		return nil, "", errors.New("unsafe or expired document")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, media.MaxDocumentBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, int64(c.maxBytes())+1))
 	if err != nil {
 		return nil, "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	if len(data) == 0 || int64(len(data)) > media.MaxDocumentBytes {
+	if len(data) == 0 || len(data) > c.maxBytes() {
 		return nil, "", errors.New("invalid cached document")
 	}
 	mime := http.DetectContentType(data)
@@ -387,7 +455,7 @@ func (c *Cache) walkDocs(ctx context.Context, user string, remove func(int, stri
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !docName.MatchString(name) {
+		if !c.namePattern().MatchString(name) {
 			continue
 		}
 		var stat unix.Stat_t

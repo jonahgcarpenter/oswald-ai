@@ -9,11 +9,11 @@ import (
 
 const (
 	// MaxOutputAttachmentBytes is the maximum size of one in-memory output attachment.
-	MaxOutputAttachmentBytes = 8 << 20
+	MaxOutputAttachmentBytes = 25 << 20
 	// MaxOutputAttachments is the maximum number of attachments in one response.
 	MaxOutputAttachments = 10
 	// MaxTotalOutputAttachmentBytes is the maximum aggregate response attachment size.
-	MaxTotalOutputAttachmentBytes = MaxOutputAttachments * MaxOutputAttachmentBytes
+	MaxTotalOutputAttachmentBytes = 80 << 20
 )
 
 // OutputAttachment is a transport-neutral in-memory file returned to a gateway.

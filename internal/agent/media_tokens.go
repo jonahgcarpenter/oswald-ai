@@ -71,7 +71,7 @@ func trimTokenPunctuation(path string) string {
 func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, gateway, senderID, content string, existing []media.OutputAttachment) (string, []media.OutputAttachment) {
 	ordered := responseTokenPattern.FindAllStringSubmatch(content, -1)
 	stripped := collapseStrippedWhitespace(fileTokenPattern.ReplaceAllString(mediaTokenPattern.ReplaceAllString(content, ""), ""))
-	if len(ordered) == 0 || gateway == "openai" || (a.imageCache == nil && strings.TrimSpace(a.workspaceRoot) == "") {
+	if len(ordered) == 0 || gateway == "openai" || (a.imageCache == nil && a.mediaCache == nil && strings.TrimSpace(a.workspaceRoot) == "") {
 		return stripped, nil
 	}
 	seen := make(map[string]bool, len(ordered))
@@ -91,8 +91,11 @@ func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, ga
 			if a.imageCache != nil {
 				data, mimeType, _ = a.imageCache.Resolve(ctx, senderID, path)
 			}
+			if data == nil && a.mediaCache != nil {
+				data, mimeType, _ = a.mediaCache.Resolve(ctx, senderID, path)
+			}
 			if data == nil && strings.TrimSpace(a.workspaceRoot) != "" {
-				data, mimeType, _ = a.resolveCWDImage(ctx, path)
+				data, mimeType, _ = a.resolveCWDMedia(ctx, path)
 			}
 		} else {
 			if strings.TrimSpace(a.workspaceRoot) != "" {
@@ -123,19 +126,20 @@ func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, ga
 	return stripped, attached
 }
 
-// resolveCWDImage reads a regular image file at an absolute path. Managed
-// cache paths must go through imagecache.Resolve (which enforces ownership
-// and expiry); this fallback denies cache siblings except cache/scratch so
-// expiry semantics are preserved, and denies protected names through the
-// shared file groups. Everything else resolves under the same-trust model:
-// system and agent paths (including outside the workspace) may attach,
-// subject to image validation below.
-func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, string, error) {
+// resolveCWDMedia reads a regular media file (image, GIF, video, or audio) at
+// an absolute path for MEDIA: delivery. Managed cache paths must go through
+// the image or media cache resolvers (which enforce ownership and expiry);
+// this fallback denies cache siblings except cache/scratch so expiry
+// semantics are preserved, and denies protected names through the shared file
+// groups. Everything else resolves under the same-trust model: system and
+// agent paths (including outside the workspace) may attach, subject to media
+// validation below.
+func (a *Agent) resolveCWDMedia(ctx context.Context, path string) ([]byte, string, error) {
 	data, resolved, err := a.openCWDRegularFile(ctx, path)
 	if err != nil {
 		return nil, "", err
 	}
-	mimeType, err := validateCWDImage(data, resolved)
+	mimeType, err := validateCWDMedia(data, resolved)
 	if err != nil {
 		return nil, "", err
 	}
@@ -234,6 +238,8 @@ var (
 	errOutsideWorkspace    = errors.New("path escapes the working directory")
 	errDeniedWorkspacePath = errors.New("path is not accessible")
 	errImageOutOfBounds    = errors.New("image size out of bounds")
+	errMediaOutOfBounds    = errors.New("media size out of bounds")
+	errUnsupportedMedia    = errors.New("unsupported media signature")
 	errFileOutOfBounds     = errors.New("file size out of bounds")
 	errUnsupportedImage    = errors.New("unsupported image signature")
 )
@@ -297,6 +303,53 @@ func validateCWDImage(data []byte, path string) (string, error) {
 		return "", errUnsupportedImage
 	}
 	return mimeType, nil
+}
+
+// validateCWDMedia accepts any deliverable media type: still images keep the
+// strict signature/extension/dimension gate, while GIF/video/audio use content
+// sniffing with a deterministic extension map (audio sniffing is unreliable).
+// A sniffed media class must agree with the extension class.
+func validateCWDMedia(data []byte, path string) (string, error) {
+	if len(data) == 0 || len(data) > media.MaxOutputAttachmentBytes {
+		return "", errMediaOutOfBounds
+	}
+	sniffed := http.DetectContentType(data)
+	switch sniffed {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return validateCWDImage(data, path)
+	}
+	byExt, ok := media.OutputMediaMIME(path)
+	if !ok {
+		return "", errUnsupportedMedia
+	}
+	class := mediaClass(byExt)
+	sniffedClass := mediaClass(sniffed)
+	if class == "image" {
+		// Images must sniff as an image; an extension alone never suffices.
+		if sniffedClass != "image" {
+			return "", errUnsupportedMedia
+		}
+		return byExt, nil
+	}
+	// Video/audio sniffing is unreliable (mp3 without ID3, mkv), so a generic
+	// sniff trusts the extension while a recognized class must agree.
+	if sniffedClass != "" && sniffedClass != class {
+		return "", errUnsupportedMedia
+	}
+	return byExt, nil
+}
+
+func mediaClass(mimeType string) string {
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		return "image"
+	case strings.HasPrefix(mimeType, "video/"):
+		return "video"
+	case strings.HasPrefix(mimeType, "audio/"):
+		return "audio"
+	default:
+		return ""
+	}
 }
 
 // sniffCWDFileMIME returns a transport-valid MIME type for generic FILE

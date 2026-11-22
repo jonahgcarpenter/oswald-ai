@@ -74,7 +74,7 @@ func TestFileTokenRejectsProtectedAndManagedPaths(t *testing.T) {
 	if err := os.WriteFile(scratch, []byte("scratch"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	managedDir := filepath.Join(ws, "cache", "images")
+	managedDir := filepath.Join(ws, "cache", "media")
 	if err := os.MkdirAll(managedDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
