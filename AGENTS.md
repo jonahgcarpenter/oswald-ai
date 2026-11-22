@@ -12,6 +12,14 @@ iMessage (BlueBubbles), and an OpenAI-compatible HTTP API. It keeps per-profile 
 learns persistent operator policy from `SOUL.md`/`USER.md`/`MEMORY.md`, runs MCP-bridged and builtin
 tools, scheduled cron jobs, and tracked background shell processes.
 
+**The sandbox home is Ubuntu-native by design.** The agent should feel at home on a stock Ubuntu
+box: `~`/`$HOME` is the acting profile's root, PATH starts with the profile's `.local/bin`
+(curl, `npm -g`, `pip --user` installs run by bare name), npm's prefix and caches live under the
+profile, and the default profile's root plays the `/root` role while named profile roots are user
+homes. One `process.SandboxPath` serves terminal, `execute_code`, background processes, and cron so
+behavior never diverges by surface — matching the model's Linux priors is a performance feature, not
+cosmetics. Contract and rationale: `internal/workspace/AGENTS.md`.
+
 Two invariants shape almost every design decision and are the lens for reviewing any change:
 
 - **Operator state is sacred.** Config, credentials, souls, memory, caches, and `state.db` are never
@@ -137,7 +145,7 @@ Moving a symbol means fixing its docs in the same change.
 | `internal/skills/` | `internal/skills/AGENTS.md` | skill catalog, prompt index, on-demand reads, create/update |
 | `internal/tools/` | `internal/tools/AGENTS.md` | registry, governance, toolsets, builtin inventory, history bounds |
 | `internal/vault/` | `internal/vault/AGENTS.md` | encrypted profile credential store, vault autofill scripts |
-| `internal/workspace/` | `internal/workspace/AGENTS.md` | file/shell tools, pre-execution chain, reviewer, approvals, processes |
+| `internal/workspace/` | `internal/workspace/AGENTS.md` | file/shell tools, sandbox env/PATH, pre-execution chain, reviewer, approvals, processes |
 | `internal/transport/` | `internal/transport/AGENTS.md` | admission, mentions, replies, streaming, outbound, media normalization |
 | `internal/providers/` | `internal/providers/AGENTS.md` | LLM contract, web backends, image generation graphs |
 | `internal/mcp/` | `internal/mcp/AGENTS.md` | bridge protocol, projection, OAuth, trusted-operator boundary |

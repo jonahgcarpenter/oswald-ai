@@ -25,7 +25,8 @@ per unit (`async_delegations`, state running, delivery pending), returns an
 immediate handle receipt, and results arrive later as new turns in the origin
 session. Sync units never touch the ledger. Nested orchestrator calls run
 inline in the calling turn and never touch the ledger. Children are stateless, `SkipMemory`, and keep the parent principal
-unchanged; their catalog is the parent's toolsets minus `delegate` (unless
+unchanged, so they share the parent's workspace, sandbox home (`~` = the profile root),
+and file groups; their catalog is the parent's toolsets minus `delegate` (unless
 nesting is enabled and allowed), `clarify`, `memory`, `session_search`,
 `cronjob_manage`, and `image_generate`, with the MCP allowlist inherited and
 narrowed. Model routing mirrors the parent unless `delegation.model`,

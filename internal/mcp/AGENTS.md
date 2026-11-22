@@ -14,7 +14,10 @@ to the installed npm-cache binary, checking the acting profile's `~/.npm` before
 service process cache (conservative fallback to plain `npx` so cold machines still
 install), resolves bare stdio commands against the acting profile's `~/.local/bin`
 before the service PATH (agent installs launch by bare name; absolute or relative
-spellings stay the operator's choice), and names missing stdio binaries per server. `oauth*.go` implement discovery, browser and
+spellings stay the operator's choice), and names missing stdio binaries per server.
+Resolution is profile-first on purpose: installs the agent makes in its sandbox (npm/npx,
+curl'd binaries) feed lazily connected servers, so MCP launches follow the same Ubuntu
+home model the shell sees. `oauth*.go` implement discovery, browser and
 device flows, and the token store with cross-process refresh fencing.
 
 ## Bridge protocol (what the model actually sees)
@@ -49,7 +52,8 @@ external-data warning; shorter results stay bare.
 Operators declare `mcp_servers.<name>` with exactly one of `url` (HTTP) or `command` (stdio).
 Names are 2–40 lowercase ASCII starting with a letter; `soul` is reserved. At most 32 servers, 32
 headers, 32 env entries; map values ≤8,192 bytes, no newlines or NULs. stdio takes `command` plus
-bounded args/cwd/`env` and forbids transport/headers/auth keys; HTTP defaults to
+bounded args/cwd/`env` and forbids transport/headers/auth keys (a relative `cwd` anchors at the
+profile root at load time; escaping it is rejected). HTTP defaults to
 `streamable_http` (SSE is the opt-in) and may carry static headers plus tool include/exclude
 filters (empty include allows all, exclude wins). OAuth exists only on streamable HTTP and owns
 the `Authorization` header — a static one alongside is rejected. Each server owns
