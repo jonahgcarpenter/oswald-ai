@@ -16,15 +16,25 @@ const (
 	MaxTotalDocumentBytes = 30 << 20
 )
 
-// DocumentRef is a gateway-neutral reference to a cached inbound document.
-// Bytes stay in the private cache; prompts and history carry only the path.
-// Data is transient upload bytes, never persisted.
+// DocumentRef is a gateway-neutral reference to a cached inbound file:
+// documents and motion media (GIF/video) share the lane. Bytes stay in the
+// private cache; prompts and history carry only the path. Data is transient
+// upload bytes, never persisted. Motion metadata (duration and dimensions)
+// is best-effort and zero when ffprobe is unavailable.
 type DocumentRef struct {
-	Path     string `json:"path"`
-	Filename string `json:"filename"`
-	MIMEType string `json:"mime_type,omitempty"`
-	Size     int64  `json:"size"`
-	Data     []byte `json:"-"`
+	Path            string  `json:"path"`
+	Filename        string  `json:"filename"`
+	MIMEType        string  `json:"mime_type,omitempty"`
+	Size            int64   `json:"size"`
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	Width           int     `json:"width,omitempty"`
+	Height          int     `json:"height,omitempty"`
+	Data            []byte  `json:"-"`
+}
+
+// IsMotion reports whether the ref names inbound GIF or video media.
+func (d DocumentRef) IsMotion() bool {
+	return LooksLikeMotionMIME(d.MIMEType) || IsMotionExtension(d.Filename)
 }
 
 // DocumentLabel returns a readable label for prompt notes and fallbacks.
@@ -107,10 +117,14 @@ func SniffDocument(name, declaredMIME string, data []byte) (string, string, erro
 	return base, mime, nil
 }
 
-// DocumentContextNote renders the current-turn prompt note for one document,
-// mirroring the image annotation: a stable cache path plus the original
-// filename. No read instructions ride along; the tool catalog owns them.
+// DocumentContextNote renders the current-turn prompt note for one inbound
+// file, mirroring the image annotation: a stable cache path plus the original
+// filename. Motion media adds duration and dimensions when ffprobe found
+// them. No read instructions ride along; the tool catalog owns them.
 func DocumentContextNote(doc DocumentRef) string {
+	if doc.IsMotion() {
+		return MotionContextNote(doc)
+	}
 	name := strings.TrimSpace(doc.Filename)
 	if name == "" {
 		name = "document"
@@ -118,14 +132,52 @@ func DocumentContextNote(doc DocumentRef) string {
 	return fmt.Sprintf("[File attached at: %s ('%s')]", strings.TrimSpace(doc.Path), name)
 }
 
-// DocumentsNote joins per-document notes for the current turn.
+// MotionContextNote renders the prompt annotation for one cached GIF/video:
+// the path the agent passes to ffmpeg, plus best-effort duration/dimensions.
+func MotionContextNote(doc DocumentRef) string {
+	name := strings.TrimSpace(doc.Filename)
+	if name == "" {
+		name = "motion"
+	}
+	kind := "Video"
+	if normalizeMIMEType(doc.MIMEType) == "image/gif" || strings.EqualFold(filepath.Ext(name), ".gif") {
+		kind = "GIF"
+	}
+	meta := make([]string, 0, 2)
+	if doc.DurationSeconds > 0 {
+		total := int(doc.DurationSeconds + 0.5)
+		meta = append(meta, fmt.Sprintf("%d:%02d", total/60, total%60))
+	}
+	if doc.Width > 0 && doc.Height > 0 {
+		meta = append(meta, fmt.Sprintf("%d×%d", doc.Width, doc.Height))
+	}
+	detail := ""
+	if len(meta) > 0 {
+		detail = ", " + strings.Join(meta, ", ")
+	}
+	return fmt.Sprintf("[%s attached at: %s ('%s'%s)]", kind, strings.TrimSpace(doc.Path), name, detail)
+}
+
+// MotionRecipeNote tells the model how to inspect motion media itself: the
+// sandbox has ffmpeg/ffprobe and vision_analyze accepts workspace frames.
+const MotionRecipeNote = "[Motion media is not inlined: extract frames from the attached cache path with terminal ffmpeg into cache/scratch (for example: ffmpeg -i <path> -vf fps=1/2 ~/cache/scratch/frame-%d.jpg), then vision_analyze the frames; ffprobe gives codec and timing details.]"
+
+// DocumentsNote joins per-file notes for the current turn, appending the
+// ffmpeg recipe once when any motion media is present.
 func DocumentsNote(docs []DocumentRef) string {
 	parts := make([]string, 0, len(docs))
+	motion := false
 	for _, doc := range docs {
 		if strings.TrimSpace(doc.Path) == "" {
 			continue
 		}
+		if doc.IsMotion() {
+			motion = true
+		}
 		parts = append(parts, DocumentContextNote(doc))
+	}
+	if motion {
+		parts = append(parts, MotionRecipeNote)
 	}
 	return strings.Join(parts, "\n")
 }

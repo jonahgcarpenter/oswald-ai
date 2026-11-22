@@ -58,7 +58,7 @@ func TestVisionGIFLoadsOnlyFirstFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := NormalizeVisionImage(context.Background(), source.Bytes(), "image/gif", nil)
-	if err != nil || result.Width != 3 || result.Height != 2 || result.DecodedFormat != "gif" || result.Image.IsGIFContactSheet {
+	if err != nil || result.Width != 3 || result.Height != 2 || result.DecodedFormat != "gif" {
 		t.Fatalf("GIF not treated as a still frame: err=%v", err)
 	}
 }

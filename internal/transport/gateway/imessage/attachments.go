@@ -28,13 +28,16 @@ func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int, scope
 		return nil, nil
 	}
 	if maxImages <= 0 {
-		return nil, attachmentLabels(attachments)
+		return nil, unsupportedImageLabels(attachments)
 	}
 
 	images := make([]llm.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
+		if media.LooksLikeMotionMIME(attachment.MimeType) || media.IsMotionExtension(attachment.TransferName) {
+			continue // GIF/video attachments stay with the motion lane.
+		}
 		if len(images) >= maxImages {
 			if isDocumentCandidate(attachment.TransferName, attachment.MimeType) {
 				continue
@@ -90,6 +93,116 @@ func attachmentLabels(attachments []attachment) []string {
 		labels = append(labels, media.AttachmentLabel(attachment.TransferName, attachment.MimeType))
 	}
 	return labels
+}
+
+// unsupportedImageLabels reports non-motion labels when the image lane is
+// closed; GIF/video attachments belong to the motion lane.
+func unsupportedImageLabels(attachments []attachment) []string {
+	labels := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		if media.LooksLikeMotionMIME(attachment.MimeType) || media.IsMotionExtension(attachment.TransferName) {
+			continue
+		}
+		labels = append(labels, media.AttachmentLabel(attachment.TransferName, attachment.MimeType))
+	}
+	return labels
+}
+
+// loadMotion downloads GIF and video attachments into the private motion
+// cache. Nothing is inlined: prompts carry the cache path plus best-effort
+// duration/dimensions, and the agent extracts frames with its own ffmpeg.
+func (g *Gateway) loadMotion(attachments []attachment, userID string, scoped ...*config.Logger) ([]media.DocumentRef, []string) {
+	log := g.log(scoped...)
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	refs := make([]media.DocumentRef, 0, len(attachments))
+	unsupported := make([]string, 0)
+	total := 0
+	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
+		if !media.LooksLikeMotionMIME(attachment.MimeType) && !media.IsMotionExtension(attachment.TransferName) {
+			continue
+		}
+		if len(refs) >= media.MaxMotionPerRequest {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if attachment.TotalBytes > media.MaxMotionBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if total+attachment.TotalBytes > media.MaxTotalMotionBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if g.MotionCache == nil {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		data, err := g.fetchMotionBytes(attachment)
+		if err != nil {
+			log.Debug("gateway.motion.rejected", "rejected imessage motion media", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		total += len(data)
+		if total > media.MaxTotalMotionBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		name, mime, err := media.SniffMotion(attachment.TransferName, attachment.MimeType, data)
+		if err != nil {
+			log.Debug("gateway.motion.rejected", "rejected imessage motion media", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		path, err := g.MotionCache.Save(context.Background(), userID, name, data)
+		if err != nil {
+			log.Debug("gateway.motion.rejected", "rejected imessage motion media", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		duration, width, height := media.ProbeMotion(context.Background(), "", path)
+		refs = append(refs, media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data)), DurationSeconds: duration, Width: width, Height: height})
+	}
+	if len(refs) == 0 {
+		return nil, unsupported
+	}
+	return refs, unsupported
+}
+
+func (g *Gateway) fetchMotionBytes(attachment attachment) ([]byte, error) {
+	if strings.TrimSpace(attachment.GUID) == "" {
+		return nil, fmt.Errorf("attachment GUID is empty")
+	}
+	endpoint, err := buildBlueBubblesAttachmentEndpoint(g.BlueBubblesURL, attachment.GUID, g.BlueBubblesPassword)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build BlueBubbles attachment request: %w", err)
+	}
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download BlueBubbles attachment: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("download BlueBubbles attachment failed with status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxMotionBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read BlueBubbles attachment: %w", err)
+	}
+	if len(body) > media.MaxMotionBytes {
+		return nil, fmt.Errorf("attachment exceeds %d bytes", media.MaxMotionBytes)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("attachment is empty")
+	}
+	return body, nil
 }
 
 // dropAttachedLabels removes labels for files that were successfully

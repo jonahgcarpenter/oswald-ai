@@ -11,7 +11,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 )
 
@@ -80,8 +79,8 @@ type Gateway struct {
 	Log            *config.Logger
 	APIBaseURL     string
 	HTTPClient     *http.Client
-	VideoFrames    media.VideoFrameExtractor
 	DocCache       *docache.Cache
+	MotionCache    *docache.Cache
 	replyMu        sync.RWMutex
 	replyIndex     map[string]replyContext
 	labelMu        sync.RWMutex

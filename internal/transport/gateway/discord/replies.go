@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
@@ -52,7 +52,7 @@ func (dg *Gateway) pruneReplyIndexLocked() int {
 	return pruned
 }
 
-func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []llm.InputImage, requestID string) *routing.ReplyContext {
+func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []llm.InputImage, requestID, userID string) *routing.ReplyContext {
 	log := dg.log().With(config.F("request_id", requestID))
 	referenced := msg.ReferencedMessage
 	if referenced == nil {
@@ -73,20 +73,21 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 			if remainingImageSlots > 0 {
 				reply.Images, reply.Unsupported = dg.loadImagesLimit(cached.Attachments, remainingImageSlots, log)
 			} else {
-				reply.Unsupported = discordAttachmentLabels(cached.Attachments)
+				reply.Unsupported = unsupportedImageLabels(cached.Attachments)
+			}
+			if motion, motionUnsupported := dg.loadMotion(cached.Attachments, userID, log); len(motion) > 0 || len(motionUnsupported) > 0 {
+				reply.Documents = append(reply.Documents, motion...)
+				reply.Unsupported = append(reply.Unsupported, motionUnsupported...)
 			}
 		}
 		if len(cached.Embeds) > 0 {
 			remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
-			if remainingImageSlots > 0 {
-				embedImages, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots, log)
-				reply.Images = append(reply.Images, embedImages...)
-				reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
-				if len(embedImages) > 0 {
-					reply.Text = stripEmbedURLsFromText(reply.Text, cached.Embeds)
-				}
-			} else {
-				reply.Unsupported = append(reply.Unsupported, discordEmbedLabels(cached.Embeds)...)
+			embedImages, embedMotion, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots, userID, log)
+			reply.Images = append(reply.Images, embedImages...)
+			reply.Documents = append(reply.Documents, embedMotion...)
+			reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
+			if len(embedImages) > 0 || len(embedMotion) > 0 {
+				reply.Text = stripEmbedURLsFromText(reply.Text, cached.Embeds)
 			}
 		}
 		log.Debug("gateway.reply_context.applied", "applied discord cached reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", cached.IsFromBot), config.F("reply_image_count", len(reply.Images)))
@@ -108,20 +109,21 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 		if remainingImageSlots > 0 {
 			reply.Images, reply.Unsupported = dg.loadImagesLimit(referenced.Attachments, remainingImageSlots, log)
 		} else {
-			reply.Unsupported = discordAttachmentLabels(referenced.Attachments)
+			reply.Unsupported = unsupportedImageLabels(referenced.Attachments)
+		}
+		if motion, motionUnsupported := dg.loadMotion(referenced.Attachments, userID, log); len(motion) > 0 || len(motionUnsupported) > 0 {
+			reply.Documents = append(reply.Documents, motion...)
+			reply.Unsupported = append(reply.Unsupported, motionUnsupported...)
 		}
 	}
 	if len(referenced.Embeds) > 0 {
 		remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
-		if remainingImageSlots > 0 {
-			embedImages, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots, log)
-			reply.Images = append(reply.Images, embedImages...)
-			reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
-			if len(embedImages) > 0 {
-				reply.Text = stripEmbedURLsFromText(reply.Text, referenced.Embeds)
-			}
-		} else {
-			reply.Unsupported = append(reply.Unsupported, discordEmbedLabels(referenced.Embeds)...)
+		embedImages, embedMotion, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots, userID, log)
+		reply.Images = append(reply.Images, embedImages...)
+		reply.Documents = append(reply.Documents, embedMotion...)
+		reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
+		if len(embedImages) > 0 || len(embedMotion) > 0 {
+			reply.Text = stripEmbedURLsFromText(reply.Text, referenced.Embeds)
 		}
 	}
 	if quotedContent == "" && len(reply.Images) == 0 && len(reply.Unsupported) == 0 {
@@ -137,25 +139,26 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 				if remainingImageSlots > 0 {
 					reply.Images, reply.Unsupported = dg.loadImagesLimit(fetched.Attachments, remainingImageSlots, log)
 				} else {
-					reply.Unsupported = discordAttachmentLabels(fetched.Attachments)
+					reply.Unsupported = unsupportedImageLabels(fetched.Attachments)
+				}
+				if motion, motionUnsupported := dg.loadMotion(fetched.Attachments, userID, log); len(motion) > 0 || len(motionUnsupported) > 0 {
+					reply.Documents = append(reply.Documents, motion...)
+					reply.Unsupported = append(reply.Unsupported, motionUnsupported...)
 				}
 			}
 			if len(fetched.Embeds) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
-				if remainingImageSlots > 0 {
-					embedImages, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots, log)
-					reply.Images = append(reply.Images, embedImages...)
-					reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
-					if len(embedImages) > 0 {
-						reply.Text = stripEmbedURLsFromText(reply.Text, fetched.Embeds)
-					}
-				} else {
-					reply.Unsupported = append(reply.Unsupported, discordEmbedLabels(fetched.Embeds)...)
+				embedImages, embedMotion, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots, userID, log)
+				reply.Images = append(reply.Images, embedImages...)
+				reply.Documents = append(reply.Documents, embedMotion...)
+				reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
+				if len(embedImages) > 0 || len(embedMotion) > 0 {
+					reply.Text = stripEmbedURLsFromText(reply.Text, fetched.Embeds)
 				}
 			}
 		}
 	}
-	if strings.TrimSpace(reply.Text) == "" && len(reply.Images) == 0 && len(reply.Unsupported) == 0 {
+	if strings.TrimSpace(reply.Text) == "" && len(reply.Images) == 0 && len(reply.Documents) == 0 && len(reply.Unsupported) == 0 {
 		reply.IsUnavailable = true
 	}
 	status := "ok"

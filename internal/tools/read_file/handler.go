@@ -13,6 +13,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/docextract"
@@ -72,6 +73,9 @@ func readFileCall(ctx context.Context, ws *workspace.Workspace, docs *docache.Ca
 			return governance.Result{}, fmt.Errorf("file not found; did you mean %s", suggestion)
 		}
 		return governance.Result{}, err
+	}
+	if media.IsMotionExtension(abs) {
+		return governance.Result{}, errors.New("cannot read motion media — extract frames with terminal ffmpeg into cache/scratch, then vision_analyze the frames")
 	}
 	data, err := workspace.ReadRegularFile(abs)
 	if err != nil {

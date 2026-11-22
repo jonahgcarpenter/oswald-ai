@@ -2,16 +2,12 @@ package media
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"image"
 	"image/color"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -145,113 +141,11 @@ func TestNormalizeInputImageKeepsSingleFrameGIF(t *testing.T) {
 	}
 }
 
-func TestNormalizeInputImageBuildsTimelineSampledGIFContactSheet(t *testing.T) {
-	colors := []color.RGBA{
-		{R: 255, A: 255},
-		{G: 255, A: 255},
-		{B: 255, A: 255},
-		{R: 255, G: 255, A: 255},
-		{R: 255, B: 255, A: 255},
-	}
-	frames := make([]*image.Paletted, len(colors))
-	for index, frameColor := range colors {
-		frames[index] = solidGIFFrame(image.Rect(0, 0, 6, 4), frameColor)
-	}
-	raw := encodeTestGIF(t, frames, []int{1, 1, 1, 1, 1}, nil, 6, 4)
-
-	result, err := NormalizeInputImageFromBytes(nil, "image/gif", raw, "animated.gif")
-	if err != nil {
-		t.Fatalf("normalize animated GIF: %v", err)
-	}
-	if result.Width != 12 || result.Height != 8 {
-		t.Fatalf("contact sheet dimensions = %dx%d, want 12x8", result.Width, result.Height)
-	}
-	if result.OriginalWidth != 6 || result.OriginalHeight != 4 {
-		t.Fatalf("original dimensions = %dx%d, want 6x4", result.OriginalWidth, result.OriginalHeight)
-	}
-	if result.Image.MimeType != "image/jpeg" {
-		t.Fatalf("opaque contact sheet MIME = %q, want image/jpeg", result.Image.MimeType)
-	}
-	if !result.Image.IsGIFContactSheet {
-		t.Fatal("animated GIF was not marked as a contact sheet")
-	}
-	decoded := decodeInputImage(t, result.Image)
-	for index, want := range []color.RGBA{colors[0], colors[1], colors[3], colors[4]} {
-		x := index%2*6 + 3
-		y := index/2*4 + 2
-		assertColorNear(t, decoded.At(x, y), want)
-	}
-}
-
-func TestNormalizeInputImageCompositesGIFDisposalBackground(t *testing.T) {
-	palette := color.Palette{color.Transparent, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255}, color.RGBA{G: 255, A: 255}}
-	base := image.NewPaletted(image.Rect(0, 0, 4, 4), palette)
-	fillPaletted(base, 1)
-	blue := image.NewPaletted(image.Rect(0, 0, 2, 2), palette)
-	fillPaletted(blue, 2)
-	green := image.NewPaletted(image.Rect(2, 2, 4, 4), palette)
-	fillPaletted(green, 3)
-	raw := encodeTestGIF(t, []*image.Paletted{base, blue, green}, nil, []byte{gif.DisposalNone, gif.DisposalBackground, gif.DisposalNone}, 4, 4)
-
-	result, err := NormalizeInputImageFromBytes(nil, "image/gif", raw, "background.gif")
-	if err != nil {
-		t.Fatalf("normalize disposal-background GIF: %v", err)
-	}
-	if result.Image.MimeType != "image/png" {
-		t.Fatalf("transparent contact sheet MIME = %q, want image/png", result.Image.MimeType)
-	}
-	decoded := decodeInputImage(t, result.Image)
-	_, _, _, alpha := decoded.At(0, 4).RGBA()
-	if alpha != 0 {
-		t.Fatalf("disposed area alpha = %d, want transparent", alpha)
-	}
-	assertColorNear(t, decoded.At(3, 7), color.RGBA{G: 255, A: 255})
-}
-
-func TestNormalizeInputImageLimitsGIFContactSheet(t *testing.T) {
-	frames := make([]*image.Paletted, 4)
-	for index := range frames {
-		frames[index] = solidGIFFrame(image.Rect(0, 0, 1300, 10), color.RGBA{R: uint8(index * 60), G: 200, B: 100, A: 255})
-	}
-	raw := encodeTestGIF(t, frames, nil, nil, 1300, 10)
-
-	result, err := NormalizeInputImageFromBytes(nil, "image/gif", raw, "wide.gif")
-	if err != nil {
-		t.Fatalf("normalize wide animated GIF: %v", err)
-	}
-	if !result.WasResized || result.Width > MaxNormalizedImageLongEdge || result.Height > MaxNormalizedImageLongEdge {
-		t.Fatalf("contact sheet was not limited: %+v", result)
-	}
-	if result.NormalizedBytes > MaxNormalizedImageBytes {
-		t.Fatalf("normalized bytes = %d, want <= %d", result.NormalizedBytes, MaxNormalizedImageBytes)
-	}
-}
-
-func TestNormalizeInputImageCompositesGIFDisposalPrevious(t *testing.T) {
-	palette := color.Palette{color.Transparent, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255}, color.RGBA{G: 255, A: 255}}
-	base := image.NewPaletted(image.Rect(0, 0, 4, 4), palette)
-	fillPaletted(base, 1)
-	blue := image.NewPaletted(image.Rect(0, 0, 2, 2), palette)
-	fillPaletted(blue, 2)
-	green := image.NewPaletted(image.Rect(2, 2, 4, 4), palette)
-	fillPaletted(green, 3)
-	raw := encodeTestGIF(t, []*image.Paletted{base, blue, green}, nil, []byte{gif.DisposalNone, gif.DisposalPrevious, gif.DisposalNone}, 4, 4)
-
-	result, err := NormalizeInputImageFromBytes(nil, "image/gif", raw, "previous.gif")
-	if err != nil {
-		t.Fatalf("normalize disposal-previous GIF: %v", err)
-	}
-	decoded := decodeInputImage(t, result.Image)
-	assertColorNear(t, decoded.At(0, 4), color.RGBA{R: 255, A: 255})
-	assertColorNear(t, decoded.At(3, 7), color.RGBA{G: 255, A: 255})
-}
-
 func TestResizeInputImagesForAttemptScalesNormalizedImages(t *testing.T) {
 	jpegInput, err := NormalizeInputImageFromBytes(nil, "image/jpeg", encodeTestJPEG(t, 800, 600), "photo.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	jpegInput.Image.IsGIFContactSheet = true
 	pngInput, err := NormalizeInputImageFromBytes(nil, "image/png", encodeTestPNG(t, 400, 200, true), "alpha.png")
 	if err != nil {
 		t.Fatal(err)
@@ -275,59 +169,6 @@ func TestResizeInputImagesForAttemptScalesNormalizedImages(t *testing.T) {
 	}
 	if resized[0].MimeType != "image/jpeg" || resized[1].MimeType != "image/png" || resized[0].Source != "photo.jpg" || resized[1].Source != "alpha.png" {
 		t.Fatalf("image metadata was not preserved: %+v", resized)
-	}
-	if !resized[0].IsGIFContactSheet {
-		t.Fatal("GIF contact-sheet metadata was not preserved")
-	}
-}
-
-func TestFFmpegVideoFrameExtractorBuildsContactSheet(t *testing.T) {
-	tempDir := t.TempDir()
-	framePath := filepath.Join(tempDir, "frame.png")
-	if err := os.WriteFile(framePath, encodeTestPNG(t, 8, 8, false), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ffprobePath := filepath.Join(tempDir, "ffprobe")
-	if err := os.WriteFile(ffprobePath, []byte("#!/bin/sh\nprintf '3.0\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	ffmpegPath := filepath.Join(tempDir, "ffmpeg")
-	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nfor output do :; done\ndir=${output%/*}\ncp \"$FRAME_FIXTURE\" \"$dir/frame-1.png\"\ncp \"$FRAME_FIXTURE\" \"$dir/frame-2.png\"\ncp \"$FRAME_FIXTURE\" \"$dir/frame-3.png\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("FRAME_FIXTURE", framePath)
-
-	extractor := FFmpegVideoFrameExtractor{FFmpegPath: ffmpegPath, FFprobePath: ffprobePath}
-	input, err := extractor.Extract(context.Background(), []byte("video"), "clip.mp4")
-	if err != nil {
-		t.Fatalf("extract video contact sheet: %v", err)
-	}
-	decoded := decodeInputImage(t, input)
-	if got := decoded.Bounds().Size(); got != (image.Point{X: 16, Y: 16}) {
-		t.Fatalf("contact sheet dimensions = %v, want 16x16", got)
-	}
-	if input.Source != "clip.mp4" {
-		t.Fatalf("source = %q, want clip.mp4", input.Source)
-	}
-	if !input.IsGIFContactSheet {
-		t.Fatal("extracted video was not marked as a GIF contact sheet")
-	}
-}
-
-func TestFFmpegVideoFrameExtractorRejectsEmptySuccessfulOutput(t *testing.T) {
-	tempDir := t.TempDir()
-	ffprobePath := filepath.Join(tempDir, "ffprobe")
-	if err := os.WriteFile(ffprobePath, []byte("#!/bin/sh\nprintf '3.0\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	ffmpegPath := filepath.Join(tempDir, "ffmpeg")
-	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	extractor := FFmpegVideoFrameExtractor{FFmpegPath: ffmpegPath, FFprobePath: ffprobePath}
-	if _, err := extractor.Extract(context.Background(), []byte("video"), "clip.mp4"); err == nil || !strings.Contains(err.Error(), "produced no video frames") {
-		t.Fatalf("error = %v, want no-frames error", err)
 	}
 }
 

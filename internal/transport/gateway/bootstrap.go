@@ -41,6 +41,7 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 		}
 		if strings.TrimSpace(cfg.ProfileRoot) != "" {
 			discordGateway.DocCache = docache.New(cfg.ProfileRoot)
+			discordGateway.MotionCache = docache.NewMotion(cfg.ProfileRoot)
 		}
 		services = append(services, discordGateway)
 	} else {
@@ -68,6 +69,7 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 			}
 			if strings.TrimSpace(cfg.ProfileRoot) != "" {
 				iMessageGateway.DocCache = docache.New(cfg.ProfileRoot)
+				iMessageGateway.MotionCache = docache.NewMotion(cfg.ProfileRoot)
 			}
 			services = append(services, iMessageGateway)
 		}

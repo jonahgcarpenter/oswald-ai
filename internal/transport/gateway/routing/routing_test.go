@@ -90,8 +90,8 @@ func TestBuildPromptCompactsUnsupportedAttachments(t *testing.T) {
 		labels []string
 		want   string
 	}{
-		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"},
-		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"},
+		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, an image, a GIF, or a video).]"},
+		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, an image, a GIF, or a video).]"},
 	} {
 		if got := BuildPrompt(test.prompt, nil, test.labels, nil); got != test.want {
 			t.Fatalf("prompt=%q want=%q", got, test.want)
@@ -121,7 +121,7 @@ func TestBuildPromptIncludesReplyImagesAndUnsupportedAttachments(t *testing.T) {
 	if len(decision.Images) != 2 {
 		t.Fatalf("expected current and reply image, got %d", len(decision.Images))
 	}
-	want := "[Replying to Alice: \"look at this\" with image; unsupported attachment: doc.pdf]\n\nwhat is it?\n\n[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"
+	want := "[Replying to Alice: \"look at this\" with image; unsupported attachment: doc.pdf]\n\nwhat is it?\n\n[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, an image, a GIF, or a video).]"
 	if decision.Prompt != want {
 		t.Fatalf("unexpected prompt:\n%s", decision.Prompt)
 	}
@@ -143,34 +143,17 @@ func TestBuildPromptImageOnlyAndReplyImageLimit(t *testing.T) {
 	}
 }
 
-func TestBuildPromptDescribesGIFContactSheets(t *testing.T) {
-	gif := llm.InputImage{MimeType: "image/jpeg", Data: "gif", IsGIFContactSheet: true}
-	image := llm.InputImage{MimeType: "image/jpeg", Data: "image"}
-	tests := []struct {
-		name   string
-		images []llm.InputImage
-		want   string
-	}{
-		{name: "single GIF", images: []llm.InputImage{gif}, want: "[User sent a GIF; the attached image is a contact sheet showing its contents over time]"},
-		{name: "multiple GIFs", images: []llm.InputImage{gif, gif}, want: "[User sent 2 GIFs; the attached images are contact sheets showing their contents over time]"},
-		{name: "mixed", images: []llm.InputImage{image, gif}, want: "[User sent 2 images, including GIF contact sheets showing their contents over time]"},
+func TestBuildPromptDescribesMotionMedia(t *testing.T) {
+	video := media.DocumentRef{Path: "/private/ab12.mp4", Filename: "clip.mp4", MIMEType: "video/mp4", DurationSeconds: 12.4, Width: 720, Height: 1280}
+	want := "what happens?\n\n[Video attached at: /private/ab12.mp4 ('clip.mp4', 0:12, 720×1280)]\n" + media.MotionRecipeNote
+	if got := BuildPrompt("what happens?", nil, nil, nil, []media.DocumentRef{video}); got != want {
+		t.Fatalf("prompt = %q, want %q", got, want)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := BuildPrompt("", test.images, nil, nil); got != test.want {
-				t.Fatalf("prompt = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
 
-func TestBuildPromptDescribesGIFContactSheetInReply(t *testing.T) {
-	reply := &ReplyContext{
-		SenderName: "Alice",
-		Images:     []llm.InputImage{{MimeType: "image/jpeg", Data: "gif", IsGIFContactSheet: true}},
-	}
-	if got := BuildPrompt("what happens?", nil, nil, reply); got != "[Replying to Alice's GIF contact sheet showing its contents over time]\n\nwhat happens?" {
-		t.Fatalf("unexpected prompt %q", got)
+	gif := media.DocumentRef{Path: "/private/cd34.gif", Filename: "funny.gif", MIMEType: "image/gif", DurationSeconds: 3.2, Width: 480, Height: 270}
+	want = "[GIF attached at: /private/cd34.gif ('funny.gif', 0:03, 480×270)]\n" + media.MotionRecipeNote
+	if got := BuildPrompt("", nil, nil, nil, []media.DocumentRef{gif}); got != want {
+		t.Fatalf("gif prompt = %q, want %q", got, want)
 	}
 }
 

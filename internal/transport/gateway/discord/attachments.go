@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,13 +30,16 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int, scop
 		return nil, nil
 	}
 	if maxImages <= 0 {
-		return nil, discordAttachmentLabels(attachments)
+		return nil, unsupportedImageLabels(attachments)
 	}
 
 	images := make([]llm.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
+		if media.LooksLikeMotionMIME(attachment.ContentType) || media.IsMotionExtension(attachment.Filename) {
+			continue // GIF/video attachments stay with the motion lane.
+		}
 		if len(images) >= maxImages {
 			if isDocumentCandidate(attachment.Filename, attachment.ContentType) {
 				continue
@@ -184,40 +188,141 @@ func discordAttachmentLabels(attachments []Attachment) []string {
 	return labels
 }
 
-func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int, scoped ...*config.Logger) ([]llm.InputImage, []string) {
+// unsupportedImageLabels reports non-motion labels when the image lane is
+// closed; GIF/video attachments belong to the motion lane and are never
+// downgraded from here.
+func unsupportedImageLabels(attachments []Attachment) []string {
+	labels := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		if media.LooksLikeMotionMIME(attachment.ContentType) || media.IsMotionExtension(attachment.Filename) {
+			continue
+		}
+		labels = append(labels, media.AttachmentLabel(attachment.Filename, attachment.ContentType))
+	}
+	return labels
+}
+
+// loadMotion downloads GIF and video attachments into the private motion
+// cache. Nothing is inlined: prompts carry the cache path plus best-effort
+// duration/dimensions, and the agent extracts frames with its own ffmpeg.
+func (dg *Gateway) loadMotion(attachments []Attachment, userID string, scoped ...*config.Logger) ([]media.DocumentRef, []string) {
 	log := dg.log(scoped...)
-	if len(embeds) == 0 {
+	if len(attachments) == 0 {
 		return nil, nil
 	}
-	if maxImages <= 0 {
-		return nil, discordEmbedLabels(embeds)
+	refs := make([]media.DocumentRef, 0, len(attachments))
+	unsupported := make([]string, 0)
+	total := 0
+	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
+		if !media.LooksLikeMotionMIME(attachment.ContentType) && !media.IsMotionExtension(attachment.Filename) {
+			continue
+		}
+		if len(refs) >= media.MaxMotionPerRequest {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if attachment.Size > media.MaxMotionBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if total+attachment.Size > media.MaxTotalMotionBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if dg.MotionCache == nil {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		data, err := dg.fetchMotionBytes(attachment.URL, label)
+		if err != nil {
+			log.Debug("gateway.motion.rejected", "rejected discord motion media", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		total += len(data)
+		if total > media.MaxTotalMotionBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		name, mime, err := media.SniffMotion(attachment.Filename, attachment.ContentType, data)
+		if err != nil {
+			log.Debug("gateway.motion.rejected", "rejected discord motion media", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		path, err := dg.MotionCache.Save(context.Background(), userID, name, data)
+		if err != nil {
+			log.Debug("gateway.motion.rejected", "rejected discord motion media", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		duration, width, height := media.ProbeMotion(context.Background(), "", path)
+		refs = append(refs, media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data)), DurationSeconds: duration, Width: width, Height: height})
+	}
+	if len(refs) == 0 {
+		return nil, unsupported
+	}
+	return refs, unsupported
+}
+
+func (dg *Gateway) fetchMotionBytes(rawURL, label string) ([]byte, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, fmt.Errorf("motion URL is empty")
+	}
+	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("download motion media: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("download motion media: unexpected status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxMotionBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read motion media: %w", err)
+	}
+	if len(body) > media.MaxMotionBytes {
+		return nil, fmt.Errorf("motion media %q exceeds %d bytes", label, media.MaxMotionBytes)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("motion media is empty")
+	}
+	return body, nil
+}
+
+func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int, userID string, scoped ...*config.Logger) ([]llm.InputImage, []media.DocumentRef, []string) {
+	log := dg.log(scoped...)
+	if len(embeds) == 0 {
+		return nil, nil, nil
 	}
 
 	images := make([]llm.InputImage, 0, len(embeds))
+	motion := make([]media.DocumentRef, 0)
 	unsupported := make([]string, 0)
 	for _, embed := range embeds {
 		if !discordEmbedIsIntentionalMedia(embed) {
 			continue
 		}
 		label := discordEmbedLabel(embed)
+		if videoURL := discordEmbedVideoURL(embed); videoURL != "" {
+			if len(motion) >= media.MaxMotionPerRequest {
+				unsupported = append(unsupported, label)
+				continue
+			}
+			ref, err := dg.loadEmbedMotion(videoURL, label, userID)
+			if err == nil {
+				motion = append(motion, ref)
+				continue
+			}
+			log.Warn("gateway.embed.video_fallback", "failed to cache animated discord embed; using static preview",
+				config.F("status", "degraded"), config.ErrorField(err))
+		}
+
 		if len(images) >= maxImages {
 			unsupported = append(unsupported, label)
 			continue
 		}
-
-		if videoURL := discordEmbedVideoURL(embed); videoURL != "" {
-			image, err := dg.fetchEmbedVideo(videoURL, label)
-			if err == nil && image.Data != "" {
-				images = append(images, image)
-				continue
-			}
-			if err == nil {
-				err = fmt.Errorf("video extractor returned an empty image")
-			}
-			log.Warn("gateway.embed.video_fallback", "failed to extract animated discord embed; using static preview",
-				config.F("status", "degraded"), config.ErrorField(err))
-		}
-
 		assetURL := discordEmbedImageURL(embed)
 		if assetURL == "" {
 			continue
@@ -235,10 +340,10 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int, scoped ..
 		images = append(images, image)
 	}
 
-	if len(images) == 0 {
-		return nil, unsupported
+	if len(images) == 0 && len(motion) == 0 {
+		return nil, nil, unsupported
 	}
-	return images, unsupported
+	return images, motion, unsupported
 }
 
 func discordEmbedLabels(embeds []Embed) []string {
@@ -331,31 +436,48 @@ func discordEmbedSourceURLs(embeds []Embed) []string {
 	return urls
 }
 
-func (dg *Gateway) fetchEmbedVideo(rawURL, label string) (llm.InputImage, error) {
-	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
+func (dg *Gateway) loadEmbedMotion(rawURL, label, userID string) (media.DocumentRef, error) {
+	if dg.MotionCache == nil {
+		return media.DocumentRef{}, fmt.Errorf("motion cache unavailable")
+	}
+	data, err := dg.fetchMotionBytes(rawURL, label)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("download animated embed %q: %w", label, err)
+		return media.DocumentRef{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return llm.InputImage{}, fmt.Errorf("download animated embed %q: unexpected status %d", label, resp.StatusCode)
+	name := "discord-embed" + embedMotionExtension(rawURL)
+	mime := "video/mp4"
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".gif":
+		mime = "image/gif"
+	case ".webm":
+		mime = "video/webm"
+	case ".mov":
+		mime = "video/quicktime"
+	case ".mkv":
+		mime = "video/x-matroska"
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
+	name, mime, err = media.SniffMotion(name, mime, data)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("read animated embed %q: %w", label, err)
+		return media.DocumentRef{}, err
 	}
-	if len(body) > media.MaxImageBytes {
-		return llm.InputImage{}, fmt.Errorf("animated embed %q exceeds %d bytes", label, media.MaxImageBytes)
-	}
-	extractor := dg.VideoFrames
-	if extractor == nil {
-		extractor = media.FFmpegVideoFrameExtractor{}
-	}
-	image, err := extractor.Extract(context.Background(), body, label)
+	path, err := dg.MotionCache.Save(context.Background(), userID, name, data)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("extract animated embed %q: %w", label, err)
+		return media.DocumentRef{}, err
 	}
-	return image, nil
+	duration, width, height := media.ProbeMotion(context.Background(), "", path)
+	return media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data)), DurationSeconds: duration, Width: width, Height: height}, nil
+}
+
+func embedMotionExtension(rawURL string) string {
+	path := rawURL
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if media.IsMotionExtension("motion" + ext) {
+		return ext
+	}
+	return ".mp4"
 }
 
 func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string, scoped ...*config.Logger) (llm.InputImage, error) {

@@ -8,11 +8,15 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 )
 
-// SweepHook registers the document cache sweep on the shared per-profile
-// cleanup worker.
+// SweepHook registers the cache sweep on the shared per-profile cleanup
+// worker. Documents and motion media register separate hooks.
 func SweepHook(c *Cache, log *config.Logger) prune.Hook {
+	name := "documents"
+	if c != nil && c.kind == kindMotion {
+		name = "motion"
+	}
 	return prune.Hook{
-		Name:            "documents",
+		Name:            name,
 		FailedEvent:     "doccache.sweep.failed",
 		FailedMessage:   "document cache sweep failed",
 		CompleteEvent:   "doccache.sweep.complete",

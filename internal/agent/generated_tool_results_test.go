@@ -150,7 +150,7 @@ func TestGeneratedGIFToolPreviewCachesOriginalWithoutDelivery(t *testing.T) {
 		t.Fatalf("generated GIF was automatically delivered: err=%v attachments=%d", err, len(response.Attachments))
 	}
 	result := toolResultByID(chat.requests[1].Messages, "gif")
-	if result == nil || len(result.Images) != 1 || !strings.Contains(result.Content, "Showing only the first frame") || result.Images[0].IsGIFContactSheet {
+	if result == nil || len(result.Images) != 1 || !strings.Contains(result.Content, "Showing only the first frame") {
 		t.Fatal("generated GIF tool result did not disclose first-frame loading")
 	}
 	preview, err := base64.StdEncoding.DecodeString(result.Images[0].Data)

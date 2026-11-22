@@ -75,21 +75,26 @@ parts from one sender/chat coalesce into a single turn (2000ms quiet / 3000ms ma
 dedupe, creation-time ordering) before admission. Shutdown sends deliberate typing DELETEs
 for in-flight chats; nothing clears typing at startup.
 
-Media in: at most 4 images, 10 MiB each (JPEG/PNG/GIF/WebP/HEIC/HEIF), normalized to ≤2560 longest
-edge / 280 KiB JPEG/PNG. GIFs use the first frame or a ≤4-tile contact sheet; GIFV extracts up to
-4 ffmpeg frames. Orientation is corrected before resize — all eight EXIF orientations for
-JPEG/EXIF-bearing PNG/WebP, ordered `irot`/`imir` for HEIC/HEIF with container transforms winning
-so pixels are never double-rotated. Out: ≤8 MiB each, 10 files / 80 MiB total, safe unique
-basenames. `MEDIA:/absolute/path` (images) and `FILE:/absolute/path` (any file type)
-tokens resolve against the sender's cache first (MEDIA only), then raw absolute paths
-under the file groups (protected names sealed, managed cache via the cache resolver), and are
-stripped before history and the text-only API.
+Media in: at most 4 images, 10 MiB each (JPEG/PNG/WebP/HEIC/HEIF), normalized to ≤2560 longest
+edge / 280 KiB JPEG/PNG. GIFs and videos (GIF/MP4/WebM/MOV/M4V/MKV; ≤4 per message, 25 MiB each,
+60 MiB total) are never inlined: raw bytes land in the private `cache/videos/` (0700, 24h sweep),
+and the prompt carries the cache path plus best-effort duration/dimensions from one bounded
+ffprobe — the agent extracts frames itself with its sandbox ffmpeg and analyzes them through
+`vision_analyze`. Link-shared GIFs (Discord gifv embeds) use the same lane; a failed motion
+download falls back to the static embed preview. Orientation is corrected before resize — all eight
+EXIF orientations for JPEG/EXIF-bearing PNG/WebP, ordered `irot`/`imir` for HEIC/HEIF with
+container transforms winning so pixels are never double-rotated. Out: ≤8 MiB each, 10 files /
+80 MiB total, safe unique basenames. `MEDIA:/absolute/path` (images) and `FILE:/absolute/path`
+(any file type) tokens resolve against the sender's cache first (MEDIA only), then raw absolute
+paths under the file groups (protected names sealed, managed cache via the cache resolver), and
+are stripped before history and the text-only API.
 
 ## Limitations
 
 Cache files expire after 24 hours and are never reconstructed from SQLite — expired previews stay
 expired. Source decoding precedes resize, but the bounds don't guarantee strict peak decoded-memory
-limits. There are no general file/audio/video inputs, and gateway tool previews stay suppressed:
+limits. There are no general file or audio inputs; inbound GIF/video rides the motion lane (raw
+cache + agent ffmpeg) instead of inline vision, and gateway tool previews stay suppressed:
 follow-ups use text-only tool history.
 
 ## Tests

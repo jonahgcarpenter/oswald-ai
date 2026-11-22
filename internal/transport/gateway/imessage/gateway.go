@@ -99,6 +99,7 @@ type Gateway struct {
 	Broker              *broker.Broker
 	HTTPClient          *http.Client
 	DocCache            *docache.Cache
+	MotionCache         *docache.Cache
 	capabilityMu        sync.Mutex
 	capabilitiesLoaded  bool
 	privateAPIEnabled   bool

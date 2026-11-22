@@ -297,6 +297,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cron.RepairProfile(profile.ProfileRoot, name)
 		imagecache.RepairProfile(profile.ProfileRoot, name)
 		docache.RepairProfile(profile.ProfileRoot, name)
+		docache.RepairMotionProfile(profile.ProfileRoot, name)
 		plugins.RepairProfile(profile.ProfileRoot)
 		store, err := memory.NewProfileStore(ctx, profile.ProfileRoot, name, rootLog)
 		if err != nil {
@@ -349,11 +350,12 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))
 		cleanup.Add(docache.SweepHook(docache.NewProfileCache(profile.ProfileRoot, name), rootLog))
+		cleanup.Add(docache.SweepHook(docache.NewProfileMotionCache(profile.ProfileRoot, name), rootLog))
 		cleanup.Add(workspace.SweepHook(profile.ProfileRoot, rootLog))
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
 		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))
 		cleanup.Add(workspace.CacheChildrenHook(profile.ProfileRoot, rootLog, map[string]struct{}{
-			"scratch": {}, "images": {}, "documents": {}, "processes": {}, "browser": {},
+			"scratch": {}, "images": {}, "documents": {}, "videos": {}, "processes": {}, "browser": {},
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)
