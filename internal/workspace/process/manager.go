@@ -187,13 +187,15 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 	cmd := exec.Command(shell, "-c", command)
 	cmd.Dir = workdir
 	baseEnv := []string{
-		"PATH=/usr/bin:/bin:/usr/local/bin",
-		"HOME=" + sandboxHome(),
+		"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
+		"HOME=" + m.root,
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + workdir,
 		"OSWALD_SCRATCH=" + scratch,
 		"OSWALD_HOME=" + m.root,
+		"XDG_CACHE_HOME=" + filepath.Join(m.root, "cache", "xdg"),
+		"npm_config_cache=" + filepath.Join(m.root, "cache", "npm"),
 	}
 	cmd.Env = append(SandboxEnvForProfile(WithPluginShimsOnPath(WithNodeOnPath(baseEnv), m.root), m.root), GitHubTokenEnv()...)
 	stdin, err := cmd.StdinPipe()

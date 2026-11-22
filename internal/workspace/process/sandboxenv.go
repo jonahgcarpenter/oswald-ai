@@ -326,11 +326,3 @@ func GitHubTokenEnv() []string {
 	}
 	return env
 }
-
-// sandboxHome resolves the service HOME for background shells.
-func sandboxHome() string {
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return home
-	}
-	return "/"
-}

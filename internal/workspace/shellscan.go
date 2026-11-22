@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,8 +17,8 @@ const (
 
 // normalizeCommand folds evasion spellings into canonical form before
 // matching: line continuations, $IFS and $'\n' splits, fullwidth unicode,
-// and home spelled as an absolute path. Newlines are preserved so
-// heredoc structure survives for the position tagger.
+// and $HOME spelled either way. Newlines are preserved so heredoc structure
+// survives for the position tagger.
 func normalizeCommand(command string) string {
 	s := strings.ReplaceAll(command, "\\\r\n", " ")
 	s = strings.ReplaceAll(s, "\\\n", " ")
@@ -32,9 +31,6 @@ func normalizeCommand(command string) string {
 		lines[i] = strings.Join(strings.Fields(line), " ")
 	}
 	s = strings.Join(lines, "\n")
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" && home != "/" {
-		s = strings.ReplaceAll(s, home, "~")
-	}
 	s = strings.ReplaceAll(s, "$HOME", "~")
 	s = strings.ReplaceAll(s, "${HOME}", "~")
 	return s

@@ -92,9 +92,10 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   `files_only`/`count` modes, 50-result default) and glob file search (discovery or
   exact newest-first order); skips `.git`/`node_modules`/`__pycache__` and >1 MiB files.
 - `terminal` — foreground `/bin/sh -c` (default 180s, 600s max; over-cap promotes to
-  tracked background) with minimal env (`PATH` includes `/opt/oswald`,
-  `TMPDIR=<cwd>/cache/scratch/`); arg validation lives here, guarded execution in
-  `workspace.ExecuteCommand` (pre-execution chain, review escalation, spawn).
+  tracked background) with minimal env (`HOME`/`OSWALD_HOME` = profile root, `PATH`
+  includes `/opt/oswald`, `TMPDIR=<cwd>/cache/scratch/`, tool caches under `cache/`);
+  arg validation lives here, guarded execution in `workspace.ExecuteCommand`
+  (pre-execution chain, review escalation, spawn).
 - `execute_code` — stateless `python3` per call (300s cap, 200KB code limit, 50KB
   output cap) with `__pycache__` reset support; shares the terminal arg-surface pattern.
 - `process_manage` — tracked background sessions: `list|poll|log|wait|kill|write|

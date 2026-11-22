@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // resolveFunc maps a model path to an absolute path inside the profile CWD.
@@ -636,14 +637,25 @@ func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int)
 	if r != nil && r.Root != "" {
 		cmd.Dir = r.Root
 	}
-	env := []string{"PATH=/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8"}
+	env := []string{"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8"}
 	if r != nil {
+		if r.Root != "" {
+			env = append(env,
+				"HOME="+r.Root,
+				"OSWALD_HOME="+r.Root,
+				"OSWALD_WORKSPACE="+r.Root,
+				"XDG_CACHE_HOME="+filepath.Join(r.Root, "cache", "xdg"),
+				"npm_config_cache="+filepath.Join(r.Root, "cache", "npm"),
+			)
+		}
 		if r.Scratch != "" {
 			ensureScratchDir(r.Root, r.Scratch, r.Profile)
 			env = append(env, "TMPDIR="+r.Scratch)
 		}
 		if r.Root != "" {
-			env = append(env, "OSWALD_WORKSPACE="+r.Root, "OSWALD_HOME="+r.Root)
+			env = process.WithPluginShimsOnPath(process.WithNodeOnPath(env), r.Root)
+			env = process.SandboxEnvForProfile(env, r.Root)
+			env = append(env, process.GitHubTokenEnv()...)
 		}
 	}
 	cmd.Env = env

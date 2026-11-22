@@ -217,3 +217,44 @@ func TestExecuteApprovedRefusesProtectedRead(t *testing.T) {
 		t.Fatalf("replay allowed protected read: %v", err)
 	}
 }
+
+// TestTildeResolvesAgainstWorkspaceRoot keeps the scan layer honest about
+// HOME: children get the profile root, so ~ must classify against it too.
+func TestTildeResolvesAgainstWorkspaceRoot(t *testing.T) {
+	_, alice, _ := profileTree(t)
+
+	for _, cmd := range []string{
+		"echo x > ~/notes.md",
+		"echo x > ~/sub/dir/notes.md",
+		"echo x > $HOME/notes.md",
+		"mkdir -p ~/work",
+		"rm -rf ~/build",
+	} {
+		if reason, blocked := ScanConfinedWrite(cmd, alice, alice, true); blocked {
+			t.Errorf("tilde write inside own home denied: %q: %s", cmd, reason)
+		}
+	}
+
+	deny := map[string]string{
+		"echo x > ~/.env":     "protected",
+		"echo x > $HOME/.env": "protected",
+		"echo x > ~/state.db": "system-managed",
+	}
+	for cmd, want := range deny {
+		if reason, blocked := ScanConfinedWrite(cmd, alice, alice, true); !blocked {
+			t.Errorf("tilde write outside agent scope allowed: %q", cmd)
+		} else if !strings.Contains(reason, want) {
+			t.Errorf("tilde deny %q = %q, want %q", cmd, reason, want)
+		}
+	}
+
+	if _, blocked := ScanProtectedRead("cat ~/.env", alice, alice, true); !blocked {
+		t.Error("tilde secret read allowed")
+	}
+	if _, blocked := ScanProtectedRead("cat ~/state.db", alice, alice, true); blocked {
+		t.Error("same-profile state.db tilde read denied")
+	}
+	if _, blocked := ScanProtectedRead("cat ~/../bob/state.db", alice, alice, true); !blocked {
+		t.Error("cross-profile state.db tilde read allowed")
+	}
+}

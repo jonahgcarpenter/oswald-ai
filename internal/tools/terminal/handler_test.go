@@ -398,6 +398,41 @@ func TestTerminalSetsOswaldHome(t *testing.T) {
 	}
 }
 
+func TestTerminalHomeAndCacheAreProfileRooted(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-home-cache"), map[string]interface{}{
+		"command": `printf '%s|%s|%s|%s' "$HOME" "$(echo ~)" "$XDG_CACHE_HOME" "$npm_config_cache"`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	want := alice + "|" + alice + "|" + filepath.Join(alice, "cache", "xdg") + "|" + filepath.Join(alice, "cache", "npm")
+	if !strings.Contains(res.Content, want) {
+		t.Fatalf("home/cache env = %q, want %q", res.Content, want)
+	}
+}
+
+func TestTerminalTildeWriteLandsInProfileRoot(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-tilde"), map[string]interface{}{
+		"command": `echo hello > ~/notes.md && cat ~/notes.md`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	if !strings.Contains(res.Content, "hello") {
+		t.Fatalf("tilde write/read failed: %q", res.Content)
+	}
+	data, err := os.ReadFile(filepath.Join(alice, "notes.md"))
+	if err != nil || strings.TrimSpace(string(data)) != "hello" {
+		t.Fatalf("tilde write did not land in profile root: %q %v", data, err)
+	}
+}
+
 func TestTerminalPassthroughResolvesProfileScope(t *testing.T) {
 	tree, alice, _ := profileTree(t)
 	if err := os.WriteFile(filepath.Join(tree, ".env"), []byte("SYNTH_SHARED_VAR=synthetic-shared\nSYNTH_LAUNCH_ONLY=synthetic-launch\n"), 0600); err != nil {

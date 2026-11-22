@@ -98,6 +98,24 @@ func TestExecuteCodeSetsOswaldHome(t *testing.T) {
 	}
 }
 
+func TestExecuteCodeHomeAndCacheAreProfileRooted(t *testing.T) {
+	_, alice, _ := profilePair(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	exec := NewExecuteCodeHandler(ws)
+	res, err := exec(testContext("req-home2"), map[string]interface{}{
+		"code": "import os; print(os.environ.get('HOME', '')); print(os.environ.get('XDG_CACHE_HOME', ''))",
+	})
+	if err != nil {
+		t.Fatalf("execute_code failed: %v", err)
+	}
+	if !strings.Contains(res.Content, alice+"\n") {
+		t.Fatalf("HOME missing profile root: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, filepath.Join(alice, "cache", "xdg")) {
+		t.Fatalf("XDG_CACHE_HOME missing: %q", res.Content)
+	}
+}
+
 func TestExecuteCodeDeniesManagedCache(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {

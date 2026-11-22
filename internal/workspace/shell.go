@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
@@ -32,12 +33,14 @@ func runShell(ctx context.Context, command, dir, scratch, home string, timeoutSe
 	cmd.Dir = dir
 	base := []string{
 		"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
-		"HOME=" + UserHome(),
+		"HOME=" + home,
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + dir,
 		"OSWALD_SCRATCH=" + scratch,
 		"OSWALD_HOME=" + home,
+		"XDG_CACHE_HOME=" + filepath.Join(home, "cache", "xdg"),
+		"npm_config_cache=" + filepath.Join(home, "cache", "npm"),
 	}
 	cmd.Env = append(process.SandboxEnvForProfile(process.WithPluginShimsOnPath(process.WithNodeOnPath(base), home), home), process.GitHubTokenEnv()...)
 	var buf bytes.Buffer

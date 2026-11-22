@@ -56,11 +56,13 @@ environment: see Sandbox environment below.
 
 ## Sandbox environment (terminal, execute_code, background)
 
-`runShell`, `execute_code`, and `process.Manager.Spawn` build every child env from a fixed
-base (`PATH` plus the server-resolved node dir so shims run, `HOME`, `LANG`, `TMPDIR`,
-`OSWALD_*`, plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN`) plus a deny-by-default passthrough
-allowlist resolved against the acting profile's own dotenv pair (global overlaid with the
-profile's own; `os.Getenv` fallback only for declared names). Three sources register names:
+`runShell`, `execute_code`, `process.Manager.Spawn`, and cron script runs share one fixed
+base (`PATH` with `/opt/oswald` plus the server-resolved node dir and the profile shim dir,
+`HOME` set to the profile root, `LANG`, `TMPDIR`, `OSWALD_HOME`,
+`XDG_CACHE_HOME`/`npm_config_cache` under `<root>/cache/`, plus allowlisted
+`GH_TOKEN`/`GITHUB_TOKEN`) plus a deny-by-default passthrough allowlist resolved against the
+acting profile's own dotenv pair (global overlaid with the profile's own; `os.Getenv`
+fallback only for declared names). Three sources register names:
 skill frontmatter `required_env` (on `skill_view`), operator config
 `tools.terminal.env_passthrough` (per profile, restart to apply, staged validation), and
 installed plugins' manifest `requires_env` (automatic on load) — see
@@ -74,6 +76,11 @@ names and counts. `terminal`, `execute_code`, and background processes gain exac
 fixed `PATH` entry — `<profile>/plugins/.bin` — so installed plugin CLIs run by bare
 name; each shim sets `HOME` to its plugin's `data/home`, with API keys arriving
 through passthrough, not the command line.
+
+`~` and `$HOME` name the acting profile root on every surface — file tools, shell text
+scans, runtime expansion, and cron scripts. The true OS home is outside the workspace:
+readable under the same-trust model, write-denied. The default profile's root plays the
+`/root` role; named profile roots are user homes.
 
 ## Pre-execution chain (order matters)
 
