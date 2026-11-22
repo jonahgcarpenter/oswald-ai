@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -179,18 +178,11 @@ func environmentInfoBlock(workspaceRoot string) string {
 		return ""
 	}
 	host := sanitizeLabelText(runtime.GOOS, 64)
-	home := ""
-	if value, err := os.UserHomeDir(); err == nil {
-		home = sanitizeLabelText(strings.TrimSpace(value), 500)
-	}
 	scratch := sanitizeLabelText(filepath.Join(cwd, "cache", "scratch"), 500)
 	var sb strings.Builder
 	sb.WriteString("# Oswald runtime environment")
 	sb.WriteString("\n\nHost: " + firstNonEmpty(host, "unknown"))
-	if home != "" {
-		sb.WriteString("\nUser home directory: " + home)
-	}
-	sb.WriteString("\nCurrent working directory: " + cwd)
+	sb.WriteString("\nUser home directory: " + cwd)
 	sb.WriteString("\nScratch directory: " + scratch + " (TMPDIR points here; write temporary files and probes there, never under the system temp dir; entries idle for 24h are pruned)")
 	return sb.String()
 }

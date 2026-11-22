@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +59,7 @@ func TestConnectStdioRoundTrip(t *testing.T) {
 	cfg := ServerConfig{Name: "local", Transport: TransportStdio, Command: helper.Path, Args: helper.Args[1:], Env: map[string]string{"OSWALD_TEST_STDIO_HELPER": "1"}, Enabled: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	session, closeFn, err := connectStdio(ctx, cfg)
+	session, closeFn, err := connectStdio(ctx, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestConnectStdioRoundTrip(t *testing.T) {
 func TestConnectStdioRejectsMissingCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "oswald-definitely-missing-binary"})
+	_, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "oswald-definitely-missing-binary"}, "")
 	if err == nil {
 		t.Fatal("missing stdio command accepted")
 	}
@@ -99,8 +100,29 @@ func TestConnectStdioRejectsMissingCommand(t *testing.T) {
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("missing stdio error must wrap exec.ErrNotFound: %v", err)
 	}
-	if _, _, err := connectStdio(ctx, ServerConfig{Name: "local"}); err == nil {
+	if _, _, err := connectStdio(ctx, ServerConfig{Name: "local"}, ""); err == nil {
 		t.Fatal("empty stdio command accepted")
+	}
+}
+
+func TestConnectStdioPrefersProfileLocalBin(t *testing.T) {
+	profile := t.TempDir()
+	binDir := filepath.Join(profile, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(binDir, "synth-exit-server")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _, err := connectStdio(ctx, ServerConfig{Name: "local", Command: "synth-exit-server"}, profile)
+	if err == nil {
+		t.Fatal("expected connect failure from immediate-exit server")
+	}
+	if strings.Contains(err.Error(), "needs missing command") {
+		t.Fatalf("bare command not resolved against profile .local/bin: %v", err)
 	}
 }
 

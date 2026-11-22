@@ -398,6 +398,86 @@ func TestTerminalSetsOswaldHome(t *testing.T) {
 	}
 }
 
+func TestTerminalHomeAndUserInstallEnv(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-home-cache"), map[string]interface{}{
+		"command": `printf '%s|%s|%s|%s|%s|%s' "$HOME" "$(echo ~)" "$npm_config_prefix" "$XDG_CACHE_HOME" "$npm_config_cache" "${PATH%%:*}"`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	want := alice + "|" + alice + "|" + filepath.Join(alice, ".local") + "|||" + filepath.Join(alice, ".local", "bin")
+	if !strings.Contains(res.Content, want) {
+		t.Fatalf("home/user-install env = %q, want %q", res.Content, want)
+	}
+}
+
+func TestTerminalRunsAgentBinByBareName(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-local-bin"), map[string]interface{}{
+		"command": `mkdir -p ~/.local/bin && printf '#!/bin/sh\necho agent-bin-ran\n' > ~/.local/bin/synthtool && chmod +x ~/.local/bin/synthtool && synthtool`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	if !strings.Contains(res.Content, "agent-bin-ran") {
+		t.Fatalf("bare-name agent bin not on PATH: %q", res.Content)
+	}
+}
+
+func TestTerminalDeniesPluginShimWrite(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-shim-write"), map[string]interface{}{
+		"command": `echo x > plugins/.bin/fake`,
+	})
+	if err != nil {
+		t.Fatalf("deny returned error: %v", err)
+	}
+	if !strings.Contains(res.Content, `"status":"blocked"`) || !strings.Contains(res.Content, "system-managed") {
+		t.Fatalf("plugin shim write not blocked: %q", res.Content)
+	}
+}
+
+func TestTerminalDropsLegacySandboxVars(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-legacy-vars"), map[string]interface{}{
+		"command": `printf '%s|%s' "$OSWALD_WORKSPACE" "$OSWALD_SCRATCH"`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	if !strings.Contains(res.Content, "exit_code: 0\n|") {
+		t.Fatalf("legacy sandbox vars still set: %q", res.Content)
+	}
+}
+
+func TestTerminalTildeWriteLandsInProfileRoot(t *testing.T) {
+	_, alice, _ := profileTree(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, nil)
+	res, err := term(testContext("req-tilde"), map[string]interface{}{
+		"command": `echo hello > ~/notes.md && cat ~/notes.md`,
+	})
+	if err != nil {
+		t.Fatalf("terminal failed: %v", err)
+	}
+	if !strings.Contains(res.Content, "hello") {
+		t.Fatalf("tilde write/read failed: %q", res.Content)
+	}
+	data, err := os.ReadFile(filepath.Join(alice, "notes.md"))
+	if err != nil || strings.TrimSpace(string(data)) != "hello" {
+		t.Fatalf("tilde write did not land in profile root: %q %v", data, err)
+	}
+}
+
 func TestTerminalPassthroughResolvesProfileScope(t *testing.T) {
 	tree, alice, _ := profileTree(t)
 	if err := os.WriteFile(filepath.Join(tree, ".env"), []byte("SYNTH_SHARED_VAR=synthetic-shared\nSYNTH_LAUNCH_ONLY=synthetic-launch\n"), 0600); err != nil {

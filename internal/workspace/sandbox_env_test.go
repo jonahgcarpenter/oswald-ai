@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -29,5 +31,33 @@ func TestRunShellIncludesOswaldBinInPath(t *testing.T) {
 	}
 	if !strings.Contains(output, "/opt/oswald") {
 		t.Fatalf("terminal PATH missing /opt/oswald: %q", output)
+	}
+}
+
+func TestRunShellHomeIsProfileRoot(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, code, err := runShell(context.Background(), `printf '%s|%s|%s|%s|%s' "$HOME" "$OSWALD_HOME" "$OSWALD_WORKSPACE" "$OSWALD_SCRATCH" "$npm_config_prefix"`, home, filepath.Join(home, "cache", "scratch"), home, 30)
+	if err != nil || code != 0 {
+		t.Fatalf("runShell = code %d err %v output %q", code, err, output)
+	}
+	if want := home + "|" + home + "|||" + filepath.Join(home, ".local"); output != want {
+		t.Fatalf("sandbox home vars = %q, want %q", output, want)
+	}
+}
+
+func TestRunShellPathIsUserFirst(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, code, err := runShell(context.Background(), `printf '%s' "${PATH%%:*}"`, home, filepath.Join(home, "cache", "scratch"), home, 30)
+	if err != nil || code != 0 {
+		t.Fatalf("runShell = code %d err %v output %q", code, err, output)
+	}
+	if want := filepath.Join(home, ".local", "bin"); output != want {
+		t.Fatalf("PATH head = %q, want %q", output, want)
 	}
 }

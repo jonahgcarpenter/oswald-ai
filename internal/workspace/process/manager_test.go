@@ -1,6 +1,8 @@
 package process
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,32 @@ func TestSpawnPollKill(t *testing.T) {
 	tail, err := m.Tail(info.ID, 4096)
 	if err != nil || !strings.Contains(tail, "hi") {
 		t.Fatalf("tail = %q %v", tail, err)
+	}
+}
+
+func TestSpawnUsesProfileHome(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(root)
+	info, err := m.Spawn("req-env", `printf '%s|%s|%s|%s|%s' "$HOME" "$OSWALD_HOME" "$npm_config_prefix" "${PATH%%:*}" "$PATH"`, root, filepath.Join(root, "cache", "scratch"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Wait(info.ID, 10); err != nil {
+		t.Fatal(err)
+	}
+	tail, err := m.Tail(info.ID, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := root + "|" + root + "|" + filepath.Join(root, ".local") + "|" + filepath.Join(root, ".local", "bin") + "|"
+	if !strings.Contains(tail, want) {
+		t.Fatalf("background env = %q, want prefix %q", tail, want)
+	}
+	if !strings.Contains(tail, "/opt/oswald") {
+		t.Fatalf("background PATH missing /opt/oswald: %q", tail)
 	}
 }
 

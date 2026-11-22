@@ -14,7 +14,8 @@ replay, `process/` tracked sessions, scratch/cache mechanics — plus the guarde
 execution entry `command.go::ExecuteCommand` shared with no other caller. `groups.go` owns the file-group classifier, `guard.go` / `shellscan.go` /
 `fetchscan.go` / `confinewrite.go` implement the pre-execution chain, `review.go` the LLM reviewer,
 and `approve_exec.go` the approved replay. `process/sandboxenv.go` owns the sandbox
-environment contract: deny-by-default passthrough (skill `required_env`, config
+environment contract: `SandboxPath` (the single Ubuntu-native PATH order) plus a
+deny-by-default passthrough (skill `required_env`, config
 `tools.terminal.env_passthrough`, registry) resolved against the acting profile's
 dotenv scope, with well-known credential names refused and values never logged.
 
@@ -54,26 +55,51 @@ queries, or command output — native history carries 16 KiB args / 16,000 resul
 within a 64 KiB aggregate trace. Spawned children never inherit the server process
 environment: see Sandbox environment below.
 
-## Sandbox environment (terminal, execute_code, background)
+## Sandbox environment (terminal, execute_code, background, cron)
 
-`runShell`, `execute_code`, and `process.Manager.Spawn` build every child env from a fixed
-base (`PATH` plus the server-resolved node dir so shims run, `HOME`, `LANG`, `TMPDIR`,
-`OSWALD_*`, plus allowlisted `GH_TOKEN`/`GITHUB_TOKEN`) plus a deny-by-default passthrough
-allowlist resolved against the acting profile's own dotenv pair (global overlaid with the
-profile's own; `os.Getenv` fallback only for declared names). Three sources register names:
-skill frontmatter `required_env` (on `skill_view`), operator config
-`tools.terminal.env_passthrough` (per profile, restart to apply, staged validation), and
-installed plugins' manifest `requires_env` (automatic on load) — see
-`process/sandboxenv.go` (`SandboxEnvForProfile`, `ProfileSecretScope`, `RegisterEnvPassthrough`,
-`WithNodeOnPath`).
+Design intent: the agent should feel at home on a real Ubuntu box. Every sandbox surface
+(`terminal`, `execute_code`, `process.Manager.Spawn`, and cron script runs) shares one
+construction so behavior never diverges by surface, and `~`/`$HOME`, PATH, caches, and
+install directories behave like a stock Ubuntu user account — then the model's Linux priors
+are correct and it stops burning turns learning deployment quirks. The default profile's
+root plays the `/root` role; named profile roots are user homes; the OS filesystem outside
+them is the rest of the machine (readable, writes gated). Keep it that way when editing.
+
+The fixed base: `PATH` from `process.SandboxPath` — the single source of PATH order
+(`<root>/.local/bin`, `<root>/.cargo/bin`, node dir, `/opt/oswald`, `/usr/bin`, `/bin`,
+`/usr/local/bin`, `<root>/go/bin`, `<root>/plugins/.bin`; missing directories are harmless
+entries, first occurrence wins) — plus `HOME` set to the profile root, `LANG`, `TMPDIR`,
+`OSWALD_HOME`, `npm_config_prefix` at `<root>/.local`, and allowlisted
+`GH_TOKEN`/`GITHUB_TOKEN`. Never append PATH entries at a spawn site; edit `SandboxPath` so
+all four surfaces stay identical. User installs shadow system binaries (Ubuntu `.profile`
+semantics), while the node dir and `/opt/oswald` stay ahead of system dirs so plugin shims
+and the CLI fence keep resolving. Accepted trade-off: an agent-dropped `node` in
+`~/.local/bin` shadows the image node for shell children (MCP stdio launches use the
+service process env and are unaffected).
+
+Plus the deny-by-default passthrough allowlist resolved against the acting profile's own
+dotenv pair (global overlaid with the profile's own; `os.Getenv` fallback only for declared
+names). Three sources register names: skill frontmatter `required_env` (on `skill_view`),
+operator config `tools.terminal.env_passthrough` (per profile, restart to apply, staged
+validation), and installed plugins' manifest `requires_env` (automatic on load) — see
+`process/sandboxenv.go` (`SandboxPath`, `SandboxEnvForProfile`, `ProfileSecretScope`,
+`RegisterEnvPassthrough`).
 
 Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`,
 `OSWALD_*`) can never tunnel into a sandbox; `ResolveEnvValue` skips refused and empty
 names silently. Values resolve per profile at spawn time and are never logged — only
-names and counts. `terminal`, `execute_code`, and background processes gain exactly one
-fixed `PATH` entry — `<profile>/plugins/.bin` — so installed plugin CLIs run by bare
-name; each shim sets `HOME` to its plugin's `data/home`, with API keys arriving
-through passthrough, not the command line.
+names and counts. `<profile>/plugins/.bin` is the curated channel: only plugin
+install/update writes it (system-managed), and each shim sets `HOME` to its plugin's
+`data/home`, with API keys arriving through passthrough, not the command line. Ad-hoc
+installs belong in the agent-owned `~/.local/bin` (curl, `npm -g`, `pip --user`);
+`npm_config_prefix` keeps global npm installs inside `~/.local`, npm's cache and `npx`
+(`~/.npm`) and other tool caches (`~/.cache`) stay native and persistent under the
+profile root — only Oswald-managed `cache/` artifacts are pruned.
+
+`~` and `$HOME` name the acting profile root on every surface — file tools, shell text
+scans, runtime expansion, and cron scripts. The true OS home is outside the workspace:
+readable under the same-trust model, write-denied. `OSWALD_WORKSPACE` and `OSWALD_SCRATCH`
+are retired from the env but stay on the refusal list so nothing can re-inject them.
 
 ## Pre-execution chain (order matters)
 

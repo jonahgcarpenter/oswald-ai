@@ -64,13 +64,13 @@ func ScanConfinedWrite(command, workdir, root string, shell bool) (string, bool)
 			if len(m) < 2 || len(bases) >= 8 {
 				continue
 			}
-			if target := resolveCandidate(m[1], workdir); target != "" {
+			if target := resolveCandidate(m[1], workdir, root); target != "" {
 				bases = append(bases, target)
 			}
 		}
 	}
 	check := func(shape, base string) (string, bool) {
-		resolved := resolveWriteTarget(shape, base)
+		resolved := resolveWriteTarget(shape, base, root)
 		if resolved == "" {
 			return "", false
 		}
@@ -117,7 +117,7 @@ func ScanConfinedWrite(command, workdir, root string, shell bool) (string, bool)
 		if reSedInPlace.MatchString(seg) {
 			for _, token := range strings.Fields(seg) {
 				for _, base := range bases {
-					if resolved := resolveWriteTarget(token, base); resolved != "" {
+					if resolved := resolveWriteTarget(token, base, root); resolved != "" {
 						if reason, blocked := checkToken(resolved, root); blocked {
 							return reason, true
 						}
@@ -136,7 +136,7 @@ func ScanConfinedWrite(command, workdir, root string, shell bool) (string, bool)
 					continue
 				}
 				for _, base := range bases {
-					if resolved := resolveWriteTarget(operand, base); resolved != "" {
+					if resolved := resolveWriteTarget(operand, base, root); resolved != "" {
 						if reason, blocked := checkToken(resolved, root); blocked {
 							return reason, true
 						}
@@ -147,7 +147,7 @@ func ScanConfinedWrite(command, workdir, root string, shell bool) (string, bool)
 		if !shell {
 			for _, lit := range pyPathLiterals(seg) {
 				for _, base := range bases {
-					resolved := resolveShape(lit, base)
+					resolved := resolveShape(lit, base, root)
 					if resolved == "" || devNullAliases[resolved] {
 						continue
 					}
@@ -199,13 +199,13 @@ func ScanProtectedRead(command, workdir, root string, shell bool) (string, bool)
 			if len(m) < 2 || len(bases) >= 8 {
 				continue
 			}
-			if target := resolveCandidate(m[1], workdir); target != "" {
+			if target := resolveCandidate(m[1], workdir, root); target != "" {
 				bases = append(bases, target)
 			}
 		}
 	}
 	check := func(shape, base string) (string, bool) {
-		resolved := resolveWriteTarget(shape, base)
+		resolved := resolveWriteTarget(shape, base, root)
 		if resolved == "" || devNullAliases[resolved] {
 			return "", false
 		}
@@ -364,8 +364,8 @@ func pyWriteCall(seg, lit string) bool {
 // resolveWriteTarget maps a write-sink token to an absolute path. It falls
 // back to joining bare filenames (no slash) that resolveShape skips, since
 // every operand in a write sink names a file.
-func resolveWriteTarget(shape, base string) string {
-	if resolved := resolveShape(shape, base); resolved != "" {
+func resolveWriteTarget(shape, base, home string) string {
+	if resolved := resolveShape(shape, base, home); resolved != "" {
 		return resolved
 	}
 	trimmed := strings.Trim(shape, "\"'();,")
@@ -377,8 +377,9 @@ func resolveWriteTarget(shape, base string) string {
 
 // resolveCandidate maps one whitespace token to an absolute path, or ""
 // when the token carries no path shape. base is the shell working directory
-// (or one of its cd targets) the token resolves against.
-func resolveCandidate(token, base string) string {
+// (or one of its cd targets) the token resolves against; home is the
+// workspace root that ~ expands to.
+func resolveCandidate(token, base, home string) string {
 	t := strings.Trim(token, "\"'();,")
 	if t == "" {
 		return ""
@@ -396,18 +397,19 @@ func resolveCandidate(token, base string) string {
 			return ""
 		}
 	}
-	return resolveShape(t, base)
+	return resolveShape(t, base, home)
 }
 
 // resolveShape maps a bare path shape (absolute, ~-rooted, or relative) to
-// an absolute path against base, or "" when it has no path shape.
-func resolveShape(shape, base string) string {
+// an absolute path against base, or "" when it has no path shape. Tilde
+// resolves against the workspace root because child HOME is the profile root.
+func resolveShape(shape, base, home string) string {
 	t := strings.Trim(shape, "\"'();,")
 	if t == "" {
 		return ""
 	}
 	if t == "~" || strings.HasPrefix(t, "~/") {
-		t = filepath.Join(UserHome(), strings.TrimPrefix(t, "~"))
+		t = filepath.Join(home, strings.TrimPrefix(t, "~"))
 	} else if strings.HasPrefix(t, "~") {
 		return ""
 	} else if !filepath.IsAbs(t) && t != ".." && !strings.HasPrefix(t, "../") && !strings.HasPrefix(t, "./") && !strings.Contains(t, "/") {

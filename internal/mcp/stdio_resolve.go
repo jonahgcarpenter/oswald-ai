@@ -22,25 +22,57 @@ func launcherBase(command string) string {
 	return base
 }
 
-// npmCacheRoot is the npm cache holding installed npx packages: the explicit
-// override first, then the service user's default.
-func npmCacheRoot() string {
-	if dir := strings.TrimSpace(os.Getenv("npm_config_cache")); dir != "" {
-		return dir
+// npmCacheRoots lists npm cache roots for npx resolution, most profile-local
+// first: the acting profile's own ~/.npm (so installs made inside the sandbox
+// feed lazily connected servers), then the service process override, then the
+// service user's default.
+func npmCacheRoots(profileRoot string) []string {
+	var roots []string
+	seen := map[string]bool{}
+	add := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || seen[dir] {
+			return
+		}
+		seen[dir] = true
+		roots = append(roots, dir)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	if root := strings.TrimSpace(profileRoot); root != "" {
+		add(filepath.Join(root, ".npm"))
+	}
+	add(os.Getenv("npm_config_cache"))
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".npm"))
+	}
+	return roots
+}
+
+// profileLocalBin resolves a bare stdio command against the acting
+// profile's ~/.local/bin — the same user-install directory the sandbox PATH
+// puts first — so agent installs launch servers by bare name. Absolute or
+// relative spellings and missing or non-executable files return "" so the
+// caller keeps its own resolution and error naming.
+func profileLocalBin(command, profileRoot string) string {
+	name := strings.TrimSpace(command)
+	root := strings.TrimSpace(profileRoot)
+	if name == "" || root == "" || strings.ContainsRune(name, '/') ||
+		strings.ContainsRune(name, os.PathSeparator) || strings.ContainsRune(name, '\\') {
 		return ""
 	}
-	return filepath.Join(home, ".npm")
+	candidate := filepath.Join(root, ".local", "bin", name)
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return ""
+	}
+	return candidate
 }
 
 // npxCachedBin resolves `npx -y <pkg> ...` to the already-installed binary in
-// the npm cache, returning the binary path and the remaining args. It stays
+// an npm cache, checking the acting profile's cache first. It stays
 // conservative by design: a cache miss, version pin, extra npx flag,
 // non-registry spec, or ambiguous bin manifest returns empty so the caller
 // keeps plain npx and a cold machine still installs.
-func npxCachedBin(args []string) (string, []string) {
+func npxCachedBin(args []string, profileRoot string) (string, []string) {
 	rest := append([]string(nil), args...)
 	for len(rest) > 0 && (rest[0] == "-y" || rest[0] == "--yes") {
 		rest = rest[1:]
@@ -69,27 +101,25 @@ func npxCachedBin(args []string) (string, []string) {
 	if strings.Contains(spec, "/") && !strings.HasPrefix(spec, "@") {
 		return "", nil
 	}
-	root := npmCacheRoot()
-	npxRoot := filepath.Join(root, "_npx")
-	if root == "" || npxRoot == "" {
-		return "", nil
-	}
-	entries, err := os.ReadDir(npxRoot)
-	if err != nil {
-		return "", nil
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, root := range npmCacheRoots(profileRoot) {
+		npxRoot := filepath.Join(root, "_npx")
+		entries, err := os.ReadDir(npxRoot)
+		if err != nil {
 			continue
 		}
-		if !npxCacheHasSpec(filepath.Join(npxRoot, entry.Name()), spec) {
-			continue
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			if !npxCacheHasSpec(filepath.Join(npxRoot, entry.Name()), spec) {
+				continue
+			}
+			bin, ok := npxCacheBin(filepath.Join(npxRoot, entry.Name()), spec)
+			if !ok {
+				continue
+			}
+			return bin, append([]string(nil), rest[1:]...)
 		}
-		bin, ok := npxCacheBin(filepath.Join(npxRoot, entry.Name()), spec)
-		if !ok {
-			continue
-		}
-		return bin, append([]string(nil), rest[1:]...)
 	}
 	return "", nil
 }

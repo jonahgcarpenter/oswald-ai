@@ -333,8 +333,11 @@ func TestEnvironmentInfoBlockRendersSandbox(t *testing.T) {
 	}
 	dir := t.TempDir()
 	got := environmentInfoBlock(dir)
-	if !strings.Contains(got, "# Oswald runtime environment") || !strings.Contains(got, "Current working directory:") || !strings.Contains(got, "Scratch directory:") || !strings.Contains(got, "TMPDIR points here") {
+	if !strings.Contains(got, "# Oswald runtime environment") || !strings.Contains(got, "User home directory: "+dir) || !strings.Contains(got, "Scratch directory:") || !strings.Contains(got, "TMPDIR points here") {
 		t.Fatalf("environment block = %q", got)
+	}
+	if strings.Contains(got, "Current working directory:") {
+		t.Fatalf("environment block still names a working directory: %q", got)
 	}
 	files := renderFileMemory("profile", "")
 	block := runtimeInfoBlock(false, time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC), time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC), time.FixedZone("CDT", -5*3600), "qwen", "custom", "discord")

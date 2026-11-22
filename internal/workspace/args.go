@@ -132,12 +132,3 @@ func appendNote(existing, note string) string {
 	}
 	return existing + "\n" + note
 }
-
-// UserHome reports the OS home directory or "/" when unavailable. Child
-// process environments built by tool surfaces use it for HOME.
-func UserHome() string {
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return home
-	}
-	return "/"
-}

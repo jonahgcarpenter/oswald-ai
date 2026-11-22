@@ -87,16 +87,15 @@ func NewExecuteCodeHandler(ws *workspace.Workspace) func(context.Context, map[st
 		cmd := exec.CommandContext(runCtx, python, name)
 		cmd.Dir = ws.Root()
 		base := []string{
-			"PATH=/opt/oswald:/usr/bin:/bin:/usr/local/bin",
-			"HOME=" + workspace.UserHome(),
+			"PATH=" + process.SandboxPath(ws.Root()),
+			"HOME=" + ws.Root(),
 			"LANG=C.UTF-8",
 			"TMPDIR=" + scratch,
-			"OSWALD_WORKSPACE=" + ws.Root(),
-			"OSWALD_SCRATCH=" + scratch,
 			"OSWALD_HOME=" + ws.Root(),
+			"npm_config_prefix=" + filepath.Join(ws.Root(), ".local"),
 			"PYTHONDONTWRITEBYTECODE=1",
 		}
-		cmd.Env = append(process.SandboxEnvForProfile(process.WithPluginShimsOnPath(process.WithNodeOnPath(base), ws.Root()), ws.Root()), process.GitHubTokenEnv()...)
+		cmd.Env = append(process.SandboxEnvForProfile(base, ws.Root()), process.GitHubTokenEnv()...)
 		var buf bytes.Buffer
 		cmd.Stdout = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
 		cmd.Stderr = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}

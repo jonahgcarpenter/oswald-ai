@@ -232,3 +232,21 @@ func TestDenyMessagesGrouped(t *testing.T) {
 		t.Fatalf("cache write: %q", msg)
 	}
 }
+
+// TestClassifyHomeDotDirs keeps native user-install directories agent-owned:
+// ~/.local, ~/.npm, ~/.cache, and ~/.cargo are the user's own home, not
+// tool-managed state.
+func TestClassifyHomeDotDirs(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		".local/bin/tool",
+		".cargo/bin/ripgrep",
+		".npm/_npx/abc/node_modules/.bin/server",
+		".cache/pip/http",
+		"go/bin/app",
+	} {
+		if got := Classify(filepath.Join(root, p), root); got != GroupAgent {
+			t.Fatalf("%s classified %v, want agent", p, got)
+		}
+	}
+}

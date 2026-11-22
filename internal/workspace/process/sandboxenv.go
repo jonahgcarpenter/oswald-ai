@@ -210,35 +210,6 @@ func ResolveEnvValue(name string, scope map[string]string) (string, bool) {
 	return "", false
 }
 
-// WithPluginShimsOnPath appends the per-profile plugin shim directory to the
-// PATH entries of a child env base, so installed plugin CLIs run by bare name
-// (kubectl-style) in terminal, execute_code, and background processes. The
-// directory is fixed per profile (<profileRoot>/plugins/.bin); individual
-// plugin trees never touch PATH. Missing directories are harmless list
-// entries, so the base stays deterministic without a spawn-time stat.
-// Unknown or empty roots pass through unchanged. Duplicates are not added.
-func WithPluginShimsOnPath(base []string, profileRoot string) []string {
-	profileRoot = strings.TrimSpace(profileRoot)
-	if profileRoot == "" {
-		return base
-	}
-	shimDir := filepath.Join(profileRoot, "plugins", ShimDirName)
-	out := append([]string(nil), base...)
-	for i, entry := range out {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || !strings.EqualFold(key, "PATH") {
-			continue
-		}
-		for _, part := range strings.Split(value, string(os.PathListSeparator)) {
-			if part == shimDir {
-				return out
-			}
-		}
-		out[i] = "PATH=" + value + string(os.PathListSeparator) + shimDir
-	}
-	return out
-}
-
 // PluginShimDirName is the leaf name of the per-profile shim directory.
 // It mirrors plugins.ShimDirName without importing the plugins package
 // (plugins imports this package for sandbox construction).
@@ -247,29 +218,45 @@ const PluginShimDirName = ".bin"
 // ShimDirName aliases PluginShimDirName for call-site readability.
 const ShimDirName = PluginShimDirName
 
-// WithNodeOnPath ensures the server-resolved node directory heads the PATH
-// entries of a child env base, so plugin shims (`#!/usr/bin/env node`) run
-// under sandboxed PATHs that would otherwise hide node. Bases without a PATH
-// entry, or hosts without node, pass through unchanged.
-func WithNodeOnPath(base []string) []string {
-	dir, err := nodeDirOnce()
-	if err != nil || dir == "" {
-		return base
-	}
-	out := append([]string(nil), base...)
-	for i, entry := range out {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || !strings.EqualFold(key, "PATH") {
-			continue
+// SandboxPath builds the one child PATH shared by terminal, execute_code,
+// background processes, and cron scripts. The order is deliberate:
+//
+//  1. <root>/.local/bin    user installs (curl, npm -g, pip --user)
+//  2. <root>/.cargo/bin    cargo install
+//  3. node dir             image node, so plugin shims run
+//  4. /opt/oswald          oswald CLIs (scope fence)
+//  5. /usr/bin /bin /usr/local/bin
+//  6. <root>/go/bin        go install
+//  7. <root>/plugins/.bin  curated plugin shims
+//
+// Missing directories are harmless list entries (no spawn-time stat), the
+// first occurrence wins, and a host without node skips its entry.
+func SandboxPath(profileRoot string) string {
+	root := strings.TrimSpace(profileRoot)
+	entries := make([]string, 0, 10)
+	seen := make(map[string]bool, 10)
+	add := func(entry string) {
+		if entry == "" || seen[entry] {
+			return
 		}
-		for _, part := range strings.Split(value, string(os.PathListSeparator)) {
-			if part == dir {
-				return out
-			}
-		}
-		out[i] = "PATH=" + dir + string(os.PathListSeparator) + value
+		seen[entry] = true
+		entries = append(entries, entry)
 	}
-	return out
+	if root != "" {
+		add(filepath.Join(root, ".local", "bin"))
+		add(filepath.Join(root, ".cargo", "bin"))
+	}
+	if dir, err := nodeDirOnce(); err == nil {
+		add(dir)
+	}
+	for _, entry := range []string{"/opt/oswald", "/usr/bin", "/bin", "/usr/local/bin"} {
+		add(entry)
+	}
+	if root != "" {
+		add(filepath.Join(root, "go", "bin"))
+		add(filepath.Join(root, "plugins", ShimDirName))
+	}
+	return strings.Join(entries, string(os.PathListSeparator))
 }
 
 // SandboxEnvForProfile appends allowlisted variables for one profile root:
@@ -325,12 +312,4 @@ func GitHubTokenEnv() []string {
 		}
 	}
 	return env
-}
-
-// sandboxHome resolves the service HOME for background shells.
-func sandboxHome() string {
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return home
-	}
-	return "/"
 }
