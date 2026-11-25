@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
@@ -156,7 +157,11 @@ func (s *Store) validate(r *Runner, job *Job) error {
 		return err
 	}
 	if r != nil && job.Script != "" {
-		if _, err := r.ResolveScript(job.Script); err != nil {
+		resolved, err := r.ResolveScript(job.Script)
+		if err != nil {
+			return err
+		}
+		if err := scanScriptScope(resolved); err != nil {
 			return err
 		}
 	}
@@ -611,6 +616,34 @@ func (s *Store) ClaimDue(now time.Time) []Job {
 	return due
 }
 
+// scanScriptScope fails closed on job scripts that would retarget the oswald
+// CLI's profile scope. The workspace scan is the single contract shared with
+// the terminal, execute_code, and process_manage surfaces; job scripts are
+// agent-owned files, so both create/update validation and every run re-check
+// the body.
+func scanScriptScope(abs string) error {
+	info, err := os.Lstat(abs)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	if info.Size() > 1<<20 {
+		return errors.New("script exceeds the scan limit")
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return errors.New("script cannot be scanned")
+	}
+	for _, b := range data {
+		if b == 0 {
+			return errors.New("script cannot be scanned")
+		}
+	}
+	if reason, blocked := workspace.ScanEnvRetarget(string(data), true); blocked {
+		return errors.New(reason)
+	}
+	return nil
+}
+
 func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int) (string, error) {
 	abs := strings.TrimSpace(script)
 	if r != nil {
@@ -623,6 +656,9 @@ func runScriptFile(ctx context.Context, r *Runner, script string, boundSecs int)
 	info, err := os.Lstat(abs)
 	if err != nil || !info.Mode().IsRegular() {
 		return "", errors.New("script path must exist")
+	}
+	if err := scanScriptScope(abs); err != nil {
+		return "", err
 	}
 	ext := strings.ToLower(filepath.Ext(abs))
 	var cmd *exec.Cmd

@@ -12,7 +12,7 @@ surfaces (`read_file` / `write_file` / `patch` / `search_files`, `terminal`, `ex
 primitives they call into — resolution, the pre-execution chain, the reviewer and approved
 replay, `process/` tracked sessions, scratch/cache mechanics — plus the guarded terminal
 execution entry `command.go::ExecuteCommand` shared with no other caller. `groups.go` owns the file-group classifier, `guard.go` / `shellscan.go` /
-`fetchscan.go` / `confinewrite.go` implement the pre-execution chain, `review.go` the LLM reviewer,
+`fetchscan.go` / `confinewrite.go` / `envscan.go` implement the pre-execution chain, `review.go` the LLM reviewer,
 and `approve_exec.go` the approved replay. `process/sandboxenv.go` owns the sandbox
 environment contract: `SandboxPath` (the single Ubuntu-native PATH order) plus a
 deny-by-default passthrough (skill `required_env`, config
@@ -87,7 +87,11 @@ validation), and installed plugins' manifest `requires_env` (automatic on load) 
 
 Well-known credential and identity names (provider keys, bot tokens, `PATH`/`HOME`,
 `OSWALD_*`) can never tunnel into a sandbox; `ResolveEnvValue` skips refused and empty
-names silently. Values resolve per profile at spawn time and are never logged — only
+names silently. The `OSWALD_*` names anchor the `oswald` CLI's profile scope, so command
+text may read them but never assign or clear them: `ScanEnvRetarget` (`envscan.go`) hard-denies
+inline prefixes, exports, unsets, `env -u`, and a cleared `env -i` environment before the
+`oswald` CLI runs, matching the passthrough refusal at the shell layer. Values resolve per
+profile at spawn time and are never logged — only
 names and counts. `<profile>/plugins/.bin` is the curated channel: only plugin
 install/update writes it (system-managed), and each shim sets `HOME` to its plugin's
 `data/home`, with API keys arriving through passthrough, not the command line. Ad-hoc
@@ -112,8 +116,9 @@ are retired from the env but stay on the refusal list so nothing can re-inject t
    `mkdir` operands, `dd of=`, Python `open()` modes and mutating stdlib/`pathlib` calls)
    resolving outside agent-owned groups → hard deny with the group message; path-shaped references to
    protected names (secrets anywhere, cross-profile `state.db`, `/proc|sys|dev`) → hard deny even for
-   reads. Reads otherwise roam free; non-path secret references still escalate via the secret-read
-   reviewer path instead.
+   reads. Profile-scope env assignments (`OSWALD_*`, including a cleared `env -i`) → hard deny so the
+   `oswald` CLI always resolves the acting profile. Reads otherwise roam free; non-path secret references
+   still escalate via the secret-read reviewer path instead.
 4. Foreground detachment refusal (`nohup`, trailing `&`, dev servers, `http.server`) with a
    `background=true` rewrite hint.
 5. Normalized semantic layer (line-continuation/`$IFS`/fullwidth folding, quote-aware positions).
@@ -140,7 +145,8 @@ continues in the same loop. The ask surfaces while blocked as a persistent messa
 `background=true` spawns a tracked session (`session_id`, `persist_on_release`) persisted under
 `cache/processes/<id>/`; over-cap foreground runs promote instead of blocking. `process_manage`
 (`list|poll|log|wait|kill|write|submit|close|handoff`, prefix match, handoff cap 3) is the only
-way to touch them; `write`/`submit` stdin is escape-scanned. Completed entries are retained 24h
+way to touch them; `write`/`submit` stdin is escape-scanned (confined-write, protected-read,
+and profile-scope env). Completed entries are retained 24h
 after creation, newest 64 per profile, pruned hourly; `StopAll` kills non-persistent entries before
 store close.
 
@@ -155,5 +161,6 @@ when the zone is neither stated nor recalled), and every displayed instant carri
 
 Cover the file-group matrix (same/cross/outside × protected/system/agent × read/write) and
 redirect targets, the read-before-write gate, write-sink scan classification (prose vs live,
-shell vs Python), reviewer verdicts and escalation, approval replay through every
+shell vs Python), profile-scope env retargeting (assign, unset, clear, and safe reads),
+reviewer verdicts and escalation, approval replay through every
 re-check, process lifecycle/retention, and cron validation.

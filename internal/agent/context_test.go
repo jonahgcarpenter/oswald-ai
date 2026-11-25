@@ -333,7 +333,7 @@ func TestEnvironmentInfoBlockRendersSandbox(t *testing.T) {
 	}
 	dir := t.TempDir()
 	got := environmentInfoBlock(dir)
-	if !strings.Contains(got, "# Oswald runtime environment") || !strings.Contains(got, "User home directory: "+dir) || !strings.Contains(got, "Scratch directory:") || !strings.Contains(got, "TMPDIR points here") {
+	if !strings.Contains(got, "# Oswald runtime environment") || !strings.Contains(got, "User home directory: "+dir) || !strings.Contains(got, "Scratch directory:") || !strings.Contains(got, "TMPDIR points here") || !strings.Contains(got, "Profile scope:") {
 		t.Fatalf("environment block = %q", got)
 	}
 	if strings.Contains(got, "Current working directory:") {

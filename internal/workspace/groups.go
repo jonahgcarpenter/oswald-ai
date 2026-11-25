@@ -57,18 +57,18 @@ func DenyMessage(rel string, group Group, write bool) string {
 			if write {
 				return "Write denied: '" + rel + "' is protected and cannot be written directly; edit via the scoped terminal groups (`oswald providers|model|api|gateway|platforms|tools|runtime|mcp`), never by hand."
 			}
-			return "Access denied: '" + rel + "' is protected and cannot be read directly; use `oswald config show|get` via terminal."
+			return "Access denied: '" + rel + "' is protected and cannot be read directly; use `oswald config show|get` via terminal, and never via scripts, decoders, or constructed paths."
 		}
 		if base := filepath.Base(rel); base == ".env" || strings.HasPrefix(base, ".env.") {
 			if write {
 				return "Write denied: '" + rel + "' is protected and cannot be written directly; use `oswald env set|unset` via terminal."
 			}
-			return "Access denied: '" + rel + "' is protected and cannot be accessed directly; use `oswald env show` via terminal (values are never printed)."
+			return "Access denied: '" + rel + "' is protected and cannot be accessed directly; use `oswald env show` via terminal (values are never printed), and never via scripts, decoders, or constructed paths."
 		}
 		if write {
 			return "Write denied: '" + rel + "' is protected and cannot be written."
 		}
-		return "Access denied: '" + rel + "' is protected and cannot be accessed."
+		return "Access denied: '" + rel + "' is protected and cannot be accessed directly, and never via scripts, decoders, or constructed paths."
 	case GroupSystem:
 		if write {
 			if hasPathComponent(rel, "memories") {

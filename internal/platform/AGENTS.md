@@ -79,7 +79,9 @@ row per attempt, so a fully failing tick trips auto-pause immediately. Schedules
 and `in` one-shots, all UTC wall-clock. Scripts live under per-profile `scripts/` (jailed,
 must exist) and run `/bin/sh` with the same sandbox env as terminal (`SandboxPath`,
 `HOME` = profile root, passthrough), so a command tested in the terminal behaves identically
-off-schedule. Validation rejects injection, script escapes, bad deliver targets, and user-owned
+off-schedule. Every script body is also profile-scope scanned at create/update and again
+before each run, so a job can never retarget the `oswald` CLI away from its profile.
+Validation rejects injection, script escapes, profile-scope overrides, bad deliver targets, and user-owned
 `model/provider/base_url`; unknown or legacy fields fail closed with a manual-update error (no
 migration). Deliver targets are also liveness-checked at create/update time against the live
 transport (imessage group GUIDs and guild/channel membership via BlueBubbles/Discord lookups;

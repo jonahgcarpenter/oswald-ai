@@ -568,3 +568,24 @@ func TestTerminalDeniesCrossProfileStateRead(t *testing.T) {
 		t.Fatalf("missing blocked envelope: %q", res.Content)
 	}
 }
+
+func TestTerminalDeniesProfileScopeOverride(t *testing.T) {
+	_, alice, bob := profileTree(t)
+	if err := os.Chmod(alice, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := workspace.NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(alice))
+	res, err := term(testContext("req-scope"), map[string]interface{}{
+		"command": "OSWALD_HOME=" + bob + " oswald env show",
+	})
+	if err != nil {
+		t.Fatalf("deny returned error: %v", err)
+	}
+	if !strings.Contains(res.Content, `"status":"blocked"`) || !strings.Contains(res.Content, "OSWALD_*") {
+		t.Fatalf("missing blocked envelope: %q", res.Content)
+	}
+	if strings.Contains(res.Content, "..") {
+		t.Fatalf("denial envelope kept a doubled period: %q", res.Content)
+	}
+}

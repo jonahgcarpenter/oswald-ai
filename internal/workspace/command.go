@@ -61,6 +61,9 @@ func (ws *Workspace) ExecuteCommand(ctx context.Context, pm *process.Manager, re
 	if reason, blocked := ScanProtectedRead(command, workdir, ws.Root(), true); blocked {
 		return deniedResult(reason), nil
 	}
+	if reason, blocked := ScanEnvRetarget(command, true); blocked {
+		return deniedResult(reason), nil
+	}
 	if !req.Background {
 		if err := RefuseDetachableForeground(command); err != nil {
 			return governance.Result{}, err

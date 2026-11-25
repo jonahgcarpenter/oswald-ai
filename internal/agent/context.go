@@ -184,6 +184,7 @@ func environmentInfoBlock(workspaceRoot string) string {
 	sb.WriteString("\n\nHost: " + firstNonEmpty(host, "unknown"))
 	sb.WriteString("\nUser home directory: " + cwd)
 	sb.WriteString("\nScratch directory: " + scratch + " (TMPDIR points here; write temporary files and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+	sb.WriteString("\nProfile scope: this environment belongs to one profile only. Other profiles' files, configuration, environment values, and MCP servers are out of scope — never read, enumerate, execute, or reach them by any indirect means. The oswald CLI scope follows OSWALD_HOME, which is fixed to this profile; scripts, constructed paths, and environment overrides do not change that. Protected-path denials are final — do not engineer around them.")
 	return sb.String()
 }
 

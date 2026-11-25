@@ -98,10 +98,11 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   validation lives here, guarded execution in `workspace.ExecuteCommand` (pre-execution
   chain, review escalation, spawn).
 - `execute_code` — stateless `python3` per call (300s cap, 200KB code limit, 50KB
-  output cap) with `__pycache__` reset support; shares the terminal arg-surface pattern.
+  output cap) with `__pycache__` reset support; shares the terminal arg-surface pattern
+  plus its confined-write, protected-read, and profile-scope env scans.
 - `process_manage` — tracked background sessions: `list|poll|log|wait|kill|write|
   submit|close|handoff` (unique-prefix ids, 200-line log default); stdin writes run
-  the confined-write/protected-read scans; `handoff` reparents to the caller's scope.
+  the confined-write/protected-read/profile-scope scans; `handoff` reparents to the caller's scope.
 - `cronjob_manage` — schedules end to end (`create|list|update|pause|resume|remove|run`),
   rejects `model/provider/base_url` overrides; scripts resolve under per-profile
   `scripts/`, delivery targets the concrete `deliver` object. `create`/`update` liveness-check

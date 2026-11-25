@@ -96,3 +96,18 @@ func TestTerminalBackgroundRoundTrip(t *testing.T) {
 		t.Fatalf("wait = %+v %v", waited, err)
 	}
 }
+
+// Stdin payloads cannot retarget the oswald CLI's profile scope.
+func TestProcessManageWriteDeniesScopeOverride(t *testing.T) {
+	alice, _ := profilePair(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	manage := NewProcessManageHandler(ws, process.NewManager(alice))
+	_, err := manage(testContext("req-scope"), map[string]interface{}{
+		"action":     "write",
+		"session_id": "nosuch",
+		"data":       "OSWALD_HOME=/tmp/x oswald env show",
+	})
+	if err == nil || !strings.Contains(err.Error(), "OSWALD_*") {
+		t.Fatalf("write allowed scope override: %v", err)
+	}
+}
