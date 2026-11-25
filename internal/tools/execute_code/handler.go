@@ -53,6 +53,9 @@ func NewExecuteCodeHandler(ws *workspace.Workspace) func(context.Context, map[st
 		if reason, blocked := workspace.ScanProtectedRead(code, ws.Root(), ws.Root(), false); blocked {
 			return governance.Result{}, errors.New(reason)
 		}
+		if reason, blocked := workspace.ScanEnvRetarget(code, false); blocked {
+			return governance.Result{}, errors.New(reason)
+		}
 		reset, err := boolArg(args, "reset", false)
 		if err != nil {
 			return governance.Result{}, err

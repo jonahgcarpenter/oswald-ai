@@ -98,6 +98,9 @@ func NewProcessManageHandler(ws *workspace.Workspace, pm *process.Manager) func(
 			if reason, blocked := workspace.ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
+			if reason, blocked := workspace.ScanEnvRetarget(data, false); blocked {
+				return governance.Result{}, errors.New(reason)
+			}
 			if err := pm.Write(sessionID, data); err != nil {
 				return governance.Result{}, err
 			}
@@ -107,6 +110,9 @@ func NewProcessManageHandler(ws *workspace.Workspace, pm *process.Manager) func(
 				return governance.Result{}, errors.New(reason)
 			}
 			if reason, blocked := workspace.ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
+				return governance.Result{}, errors.New(reason)
+			}
+			if reason, blocked := workspace.ScanEnvRetarget(data, false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
 			if err := pm.Submit(sessionID, data); err != nil {

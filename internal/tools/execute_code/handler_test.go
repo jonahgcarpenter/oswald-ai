@@ -112,3 +112,15 @@ func TestExecuteCodeDeniesManagedCache(t *testing.T) {
 		t.Fatalf("code allowed managed cache write: %v", err)
 	}
 }
+
+func TestExecuteCodeDeniesScopeOverride(t *testing.T) {
+	_, alice, _ := profilePair(t)
+	ws := workspace.NewWorkspace(alice, "alice")
+	exec := NewExecuteCodeHandler(ws)
+	_, err := exec(testContext("req-scope"), map[string]interface{}{
+		"code": `import os; os.environ["OSWALD_HOME"] = "/tmp/x"`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "OSWALD_*") {
+		t.Fatalf("code allowed scope override: %v", err)
+	}
+}

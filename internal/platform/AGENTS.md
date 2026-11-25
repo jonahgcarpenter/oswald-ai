@@ -77,7 +77,9 @@ row per attempt, so a fully failing tick trips auto-pause immediately. Schedules
 `{kind:cron|interval|once,expr|minutes|run_at,display}` with UTC ISO `created_at/next_run_at`
 (`null` when unscheduled); the grammar covers durations, `every` phrases, 5-field cron, RFC3339,
 and `in` one-shots, all UTC wall-clock. Scripts live under per-profile `scripts/` (jailed,
-must exist). Validation rejects injection, script escapes, bad deliver targets, and user-owned
+must exist) and every body is profile-scope scanned at create/update and again before each
+run, so a job can never retarget the `oswald` CLI away from its profile. Validation rejects
+injection, script escapes, profile-scope overrides, bad deliver targets, and user-owned
 `model/provider/base_url`; unknown or legacy fields fail closed with a manual-update error (no
 migration). Deliver targets are also liveness-checked at create/update time against the live
 transport (imessage group GUIDs and guild/channel membership via BlueBubbles/Discord lookups;

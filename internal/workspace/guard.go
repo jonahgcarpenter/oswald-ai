@@ -143,6 +143,9 @@ func ScanLifecycle(command, cwd string) error {
 				return errors.New("blocked: referenced script targets the agent gateway (" + p.reason + ")")
 			}
 		}
+		if _, blocked := ScanEnvRetarget(body, true); blocked {
+			return errors.New("blocked: referenced script overrides the OSWALD_* profile scope")
+		}
 	}
 	return nil
 }

@@ -54,6 +54,13 @@ func TestScanLifecycle(t *testing.T) {
 	if err := ScanLifecycle("sh job.sh", dir); err == nil {
 		t.Fatal("missed script lifecycle")
 	}
+	scope := filepath.Join(dir, "scope.sh")
+	if err := os.WriteFile(scope, []byte("#!/bin/sh\nOSWALD_HOME=/tmp/x oswald env show\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ScanLifecycle("sh scope.sh", dir); err == nil {
+		t.Fatal("missed script scope override")
+	}
 	if err := ScanLifecycle("go test ./...", dir); err != nil {
 		t.Fatalf("safe blocked: %v", err)
 	}
