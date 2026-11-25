@@ -1,6 +1,6 @@
 // Package model implements the /model chat command family: showing the
-// conversation's resolved model, listing a provider's models live, and pinning
-// the conversation to one provider/model pair.
+// conversation's resolved model, listing a provider's models live, pinning the
+// conversation to one provider/model pair, and setting the profile default.
 package model
 
 import (
@@ -20,7 +20,7 @@ const (
 	listEntryLimit = 40
 	// modelRuneLimit matches the persisted pin field bound.
 	modelRuneLimit = 256
-	// globalFlag is the not-yet-supported profile-default selector.
+	// globalFlag selects the profile default instead of the conversation pin.
 	globalFlag = "--global"
 )
 
@@ -39,34 +39,55 @@ type Pins interface {
 	SetSessionModel(ctx context.Context, owner, sessionKey, provider, model string) error
 }
 
+// Defaults sets the profile's default model selection (model.provider +
+// model.default) through the mediated config write path.
+type Defaults interface {
+	SetProfileDefault(ctx context.Context, provider, model string) error
+}
+
+// DefaultsFunc adapts a function to Defaults.
+type DefaultsFunc func(ctx context.Context, provider, model string) error
+
+// SetProfileDefault runs the wrapped function.
+func (f DefaultsFunc) SetProfileDefault(ctx context.Context, provider, model string) error {
+	return f(ctx, provider, model)
+}
+
 type handler struct {
-	router Router
-	pins   Pins
+	router   Router
+	pins     Pins
+	defaults Defaults
 }
 
 // New creates the /model command.
-func New(router Router, pins Pins) commands.Handler {
-	return &handler{router: router, pins: pins}
+func New(router Router, pins Pins, defaults Defaults) commands.Handler {
+	return &handler{router: router, pins: pins, defaults: defaults}
 }
 
 func (h *handler) Definition() commands.Definition {
-	return commands.Definition{Name: "model", Summary: "Show or set the model for this conversation", Usage: "/model [provider] | /model <provider>/<model>"}
+	return commands.Definition{Name: "model", Summary: "Show or set the model for this conversation", Usage: "/model [provider] | /model <provider>/<model> [--global]"}
 }
 
 func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if !req.Principal.Authenticated() {
 		return commands.Result{Text: "Model routing requires an authenticated identity.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "authentication_required"}}, nil
 	}
-	for _, arg := range req.Args {
-		if arg == globalFlag {
-			return commands.Result{Text: "Switching the profile default from chat is not available yet.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "not_available"}}, nil
+	globalProvider, globalModel, isGlobal := globalSelectionArgs(req.Args)
+	if !isGlobal {
+		if len(req.Args) > 1 {
+			return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
+		}
+		for _, arg := range req.Args {
+			if arg == globalFlag {
+				return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
+			}
 		}
 	}
-	if len(req.Args) > 1 {
-		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
-	}
-	if h.router == nil || h.pins == nil {
+	if h.router == nil || h.pins == nil || h.defaults == nil {
 		return commands.Result{}, errors.New("model command is not configured")
+	}
+	if isGlobal {
+		return h.setGlobal(ctx, req, globalProvider, globalModel), nil
 	}
 	if len(req.Args) == 0 {
 		return h.show(ctx, req), nil
@@ -83,6 +104,38 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 		return h.list(ctx, provider), nil
 	}
 	return h.set(ctx, req, provider, model), nil
+}
+
+// ResolveFenceTargets fences the acting profile only for the exact two-argument
+// set-global shape, so an unrelated profile's normal work cannot interleave
+// with the mediated config write.
+func (h *handler) ResolveFenceTargets(_ context.Context, req commands.Request) ([]string, error) {
+	if !req.Principal.Authenticated() {
+		return nil, nil
+	}
+	if _, _, ok := globalSelectionArgs(req.Args); !ok {
+		return nil, nil
+	}
+	return []string{req.Principal.CanonicalUserID}, nil
+}
+
+// globalSelectionArgs parses the exact set-global form
+// "/model <provider>/<model> --global" from already-split arguments.
+func globalSelectionArgs(args []string) (provider, model string, ok bool) {
+	if len(args) != 2 || args[1] != globalFlag {
+		return "", "", false
+	}
+	selector := strings.TrimSpace(args[0])
+	if !strings.Contains(selector, "/") {
+		return "", "", false
+	}
+	provider, model, _ = strings.Cut(selector, "/")
+	provider = normalizeProvider(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return "", "", false
+	}
+	return provider, model, true
 }
 
 // show renders the resolved target, its provenance, and every configured
@@ -163,6 +216,42 @@ func (h *handler) set(ctx context.Context, req commands.Request, provider, model
 	return commands.Result{
 		Text:    fmt.Sprintf("Model set to %s/%s for this conversation. It applies from your next message and survives /new until changed.", provider, model),
 		Outcome: commands.Outcome{Status: "ok", Operation: "model.set", IsChanged: true, AffectedCount: 1},
+	}
+}
+
+// setGlobal validates the selection, commits the profile default through the
+// mediated config path, then pins the acting conversation. The commit is the
+// running server's input: the watcher rotates the live default on its next
+// tick, so this handler never attempts a rotation itself.
+func (h *handler) setGlobal(ctx context.Context, req commands.Request, provider, model string) commands.Result {
+	if !h.router.HasProvider(provider) {
+		return commands.Result{
+			Text:    unknownProviderText(provider, h.router.Providers()),
+			Outcome: commands.Outcome{Status: "rejected", ReasonCode: "unknown_provider", Operation: "model.set_global"},
+		}
+	}
+	if !utf8.ValidString(model) || utf8.RuneCountInString(model) > modelRuneLimit {
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments", Operation: "model.set_global"}}
+	}
+	if err := h.defaults.SetProfileDefault(ctx, provider, model); err != nil {
+		// The config error can carry schema detail; only fixed text is
+		// user-facing.
+		return commands.Result{
+			Text:    "Could not set the profile default.",
+			Outcome: commands.Outcome{Status: "error", ReasonCode: "operation_failed", Operation: "model.set_global"},
+		}
+	}
+	if err := h.pins.SetSessionModel(ctx, req.Principal.CanonicalUserID, req.SessionKey, provider, model); err != nil {
+		// The default is already committed; report the pin failure honestly
+		// instead of undoing a successful config write.
+		return commands.Result{
+			Text:    fmt.Sprintf("Profile default set to %s/%s — applies live. Could not pin this conversation.", provider, model),
+			Outcome: commands.Outcome{Status: "ok", Operation: "model.set_global", IsChanged: true, AffectedCount: 1},
+		}
+	}
+	return commands.Result{
+		Text:    fmt.Sprintf("Profile default set to %s/%s — applies live (the running server picks it up within seconds). This conversation is pinned to it.", provider, model),
+		Outcome: commands.Outcome{Status: "ok", Operation: "model.set_global", IsChanged: true, AffectedCount: 2},
 	}
 }
 

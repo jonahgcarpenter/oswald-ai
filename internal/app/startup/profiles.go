@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/builtin"
+	modelcommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/model"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/session"
 	stopcommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/stop"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -428,7 +429,10 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			delegateStarter = &newSessionCanceller{Starter: store, profile: name, delegate: dmgr}
 			stopCanceler = &stopWithDelegate{broker: requestBroker, profile: name, delegate: dmgr}
 		}
-		commands, err := commandbuiltin.NewProfileService(delegateStarter, stopCanceler, profile.ProfileRoot, summarizers[name], store, requestBroker, modelRouter, store)
+		modelDefaults := modelcommands.DefaultsFunc(func(_ context.Context, provider, model string) error {
+			return config.SetModelSelection(cfg.ProfileRoot, name, provider, model)
+		})
+		commands, err := commandbuiltin.NewProfileService(delegateStarter, stopCanceler, profile.ProfileRoot, summarizers[name], store, requestBroker, modelRouter, store, modelDefaults)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}

@@ -83,7 +83,10 @@ fires twice, so rapid successive writes coalesce.
 - `/model` shows the conversation's resolved model and configured providers; `/model <provider>`
   lists that provider's models live (capped at 40 with an ellipsis note); `/model
   <provider>/<model>` pins the conversation — live from the next turn, survives `/new`, changed
-  only by setting another model; `--global` is rejected until the hot-apply phase lands.
+  only by setting another model. `/model <provider>/<model> --global` writes the acting profile's
+  `model.provider` + `model.default` through the mediated config path (staged validation,
+  last-known-good, one atomic commit), applies live via the reload applier on its next watcher
+  tick, and pins the acting conversation; it runs under the per-profile writer fence.
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.

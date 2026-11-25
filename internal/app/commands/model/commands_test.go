@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -68,6 +69,18 @@ type fakePins struct {
 	setCalls                                    int
 }
 
+type fakeDefaults struct {
+	setErr                error
+	gotProvider, gotModel string
+	setCalls              int
+}
+
+func (f *fakeDefaults) SetProfileDefault(_ context.Context, provider, model string) error {
+	f.setCalls++
+	f.gotProvider, f.gotModel = provider, model
+	return f.setErr
+}
+
 func (f *fakePins) SessionModel(context.Context, string, string) (string, string, bool, error) {
 	if f.sessionErr != nil {
 		return "", "", false, f.sessionErr
@@ -105,7 +118,7 @@ func TestShowReportsConversationPinAndProviders(t *testing.T) {
 	}
 	pins := &fakePins{provider: "example", model: "model-a", found: true}
 
-	result, err := New(router, pins).Execute(context.Background(), testRequest())
+	result, err := New(router, pins, &fakeDefaults{}).Execute(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +150,7 @@ func TestShowFallsBackToProfileDefaultProvenance(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			router := &fakeRouter{target: agent.Target{Provider: "example", Model: "model-a"}}
-			result, err := New(router, test.pins).Execute(context.Background(), testRequest())
+			result, err := New(router, test.pins, &fakeDefaults{}).Execute(context.Background(), testRequest())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -150,7 +163,7 @@ func TestShowFallsBackToProfileDefaultProvenance(t *testing.T) {
 
 func TestShowWithoutConfiguredProviders(t *testing.T) {
 	router := &fakeRouter{target: agent.Target{Provider: "example", Model: "model-a"}}
-	result, err := New(router, &fakePins{}).Execute(context.Background(), testRequest())
+	result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +183,7 @@ func TestListRendersContextWindows(t *testing.T) {
 			{ID: "model-b"},
 		}},
 	}
-	result, err := New(router, &fakePins{}).Execute(context.Background(), testRequest("example"))
+	result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest("example"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +210,7 @@ func TestListCapsAndNotesTruncation(t *testing.T) {
 
 	t.Run("exactly forty is complete", func(t *testing.T) {
 		router := &fakeRouter{providers: []string{"example"}, models: map[string][]llm.ModelEntry{"example": entries(40)}}
-		result, err := New(router, &fakePins{}).Execute(context.Background(), testRequest("example"))
+		result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest("example"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,7 +221,7 @@ func TestListCapsAndNotesTruncation(t *testing.T) {
 
 	t.Run("forty-one truncates", func(t *testing.T) {
 		router := &fakeRouter{providers: []string{"example"}, models: map[string][]llm.ModelEntry{"example": entries(41)}}
-		result, err := New(router, &fakePins{}).Execute(context.Background(), testRequest("example"))
+		result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest("example"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,7 +236,7 @@ func TestListCapsAndNotesTruncation(t *testing.T) {
 
 func TestListUnknownProviderNamesConfiguredProviders(t *testing.T) {
 	router := &fakeRouter{providers: []string{"example", "other"}}
-	result, err := New(router, &fakePins{}).Execute(context.Background(), testRequest("bogus"))
+	result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest("bogus"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +255,7 @@ func TestListFetchErrorHidesRawError(t *testing.T) {
 		models:    map[string][]llm.ModelEntry{"example": {{ID: "model-a"}}},
 		listErr:   errors.New("models list request failed: " + canary),
 	}
-	result, err := New(router, &fakePins{}).Execute(context.Background(), testRequest("example"))
+	result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest("example"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +275,7 @@ func TestListFetchErrorHidesRawError(t *testing.T) {
 func TestSetUnknownProvider(t *testing.T) {
 	router := &fakeRouter{providers: []string{"example"}}
 	pins := &fakePins{}
-	result, err := New(router, pins).Execute(context.Background(), testRequest("bogus/model-a"))
+	result, err := New(router, pins, &fakeDefaults{}).Execute(context.Background(), testRequest("bogus/model-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,12 +293,16 @@ func TestSetUnknownProvider(t *testing.T) {
 func TestSetNormalizesCustomPrefixAndKeepsModelSlashes(t *testing.T) {
 	router := &fakeRouter{providers: []string{"openrouter"}}
 	pins := &fakePins{}
-	result, err := New(router, pins).Execute(context.Background(), testRequest("custom:openrouter/openai/gpt-4o"))
+	defaults := &fakeDefaults{}
+	result, err := New(router, pins, defaults).Execute(context.Background(), testRequest("custom:openrouter/openai/gpt-4o"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pins.setCalls != 1 || pins.gotProvider != "openrouter" || pins.gotModel != "openai/gpt-4o" {
 		t.Fatalf("pin write = calls=%d provider=%q model=%q", pins.setCalls, pins.gotProvider, pins.gotModel)
+	}
+	if defaults.setCalls != 0 {
+		t.Fatal("conversation pin wrote the profile default")
 	}
 	if pins.gotOwner != "alice" || pins.gotSession != testSession {
 		t.Fatalf("pin scope = owner=%q session=%q", pins.gotOwner, pins.gotSession)
@@ -304,7 +321,7 @@ func TestSetTrailingSlashListsProvider(t *testing.T) {
 		models:    map[string][]llm.ModelEntry{"example": {{ID: "model-a", Window: 8000}}},
 	}
 	pins := &fakePins{}
-	result, err := New(router, pins).Execute(context.Background(), testRequest("example/"))
+	result, err := New(router, pins, &fakeDefaults{}).Execute(context.Background(), testRequest("example/"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +348,7 @@ func TestSetRejectsInvalidModelNames(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			pins := &fakePins{}
-			result, err := New(router, pins).Execute(context.Background(), testRequest("example/"+test.model))
+			result, err := New(router, pins, &fakeDefaults{}).Execute(context.Background(), testRequest("example/"+test.model))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +365,7 @@ func TestSetRejectsInvalidModelNames(t *testing.T) {
 func TestSetAcceptsModelAtRuneLimit(t *testing.T) {
 	router := &fakeRouter{providers: []string{"example"}}
 	pins := &fakePins{}
-	result, err := New(router, pins).Execute(context.Background(), testRequest("example/"+strings.Repeat("m", modelRuneLimit)))
+	result, err := New(router, pins, &fakeDefaults{}).Execute(context.Background(), testRequest("example/"+strings.Repeat("m", modelRuneLimit)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +377,7 @@ func TestSetAcceptsModelAtRuneLimit(t *testing.T) {
 func TestSetStoreErrorHidesRawError(t *testing.T) {
 	router := &fakeRouter{providers: []string{"example"}}
 	pins := &fakePins{setErr: errors.New("write state_meta failed: canary-raw")}
-	result, err := New(router, pins).Execute(context.Background(), testRequest("example/model-a"))
+	result, err := New(router, pins, &fakeDefaults{}).Execute(context.Background(), testRequest("example/model-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,35 +392,197 @@ func TestSetStoreErrorHidesRawError(t *testing.T) {
 	}
 }
 
-func TestGlobalFlagRejectedInAnyPosition(t *testing.T) {
-	positions := [][]string{
-		{"--global"},
-		{"--global", "example/model-a"},
-		{"example/model-a", "--global"},
+func TestSetGlobalWritesDefaultAndPinsConversation(t *testing.T) {
+	router := &fakeRouter{providers: []string{"example"}}
+	pins := &fakePins{}
+	defaults := &fakeDefaults{}
+	result, err := New(router, pins, defaults).Execute(context.Background(), testRequest("custom:example/model-a", "--global"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, args := range positions {
-		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			router := &fakeRouter{providers: []string{"example"}}
+	if defaults.setCalls != 1 || defaults.gotProvider != "example" || defaults.gotModel != "model-a" {
+		t.Fatalf("default write = calls=%d provider=%q model=%q", defaults.setCalls, defaults.gotProvider, defaults.gotModel)
+	}
+	if pins.setCalls != 1 || pins.gotProvider != "example" || pins.gotModel != "model-a" || pins.gotOwner != "alice" || pins.gotSession != testSession {
+		t.Fatalf("pin write = calls=%d provider=%q model=%q owner=%q session=%q", pins.setCalls, pins.gotProvider, pins.gotModel, pins.gotOwner, pins.gotSession)
+	}
+	want := "Profile default set to example/model-a — applies live (the running server picks it up within seconds). This conversation is pinned to it."
+	if result.Text != want {
+		t.Fatalf("text = %q, want %q", result.Text, want)
+	}
+	if result.Outcome.Status != "ok" || result.Outcome.Operation != "model.set_global" || !result.Outcome.IsChanged || result.Outcome.AffectedCount != 2 {
+		t.Fatalf("outcome = %+v", result.Outcome)
+	}
+}
+
+func TestSetGlobalUnknownProviderRejectedBeforeWrite(t *testing.T) {
+	router := &fakeRouter{providers: []string{"example"}}
+	pins := &fakePins{}
+	defaults := &fakeDefaults{}
+	result, err := New(router, pins, defaults).Execute(context.Background(), testRequest("bogus/model-a", "--global"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "Unknown provider: bogus. Configured: example." {
+		t.Fatalf("text = %q", result.Text)
+	}
+	if result.Outcome.Status != "rejected" || result.Outcome.ReasonCode != "unknown_provider" || result.Outcome.Operation != "model.set_global" {
+		t.Fatalf("outcome = %+v", result.Outcome)
+	}
+	if defaults.setCalls != 0 || pins.setCalls != 0 {
+		t.Fatal("unknown provider reached the write path")
+	}
+}
+
+func TestSetGlobalRejectsInvalidModelNames(t *testing.T) {
+	router := &fakeRouter{providers: []string{"example"}}
+	tests := []struct {
+		name  string
+		model string
+	}{
+		{name: "oversize", model: strings.Repeat("m", modelRuneLimit+1)},
+		{name: "invalid UTF-8", model: "bad\xff"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			pins := &fakePins{}
-			result, err := New(router, pins).Execute(context.Background(), testRequest(args...))
+			defaults := &fakeDefaults{}
+			result, err := New(router, pins, defaults).Execute(context.Background(), testRequest("example/"+test.model, "--global"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Text != "Switching the profile default from chat is not available yet." {
-				t.Fatalf("text = %q", result.Text)
-			}
-			if result.Outcome.Status != "rejected" || result.Outcome.ReasonCode != "not_available" || result.Outcome.Operation != "" {
+			if result.Outcome.Status != "rejected" || result.Outcome.ReasonCode != "invalid_arguments" || result.Outcome.Operation != "model.set_global" {
 				t.Fatalf("outcome = %+v", result.Outcome)
 			}
-			if pins.setCalls != 0 || router.resolveSession != "" {
-				t.Fatal("global rejection did work")
+			if !strings.Contains(result.Text, "/model <provider>/<model>") || defaults.setCalls != 0 || pins.setCalls != 0 {
+				t.Fatalf("text = %q defaults = %d pins = %d", result.Text, defaults.setCalls, pins.setCalls)
 			}
 		})
 	}
 }
 
+func TestSetGlobalWriteErrorHidesRawError(t *testing.T) {
+	router := &fakeRouter{providers: []string{"example"}}
+	pins := &fakePins{}
+	defaults := &fakeDefaults{setErr: errors.New("config write failed: canary-provider-secret")}
+	result, err := New(router, pins, defaults).Execute(context.Background(), testRequest("example/model-a", "--global"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "Could not set the profile default." {
+		t.Fatalf("text = %q", result.Text)
+	}
+	if strings.Contains(result.Text, "canary") || strings.Contains(result.Text, "config write") {
+		t.Fatalf("raw config error leaked: %q", result.Text)
+	}
+	if result.Outcome.Status != "error" || result.Outcome.ReasonCode != "operation_failed" || result.Outcome.Operation != "model.set_global" || result.Outcome.IsChanged {
+		t.Fatalf("outcome = %+v", result.Outcome)
+	}
+	if pins.setCalls != 0 {
+		t.Fatal("pin attempted after failed config write")
+	}
+}
+
+func TestSetGlobalPinFailureKeepsCommittedDefault(t *testing.T) {
+	router := &fakeRouter{providers: []string{"example"}}
+	pins := &fakePins{setErr: errors.New("state write failed: canary-raw")}
+	defaults := &fakeDefaults{}
+	result, err := New(router, pins, defaults).Execute(context.Background(), testRequest("example/model-a", "--global"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Profile default set to example/model-a — applies live. Could not pin this conversation."
+	if result.Text != want {
+		t.Fatalf("text = %q, want %q", result.Text, want)
+	}
+	if strings.Contains(result.Text, "canary") {
+		t.Fatalf("raw pin error leaked: %q", result.Text)
+	}
+	if result.Outcome.Status != "ok" || result.Outcome.Operation != "model.set_global" || !result.Outcome.IsChanged || result.Outcome.AffectedCount != 1 {
+		t.Fatalf("outcome = %+v", result.Outcome)
+	}
+	if defaults.setCalls != 1 {
+		t.Fatalf("default write calls = %d", defaults.setCalls)
+	}
+}
+
+func TestGlobalFlagRejectedOutsideSetGlobalShape(t *testing.T) {
+	positions := [][]string{
+		{"--global"},
+		{"--global", "example/model-a"},
+		{"example/model-a", "--global", "extra"},
+		{"example", "--global"},
+		{"example/", "--global"},
+	}
+	for _, args := range positions {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			router := &fakeRouter{providers: []string{"example"}}
+			pins := &fakePins{}
+			defaults := &fakeDefaults{}
+			result, err := New(router, pins, defaults).Execute(context.Background(), testRequest(args...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome.Status != "rejected" || result.Outcome.ReasonCode != "invalid_arguments" || result.Outcome.Operation != "" {
+				t.Fatalf("outcome = %+v", result.Outcome)
+			}
+			if !strings.Contains(result.Text, "Use: /model [provider]") {
+				t.Fatalf("text = %q", result.Text)
+			}
+			if defaults.setCalls != 0 || pins.setCalls != 0 {
+				t.Fatal("malformed global request did work")
+			}
+		})
+	}
+}
+
+func TestResolveFenceTargetsOnlyForSetGlobal(t *testing.T) {
+	handler := New(&fakeRouter{}, &fakePins{}, &fakeDefaults{})
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		raw  string
+		want []string
+	}{
+		{raw: "/model p/m --global", want: []string{"alice"}},
+		{raw: "/model", want: nil},
+		{raw: "/model p", want: nil},
+		{raw: "/model p/m", want: nil},
+		{raw: "/model --global", want: nil},
+		{raw: "/model --global p/m", want: nil},
+	}
+	for _, test := range tests {
+		t.Run(test.raw, func(t *testing.T) {
+			got, err := service.ResolveFenceTargets(context.Background(), commands.Request{Principal: testPrincipal(), Raw: test.raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("fence targets = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveFenceTargetsNeverFencesUnauthenticated(t *testing.T) {
+	handler := New(&fakeRouter{}, &fakePins{}, &fakeDefaults{})
+	resolver, ok := handler.(commands.FenceTargetResolver)
+	if !ok {
+		t.Fatal("handler does not resolve fence targets")
+	}
+	got, err := resolver.ResolveFenceTargets(context.Background(), commands.Request{Raw: "/model p/m --global", Args: []string{"p/m", "--global"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("unauthenticated request fenced %v", got)
+	}
+}
+
 func TestTooManyArgumentsRejected(t *testing.T) {
-	result, err := New(&fakeRouter{}, &fakePins{}).Execute(context.Background(), testRequest("example", "extra"))
+	result, err := New(&fakeRouter{}, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest("example", "extra"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +595,7 @@ func TestTooManyArgumentsRejected(t *testing.T) {
 }
 
 func TestUnauthenticatedRejected(t *testing.T) {
-	result, err := New(&fakeRouter{}, &fakePins{}).Execute(context.Background(), commands.Request{Raw: "/model"})
+	result, err := New(&fakeRouter{}, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), commands.Request{Raw: "/model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +610,7 @@ func TestServiceRegistrationAndDispatch(t *testing.T) {
 		target:    agent.Target{Provider: "example", Model: "model-a"},
 	}
 	pins := &fakePins{}
-	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(router, pins)})
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(router, pins, &fakeDefaults{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +640,7 @@ func TestServiceRegistrationAndDispatch(t *testing.T) {
 }
 
 func TestServiceMapsUnconfiguredHandlerErrorToOutcome(t *testing.T) {
-	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(nil, nil)})
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(nil, nil, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

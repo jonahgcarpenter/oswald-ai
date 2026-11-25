@@ -12,7 +12,7 @@ import (
 
 // NewProfileService registers only the profile runtime's public commands.
 // approvalRoot binds /approve execution to one profile working directory.
-func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canceler, approvalRoot string, compacter compactcommands.Summarizer, compactStore compactcommands.Store, queuer queuecommands.Submitter, modelRouter modelcommands.Router, modelPins modelcommands.Pins) (*commands.Service, error) {
+func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canceler, approvalRoot string, compacter compactcommands.Summarizer, compactStore compactcommands.Store, queuer queuecommands.Submitter, modelRouter modelcommands.Router, modelPins modelcommands.Pins, modelDefaults modelcommands.Defaults) (*commands.Service, error) {
 	help := &helpHandler{}
 	cmds := []commands.Command{
 		{Handler: help},
@@ -25,8 +25,8 @@ func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canc
 	if compacter != nil && compactStore != nil {
 		cmds = append(cmds, commands.Command{Handler: compactcommands.New(compactStore, compacter)})
 	}
-	if modelRouter != nil && modelPins != nil {
-		cmds = append(cmds, commands.Command{Handler: modelcommands.New(modelRouter, modelPins)})
+	if modelRouter != nil && modelPins != nil && modelDefaults != nil {
+		cmds = append(cmds, commands.Command{Handler: modelcommands.New(modelRouter, modelPins, modelDefaults)})
 	}
 	service, err := commands.NewServiceWithCommands(cmds...)
 	if err != nil {
