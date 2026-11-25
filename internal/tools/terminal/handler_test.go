@@ -505,4 +505,7 @@ func TestTerminalDeniesProfileScopeOverride(t *testing.T) {
 	if !strings.Contains(res.Content, `"status":"blocked"`) || !strings.Contains(res.Content, "OSWALD_*") {
 		t.Fatalf("missing blocked envelope: %q", res.Content)
 	}
+	if strings.Contains(res.Content, "..") {
+		t.Fatalf("denial envelope kept a doubled period: %q", res.Content)
+	}
 }

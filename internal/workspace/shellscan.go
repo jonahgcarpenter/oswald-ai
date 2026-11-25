@@ -391,8 +391,10 @@ func proseBlanked(normalized string) string {
 
 // BlockEnvelope renders the model-visible denial envelope for shell blocks.
 
-// Wording is fixed: rewording, quoting, splitting, or encoding never clears
-// a normalized-operation match.
+// Wording is fixed: rewording, quoting, splitting, encoding, or moving the
+// same operation into a script, a constructed path, an environment override,
+// or a spawned process never clears a normalized-operation match.
 func BlockEnvelope(reason string) string {
-	return `{"output":"","exit_code":1,"error":"Blocked: ` + reason + `. Do NOT retry with rewording, quoting, splitting, or encoding — matching is on normalized operations, not wording. Stop the current workflow that needs this operation and report the blocker.","status":"blocked"}`
+	reason = strings.TrimSuffix(reason, ".")
+	return `{"output":"","exit_code":1,"error":"Blocked: ` + reason + `. Do NOT retry with rewording, quoting, splitting, or encoding, or by moving the same operation into a script, a constructed path, an environment override, or a spawned process — matching is on normalized operations, not wording. Stop the current workflow that needs this operation and report the blocker.","status":"blocked"}`
 }

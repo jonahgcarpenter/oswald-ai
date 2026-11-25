@@ -6,7 +6,8 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract in
 
 `agent.go::Process()` is the public entry point; `types.go` holds the `Request`/`Response` contract
 and `OswaldToolEvent` timeline. A turn is: validate principal → load soul, file/session memory,
-images, and cached markdown → build the dynamic system prompt (soul + trusted
+images, and cached markdown → build the dynamic system prompt (environment block with host,
+working directory, scratch, and profile-scope isolation; soul + trusted
 operating-directives block) → merge the tool catalog → prepend the skills guidance/index blocks
 above memory (only when `skill_manage` is offered; the index covers the profile
 tree plus bound plugin skills) → 70% markdown compaction check →
