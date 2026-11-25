@@ -17,14 +17,16 @@ import (
 // Hot-apply covers the shared log level, gateway admission policy (allow/ban
 // lists, group mention rules), and live model routing: the default model,
 // provider, endpoint, and key plus the selected routing overrides of profiles
-// present both before and after, and the global platform channel-override map.
+// present both before and after, and the channel-override maps (global
+// baseline plus each profile's own overlay).
 // The log level and admission policy swap on the next watcher tick; model
 // routing is rotated into the running router views, summarizers, and delegate
 // configs by the attached applier, while a channel-override-only diff swaps
-// router views without re-seating summarizers. Model windows (context lengths)
-// and profile additions/removals stay restart-class. Everything else
-// (listeners, credentials, routes, mention patterns, tool backends, MCP
-// sessions, plugin installs) is load-bearing and needs `oswald restart`:
+// the affected router views without re-seating summarizers. Model windows
+// (context lengths) and profile additions/removals stay restart-class.
+// Everything else (listeners, credentials, routes, mention patterns, tool
+// backends, MCP sessions, plugin installs) is load-bearing and needs `oswald
+// restart`:
 // mutating CLI commands print "run `oswald restart` to apply" and the watcher
 // only logs an advisory `config.reload.restart_required`. Restart is explicit
 // so the model batches edits and restarts once, never killing its own turn

@@ -11,7 +11,10 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
 // Synthetic routed-turn fixtures. The session key and pin values are obviously
@@ -286,5 +289,55 @@ func TestModelRouteTurnSwapViewIsolation(t *testing.T) {
 	}
 	if got := constructed.Load(); got != 0 {
 		t.Fatalf("rotated default constructed %d client(s) during an in-flight turn", got)
+	}
+}
+
+// TestModelRouteTurnCarriesParentModelToTools proves the context handed to
+// tool execution carries the turn's resolved routing, which is exactly what
+// delegated children mirror. A pinned turn must expose the pinned provider and
+// model, not the construction-time defaults.
+func TestModelRouteTurnCarriesParentModelToTools(t *testing.T) {
+	defaultChat := &fakeChatter{responses: []*llm.ChatResponse{{
+		Model:   "default-model",
+		Message: llm.ChatMessage{Role: "assistant", Content: "default answer"},
+	}}}
+	pinnedChat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: pinnedTurnModel, Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{
+			ID: "capture", Function: llm.ToolFunction{Name: "test.parent_model", Arguments: map[string]interface{}{}},
+		}}}},
+		{Model: pinnedTurnModel, Message: llm.ChatMessage{Role: "assistant", Content: "captured routing"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	agent, _ := newTestAgent(t, defaultChat, nil, reg)
+	var got requestctx.ParentModel
+	var attached bool
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.parent_model", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+		got, attached = requestctx.ParentModelFromContext(ctx)
+		return productiveResult("captured"), nil
+	}); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	pins := newRouterPinStore()
+	pins.set("user-1", pinnedTurnSessionKey, pinnedTurnProvider, pinnedTurnModel)
+	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
+		if url != routerAlternateURL || apiKey != routerAlternateKey {
+			t.Errorf("router constructed client for %q/%q, want the alternate transport", url, apiKey)
+		}
+		return pinnedChat
+	}, nil, pins)
+	agent.SetModelRouter(router)
+
+	response, err := processAgent(agent, "req-parent-model", "discord", pinnedTurnSessionKey, "user-1", "Test User", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if response.Model != pinnedTurnModel {
+		t.Fatalf("response model = %q, want %q", response.Model, pinnedTurnModel)
+	}
+	if len(defaultChat.requests) != 0 {
+		t.Fatalf("default client received %d call(s), want 0", len(defaultChat.requests))
+	}
+	if !attached || got.Model != pinnedTurnModel || got.Provider != pinnedTurnProvider {
+		t.Fatalf("tool ctx parent model = %+v attached=%v", got, attached)
 	}
 }

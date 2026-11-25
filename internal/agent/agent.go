@@ -284,6 +284,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		reqLog.Warn("agent.model.pin_invalid", "conversation model routing link skipped; falling back",
 			config.F("link", degradation.Link), config.F("reason", degradation.Reason))
 	}
+	// Delegated children mirror this turn's resolved routing unless
+	// delegation.* overrides it. Empty values attach nothing, so a turn with
+	// no usable target keeps the delegate's default path.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = requestctx.WithParentModel(ctx, target.Model, target.Provider)
 	modelIterations, toolExecutionCount, toolBlockedCount := 0, 0, 0
 	persistenceStatus := "not_attempted"
 	usage := requestctx.UsageCollectorFromContext(ctx)
@@ -333,9 +340,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}()
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

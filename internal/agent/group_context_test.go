@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 func TestProcessRetainsReplyContextAcrossGatewayTurns(t *testing.T) {

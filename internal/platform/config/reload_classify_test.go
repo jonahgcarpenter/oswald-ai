@@ -354,6 +354,67 @@ func TestClassifyReloadChannelOverrides(t *testing.T) {
 	}
 }
 
+const classifyProfileOverride = `model:
+  default: fake/alice
+platforms:
+  discord:
+    channel_overrides:
+      "555000222":
+        provider: custom:other
+        model: other/alice
+`
+
+func TestClassifyReloadProfileChannelOverrides(t *testing.T) {
+	// A profile-only overlay edit leaves the root map identical but must stay
+	// hot as channel_overrides rather than collapsing into profiles/restart.
+	nextProfile := strings.Replace(classifyProfileOverride, "model: other/alice", "model: other/alice-next", 1)
+	base, next := classifyRoutingPair(t, classifyOverrideBase, classifyProfileOverride, classifyOverrideBase, nextProfile)
+	if !reflect.DeepEqual(base.ChannelOverrides, next.ChannelOverrides) {
+		t.Fatal("fixture root override map moved")
+	}
+	if reflect.DeepEqual(base.Profiles["alice"].ChannelOverrides, next.Profiles["alice"].ChannelOverrides) {
+		t.Fatal("fixture profile override map did not move")
+	}
+	hot, classes := ClassifyReload(base, next)
+	if !hot || !slices.Equal(classes, []string{"channel_overrides"}) {
+		t.Fatalf("profile override diff = hot=%v classes=%v, want hot [channel_overrides]", hot, classes)
+	}
+
+	// A profile window edit alongside the overlay still bills both classes.
+	windowProfile := strings.Replace(classifyProfileOverride, "model: other/alice", "model: other/alice-next", 1)
+	windowProfile = strings.Replace(windowProfile, "  default: fake/alice\n", "  default: fake/alice\n  context_length: 16384\n", 1)
+	windowBase, windowNext := classifyRoutingPair(t, classifyOverrideBase, classifyProfileOverride, classifyOverrideBase, windowProfile)
+	hot, classes = ClassifyReload(windowBase, windowNext)
+	if hot || !slices.Equal(classes, []string{"model_window", "channel_overrides"}) {
+		t.Fatalf("profile override+window diff = hot=%v classes=%v, want restart [model_window channel_overrides]", hot, classes)
+	}
+}
+
+func TestClassifyReloadProfileLifecycleWithOverrides(t *testing.T) {
+	base := classifyRoutingConfig(t, classifyOverrideBase, classifyProfileOverride)
+	alice := base.Profiles["alice"]
+	if alice == nil {
+		t.Fatal("fixture missing alice profile")
+	}
+	added := *base
+	bob := *alice
+	bob.ProfileName = "bob"
+	bob.ChannelOverrides = map[string]map[string]ChannelOverride{
+		"discord": {"555000333": {Provider: "other", Model: "other/bob"}},
+	}
+	added.Profiles = map[string]*Config{"alice": alice, "bob": &bob}
+	hot, classes := ClassifyReload(base, &added)
+	if hot || !slices.Equal(classes, []string{"profiles"}) {
+		t.Fatalf("added profile with overrides = hot=%v classes=%v, want restart [profiles]", hot, classes)
+	}
+	removed := *base
+	removed.Profiles = map[string]*Config{}
+	hot, classes = ClassifyReload(base, &removed)
+	if hot || !slices.Equal(classes, []string{"profiles"}) {
+		t.Fatalf("removed profile with overrides = hot=%v classes=%v, want restart [profiles]", hot, classes)
+	}
+}
+
 func TestClassifyReloadChannelOverridesWithPlatformRestart(t *testing.T) {
 	base, err := Validate(classifyRoot(t, classifyOverrideNoProfile))
 	if err != nil {

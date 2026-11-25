@@ -25,10 +25,11 @@ type ChannelOverride struct {
 
 // applyChannelOverrides validates one platform's channel_overrides map into
 // cfg, keyed by internal gateway name: "discord" for Discord channel ids and
-// "imessage" for BlueBubbles chat GUIDs. The provider selector must name an
-// already declared global provider, and the custom: prefix is stripped before
-// storing. Overrides are global-only, so named profiles inherit the resolved
-// map and can never set their own.
+// "imessage" for BlueBubbles chat GUIDs. The provider selector must name a
+// provider visible to this config revision, and the custom: prefix is
+// stripped before storing. The global block calls it against the global
+// providers map; applyProfileChannelOverrides calls it against a profile's
+// merged providers map and overlays the result.
 func applyChannelOverrides(cfg *Config, platform, gateway string, raw map[string]modelOverrideYAML, providers map[string]providerYAML) error {
 	if len(raw) == 0 {
 		return nil
@@ -61,6 +62,51 @@ func applyChannelOverrides(cfg *Config, platform, gateway string, raw map[string
 	}
 	cfg.ChannelOverrides[gateway] = resolved
 	return nil
+}
+
+// applyProfileChannelOverrides validates and overlays a named profile's own
+// channel routes on the inherited global map. Routing is keyed by gateway
+// ("discord"/"imessage"); a profile entry wins on an id collision and never
+// deletes a global entry, so an empty profile map inherits the global map
+// unchanged. Validation uses the profile's merged providers map, which is what
+// makes a profile-private provider usable while another profile cannot see it.
+func applyProfileChannelOverrides(cfg *Config, platforms map[string]platformYAML, providers map[string]providerYAML) error {
+	for _, platform := range []string{"discord", "bluebubbles"} {
+		settings, ok := platforms[platform]
+		if !ok || len(settings.ChannelOverrides) == 0 {
+			continue
+		}
+		gateway := platform
+		if platform == "bluebubbles" {
+			gateway = "imessage"
+		}
+		staged := &Config{}
+		if err := applyChannelOverrides(staged, platform, gateway, settings.ChannelOverrides, providers); err != nil {
+			return err
+		}
+		cfg.ChannelOverrides = overlayChannelOverrides(cfg.ChannelOverrides, gateway, staged.ChannelOverrides[gateway])
+	}
+	return nil
+}
+
+// overlayChannelOverrides copies the inherited gateway maps and merges one
+// gateway's profile-resolved routes over them. The outer map is copied so a
+// profile's effective overrides never alias the default profile's map or a
+// sibling's; inner maps for untouched gateways stay shared and read-only.
+func overlayChannelOverrides(inherited map[string]map[string]ChannelOverride, gateway string, resolved map[string]ChannelOverride) map[string]map[string]ChannelOverride {
+	out := make(map[string]map[string]ChannelOverride, len(inherited)+1)
+	for name, entries := range inherited {
+		out[name] = entries
+	}
+	merged := make(map[string]ChannelOverride, len(inherited[gateway])+len(resolved))
+	for id, override := range inherited[gateway] {
+		merged[id] = override
+	}
+	for id, override := range resolved {
+		merged[id] = override
+	}
+	out[gateway] = merged
+	return out
 }
 
 // validateChannelOverrideKeys rejects unknown nested keys without resolving

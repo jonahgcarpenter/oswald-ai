@@ -6,10 +6,10 @@ import (
 )
 
 // modelViewFor snapshots a profile's default model transport, provider
-// endpoints, and the global channel-override map into the router view. Startup
+// endpoints, and effective channel-override map into the router view. Startup
 // construction and the hot-apply rotation both call it, so the two views are
-// identical by construction. Overrides are global-only config, so every
-// profile's view carries the same map.
+// identical by construction. Each profile's map is the global baseline plus
+// that profile's own overlays.
 func modelViewFor(profile *config.Config) agent.View {
 	if profile == nil {
 		return agent.View{}

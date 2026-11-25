@@ -159,6 +159,67 @@ func TestModelApplierRotatesViewsForOverrideOnlyChange(t *testing.T) {
 	}
 }
 
+func TestModelApplierRotatesOnlyProfileWithOwnOverrideChange(t *testing.T) {
+	rootOverrides := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000111": {Provider: "other", Model: "other/global"}},
+	}
+	aliceOld := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000222": {Provider: "other", Model: "other/alice"}},
+	}
+	aliceNext := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000222": {Provider: "other", Model: "other/alice-next"}},
+	}
+	bobOverrides := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000333": {Provider: "other", Model: "other/bob"}},
+	}
+	old := channelOverrideConfig("default", "fake/default", rootOverrides)
+	old.Profiles = map[string]*config.Config{
+		"alice": channelOverrideConfig("alice", "fake/alice", aliceOld),
+		"bob":   channelOverrideConfig("bob", "fake/bob", bobOverrides),
+	}
+	next := channelOverrideConfig("default", "fake/default", rootOverrides)
+	next.Profiles = map[string]*config.Config{
+		"alice": channelOverrideConfig("alice", "fake/alice", aliceNext),
+		"bob":   channelOverrideConfig("bob", "fake/bob", bobOverrides),
+	}
+
+	routers := map[string]*agent.ModelRouter{
+		"default": newTestModelRouter(modelViewFor(old)),
+		"alice":   newTestModelRouter(modelViewFor(old.Profiles["alice"])),
+		"bob":     newTestModelRouter(modelViewFor(old.Profiles["bob"])),
+	}
+	rotators := map[string]*fakeSummarizerRotator{"default": {}, "alice": {}, "bob": {}}
+	delegates := map[string]*fakeDelegateSwapper{"default": {}, "alice": {}, "bob": {}}
+	handles := map[string]modelRoutingHandles{}
+	for name := range routers {
+		handles[name] = modelRoutingHandles{router: routers[name], summarizer: rotators[name], delegate: delegates[name]}
+	}
+	log := config.NewLogger(config.LevelDebug)
+	log.SetOutput(&strings.Builder{})
+
+	buildModelApplier(handles, log)(old, next)
+
+	if target, _ := routers["alice"].Resolve(context.Background(), "", "", "discord", "555000222"); target.Model != "other/alice-next" {
+		t.Fatalf("alice override target = %+v, want the next profile override", target)
+	}
+	if target, _ := routers["default"].Resolve(context.Background(), "", "", "discord", "555000111"); target.Model != "other/global" {
+		t.Fatalf("default override target = %+v, want the unchanged root override", target)
+	}
+	if target, _ := routers["bob"].Resolve(context.Background(), "", "", "discord", "555000333"); target.Model != "other/bob" {
+		t.Fatalf("bob override target = %+v, want the untouched sibling override", target)
+	}
+	for name, rotator := range rotators {
+		if rotator.count() != 0 {
+			t.Fatalf("%s summarizer re-seated on a profile-only override diff", name)
+		}
+	}
+	for name, delegate := range delegates {
+		if delegate.last() != nil {
+			t.Fatalf("%s delegate config swapped on a profile-only override diff", name)
+		}
+	}
+}
+
 func TestModelApplierRotatesFullyWhenRoutingAndOverridesChange(t *testing.T) {
 	oldOverrides := map[string]map[string]config.ChannelOverride{
 		"discord": {"555000111": {Provider: "other", Model: "other/model"}},

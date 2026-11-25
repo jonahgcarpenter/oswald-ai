@@ -45,12 +45,12 @@ type delegateConfigSwapper interface {
 //     router, summarizer, and delegation config on the previous revision, and
 //     continues with the rest. On success the view, summarizer, and delegate
 //     config all move together.
-//   - A channel-override-only diff swaps the router view ONLY: the default
-//     routing did not move, so the summarizer and delegate config stay put.
+//   - A channel-override-only diff (global or one profile's own overlay)
+//     swaps the affected router views ONLY: the default routing did not move,
+//     so the summarizer and delegate config stay put.
 func buildModelApplier(handles map[string]modelRoutingHandles, rootLog *config.Logger) func(old, next *config.Config) {
 	log := rootLog.Server("app")
 	return func(old, next *config.Config) {
-		overridesChanged := old != nil && next != nil && !reflect.DeepEqual(old.ChannelOverrides, next.ChannelOverrides)
 		for name, handle := range handles {
 			oldCfg := modelRoutingConfig(old, name)
 			nextCfg := modelRoutingConfig(next, name)
@@ -58,7 +58,10 @@ func buildModelApplier(handles map[string]modelRoutingHandles, rootLog *config.L
 				continue
 			}
 			if !modelRoutingChanged(oldCfg, nextCfg) {
-				if overridesChanged {
+				// Compare this profile's own effective map: a profile-only
+				// overlay edit rotates that profile even when the root map is
+				// unchanged, and leaves sibling profiles alone.
+				if !reflect.DeepEqual(oldCfg.ChannelOverrides, nextCfg.ChannelOverrides) {
 					handle.router.SwapView(modelViewFor(nextCfg))
 				}
 				continue

@@ -15,8 +15,12 @@ rejected. Process env wins over dotenv and loading never mutates the process env
 profiles inherit the default `.env` and override per key, and can only add providers, model, tools,
 MCP servers, and `api` — never shared listeners or routes. `platforms.discord` and
 `platforms.bluebubbles` also accept `channel_overrides` mapping a channel or chat id to
-`{provider, model}`; it is global-only (never profile-overridable), validated against the global
-providers map, and consulted between a conversation's pin and the profile default.
+`{provider, model}`; the global map is a baseline that named profiles may overlay with their own
+`platforms.<name>.channel_overrides` entries only (profile-scoped listeners, credentials,
+admission, enable flags, and `platforms.api` stay rejected). Global entries validate against the
+global providers map, profile overlays against that profile's merged providers, a profile entry
+wins on an id collision without deleting a global one, and the effective map is consulted between
+a conversation's pin and the profile default.
 
 Files are bounded (256 KiB, no symlinks/aliases/duplicate/unknown keys, depth ≤32) and dotenv
 files must be private regular files. Profile names are bounded lowercase ASCII with `default`
@@ -32,10 +36,10 @@ section has a scoped command group (`providers`, `model`, `delegation`, `api`, `
 `tools`, `runtime`, `mcp_servers` via `oswald mcp`) that whitelists its own leaves, so no edit
 can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
 so each command reports `applied live` (runtime log level, admission allow/ban/mention rules,
-model defaults, channel routing overrides, and the selected transports/routing overrides of
-profiles present in both configs) vs `restarting service to apply` (everything else — context
-windows, profile additions/removals, and remaining sections — picked up by the server's supervised
-rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
+model defaults, channel routing overrides including per-profile overlays, and the selected
+transports/routing overrides of profiles present in both configs) vs `restarting service to apply`
+(everything else — context windows, profile additions/removals, and remaining sections — picked up
+by the server's supervised rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
 keeps reads on the calling scope with contradictions failing closed,
 `ResolveProfile` keeps mutations on the calling scope with
 contradictions failing closed, and `RequireDefaultScope` gates global mutations and profile

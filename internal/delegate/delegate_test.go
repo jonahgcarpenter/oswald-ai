@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,12 +27,13 @@ import (
 type fakeChatter struct {
 	mu        sync.Mutex
 	responses []*llm.ChatResponse
+	requests  []llm.ChatRequest
 	calls     int
 	err       error
 	wait      chan struct{}
 }
 
-func (f *fakeChatter) Chat(ctx context.Context, _ llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *fakeChatter) Chat(ctx context.Context, req llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	if f.wait != nil {
 		select {
 		case <-f.wait:
@@ -42,6 +44,7 @@ func (f *fakeChatter) Chat(ctx context.Context, _ llm.ChatRequest, _ func(llm.Ch
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.requests = append(f.requests, req)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -49,6 +52,12 @@ func (f *fakeChatter) Chat(ctx context.Context, _ llm.ChatRequest, _ func(llm.Ch
 		return &llm.ChatResponse{Model: "fake", Message: llm.ChatMessage{Role: "assistant", Content: "synthetic done"}}, nil
 	}
 	return f.responses[0], nil
+}
+
+func (f *fakeChatter) captured() []llm.ChatRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]llm.ChatRequest(nil), f.requests...)
 }
 
 type fakeBroker struct {
@@ -109,6 +118,19 @@ func testPrincipal() identity.Principal {
 
 func testManager(t *testing.T, chat *fakeChatter, br *fakeBroker) (*Manager, *memory.ProfileStore, func()) {
 	t.Helper()
+	cfg := &config.Config{
+		LLMGatewayModel:    "fake/model",
+		LLMGatewayProvider: "fake",
+		LLMGatewayURL:      "http://localhost:9999/v1",
+		LLMGatewayAPIKey:   "synthetic-key",
+	}
+	return testManagerWith(t, chat, br, cfg, nil)
+}
+
+// testManagerWith builds a manager over a caller-supplied config and client
+// seam. A nil seam returns the shared fake chatter for every endpoint.
+func testManagerWith(t *testing.T, chat *fakeChatter, br *fakeBroker, cfg *config.Config, newClient func(url, key, virtualKey string, log *config.Logger) llm.Chatter) (*Manager, *memory.ProfileStore, func()) {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
@@ -120,13 +142,10 @@ func testManager(t *testing.T, chat *fakeChatter, br *fakeBroker) (*Manager, *me
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{
-		LLMGatewayModel:    "fake/model",
-		LLMGatewayProvider: "fake",
-		LLMGatewayURL:      "http://localhost:9999/v1",
-		LLMGatewayAPIKey:   "synthetic-key",
-	}
 	log := config.NewLogger(config.LevelError)
+	if newClient == nil {
+		newClient = func(string, string, string, *config.Logger) llm.Chatter { return chat }
+	}
 	m := NewManager(Deps{
 		Profile:     "alice",
 		ProfileRoot: root,
@@ -135,13 +154,11 @@ func testManager(t *testing.T, chat *fakeChatter, br *fakeBroker) (*Manager, *me
 		Broker:      br,
 		Processes:   fakeProcs{},
 		Parent:      chat,
-		NewClient: func(url, key, virtualKey string, log *config.Logger) llm.Chatter {
-			return chat
-		},
-		Registry: registry.New(log),
-		Soul:     soul.NewProfileStore(root, "alice", ""),
-		Window:   32768,
-		Config:   cfg,
+		NewClient:   newClient,
+		Registry:    registry.New(log),
+		Soul:        soul.NewProfileStore(root, "alice", ""),
+		Window:      32768,
+		Config:      cfg,
 	})
 	m.pool = make(chan struct{}, 10)
 	return m, store, func() { store.Close() }
@@ -437,7 +454,7 @@ func TestSwapConfigUpdatesResolveTarget(t *testing.T) {
 	m, _, cleanup := testManager(t, chat, br)
 	defer cleanup()
 
-	model, provider, url, client, err := m.resolveTarget()
+	model, provider, url, client, err := m.resolveTarget(context.Background())
 	if err != nil || model != "fake/model" || provider != "fake" || url != "http://localhost:9999/v1" || client != chat {
 		t.Fatalf("startup routing = %q %q %q client=%v err=%v", model, provider, url, client, err)
 	}
@@ -455,13 +472,13 @@ func TestSwapConfigUpdatesResolveTarget(t *testing.T) {
 	}
 	m.SwapConfig(next)
 
-	model, provider, url, _, err = m.resolveTarget()
+	model, provider, url, _, err = m.resolveTarget(context.Background())
 	if err != nil || model != "fake/delegate-next" || provider != "alt" || url != "http://localhost:7777/v1" {
 		t.Fatalf("swapped routing = %q %q %q err=%v", model, provider, url, err)
 	}
 
 	m.SwapConfig(&config.Config{LLMGatewayModel: "fake/parent-next", LLMGatewayProvider: "fake", LLMGatewayURL: "http://localhost:9999/v1", LLMGatewayAPIKey: "synthetic-key"})
-	model, provider, _, _, err = m.resolveTarget()
+	model, provider, _, _, err = m.resolveTarget(context.Background())
 	if err != nil || model != "fake/parent-next" || provider != "fake" {
 		t.Fatalf("mirrored routing = %q %q err=%v", model, provider, err)
 	}
@@ -493,7 +510,7 @@ func TestSwapConfigConcurrentResolveTarget(t *testing.T) {
 		}
 	}()
 	for range 200 {
-		model, _, _, _, err := m.resolveTarget()
+		model, _, _, _, err := m.resolveTarget(context.Background())
 		if err != nil || (model != "fake/alpha" && model != "fake/beta") {
 			t.Errorf("concurrent resolve = %q err=%v", model, err)
 			break
@@ -509,7 +526,7 @@ func TestSwapConfigNilSafety(t *testing.T) {
 	if manager.config() != nil {
 		t.Fatal("nil manager returned a configuration")
 	}
-	if _, _, _, _, err := manager.resolveTarget(); err == nil {
+	if _, _, _, _, err := manager.resolveTarget(context.Background()); err == nil {
 		t.Fatal("nil manager resolved a target")
 	}
 
@@ -550,5 +567,203 @@ func TestChildBlockedTools(t *testing.T) {
 		if !seen {
 			t.Fatalf("child catalog exposes %q", name)
 		}
+	}
+}
+
+// Synthetic endpoint URLs for the parent-model routing fixtures.
+const (
+	parentDefaultURL  = "http://localhost:9999/v1"
+	parentAltURL      = "http://localhost:7777/v1"
+	parentKeylessURL  = "http://localhost:8888/v1"
+	parentExplicitURL = "http://localhost:6666/v1"
+)
+
+// parentModelConfig places the router-visible providers in the delegate's own
+// endpoint map, exactly as a same-profile manager sees them.
+func parentModelConfig() *config.Config {
+	return &config.Config{
+		LLMGatewayModel:    "fake/default-model",
+		LLMGatewayProvider: "fake",
+		LLMGatewayURL:      parentDefaultURL,
+		LLMGatewayAPIKey:   "synthetic-key",
+		ProviderEndpoints: map[string]config.ProviderEndpoint{
+			"fake":    {URL: parentDefaultURL, APIKey: "synthetic-key"},
+			"alt":     {URL: parentAltURL, APIKey: "synthetic-alt-key"},
+			"keyless": {URL: parentKeylessURL},
+		},
+	}
+}
+
+// endpointClients is a NewClient seam that returns one fake chatter per URL and
+// records which endpoints were constructed.
+type endpointClients struct {
+	mu    sync.Mutex
+	urls  []string
+	byURL map[string]*fakeChatter
+}
+
+func (c *endpointClients) newClient(url, key, virtualKey string, log *config.Logger) llm.Chatter {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.urls = append(c.urls, url)
+	return c.byURL[url]
+}
+
+func (c *endpointClients) constructed() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.urls...)
+}
+
+func TestSyncDispatchUsesParentModelRouting(t *testing.T) {
+	parentChat := &fakeChatter{}
+	altChat := &fakeChatter{}
+	clients := &endpointClients{byURL: map[string]*fakeChatter{parentAltURL: altChat}}
+	m, _, cleanup := testManagerWith(t, parentChat, &fakeBroker{}, parentModelConfig(), clients.newClient)
+	defer cleanup()
+
+	ctx := dispatchContext(testPrincipal(), "discord:dm:21")
+	ctx = requestctx.WithParentModel(ctx, "  pinned-parent-model  ", "alt")
+
+	model, provider, url, client, err := m.resolveTarget(ctx)
+	if err != nil || model != "pinned-parent-model" || provider != "alt" || url != parentAltURL || client != altChat {
+		t.Fatalf("parent routing = %q %q %q client=%v err=%v", model, provider, url, client, err)
+	}
+
+	result, err := m.Execute(ctx, map[string]interface{}{"goal": "Synthetic pinned parent task"})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if !strings.Contains(result.Content, "synthetic done") {
+		t.Fatalf("unexpected sync result: %q", result.Content)
+	}
+	if requests := parentChat.captured(); len(requests) != 0 {
+		t.Fatalf("default transport received %d child call(s), want 0", len(requests))
+	}
+	requests := altChat.captured()
+	if len(requests) != 1 || requests[0].Model != "pinned-parent-model" {
+		t.Fatalf("parent transport requests = %+v", requests)
+	}
+}
+
+func TestBackgroundDispatchFreezesParentModelRouting(t *testing.T) {
+	parentChat := &fakeChatter{}
+	altChat := &fakeChatter{}
+	clients := &endpointClients{byURL: map[string]*fakeChatter{parentAltURL: altChat}}
+	m, store, cleanup := testManagerWith(t, parentChat, &fakeBroker{}, parentModelConfig(), clients.newClient)
+	defer cleanup()
+
+	ctx := dispatchContext(testPrincipal(), "discord:dm:22")
+	ctx = requestctx.WithParentModel(ctx, "pinned-parent-model", "alt")
+	if _, err := m.Execute(ctx, map[string]interface{}{"goal": "Synthetic pinned background task", "background": true}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	var rows []memory.DelegationRow
+	waitFor(t, 10*time.Second, func() bool {
+		due, err := store.ListDueDeliveries(context.Background(), 10)
+		rows = due
+		return err == nil && len(due) == 1
+	}, "unit never reached terminal state")
+	var env dispatchEnvelope
+	if err := json.Unmarshal([]byte(rows[0].TaskJSON), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Model != "pinned-parent-model" || env.Provider != "alt" || env.BaseURL != parentAltURL {
+		t.Fatalf("frozen routing = %q %q %q", env.Model, env.Provider, env.BaseURL)
+	}
+}
+
+func TestExplicitDelegationWinsOverParentModel(t *testing.T) {
+	parentChat := &fakeChatter{}
+	explicitChat := &fakeChatter{}
+	clients := &endpointClients{byURL: map[string]*fakeChatter{parentExplicitURL: explicitChat}}
+	cfg := parentModelConfig()
+	cfg.DelegationModel = "explicit-delegate-model"
+	cfg.DelegationProvider = "explicit"
+	cfg.ProviderEndpoints["explicit"] = config.ProviderEndpoint{URL: parentExplicitURL, APIKey: "synthetic-explicit-key"}
+	m, _, cleanup := testManagerWith(t, parentChat, &fakeBroker{}, cfg, clients.newClient)
+	defer cleanup()
+
+	ctx := requestctx.WithParentModel(dispatchContext(testPrincipal(), "discord:dm:23"), "pinned-parent-model", "alt")
+	model, provider, url, client, err := m.resolveTarget(ctx)
+	if err != nil || model != "explicit-delegate-model" || provider != "explicit" || url != parentExplicitURL || client != explicitChat {
+		t.Fatalf("explicit routing = %q %q %q client=%v err=%v", model, provider, url, client, err)
+	}
+}
+
+func TestParentModelUnknownProviderFailsClosed(t *testing.T) {
+	m, _, cleanup := testManagerWith(t, &fakeChatter{}, &fakeBroker{}, parentModelConfig(), nil)
+	defer cleanup()
+
+	ctx := requestctx.WithParentModel(dispatchContext(testPrincipal(), "discord:dm:24"), "pinned-parent-model", "ghost")
+	if _, _, _, _, err := m.resolveTarget(ctx); err == nil || err.Error() != `delegate: provider "ghost" has no usable endpoint` {
+		t.Fatalf("unknown parent provider err = %v", err)
+	}
+}
+
+func TestResolveTargetWithoutParentModelMirrorsGateway(t *testing.T) {
+	parentChat := &fakeChatter{}
+	m, _, cleanup := testManagerWith(t, parentChat, &fakeBroker{}, parentModelConfig(), nil)
+	defer cleanup()
+
+	model, provider, url, client, err := m.resolveTarget(context.Background())
+	if err != nil || model != "fake/default-model" || provider != "fake" || url != parentDefaultURL || client != parentChat {
+		t.Fatalf("default routing = %q %q %q client=%v err=%v", model, provider, url, client, err)
+	}
+}
+
+func TestParentModelKeylessProviderResolves(t *testing.T) {
+	keylessChat := &fakeChatter{}
+	clients := &endpointClients{byURL: map[string]*fakeChatter{parentKeylessURL: keylessChat}}
+	m, _, cleanup := testManagerWith(t, &fakeChatter{}, &fakeBroker{}, parentModelConfig(), clients.newClient)
+	defer cleanup()
+
+	ctx := requestctx.WithParentModel(context.Background(), "pinned-keyless-model", "keyless")
+	for attempt := 0; attempt < 2; attempt++ {
+		model, provider, url, client, err := m.resolveTarget(ctx)
+		if err != nil || model != "pinned-keyless-model" || provider != "keyless" || url != parentKeylessURL || client != keylessChat {
+			t.Fatalf("keyless routing (%d) = %q %q %q client=%v err=%v", attempt, model, provider, url, client, err)
+		}
+	}
+	if constructed := clients.constructed(); len(constructed) != 1 || constructed[0] != parentKeylessURL {
+		t.Fatalf("keyless client constructions = %v", constructed)
+	}
+}
+
+func TestParentModelConcurrentDispatches(t *testing.T) {
+	parentChat := &fakeChatter{}
+	altChat := &fakeChatter{}
+	keylessChat := &fakeChatter{}
+	clients := &endpointClients{byURL: map[string]*fakeChatter{
+		parentAltURL:     altChat,
+		parentKeylessURL: keylessChat,
+	}}
+	m, _, cleanup := testManagerWith(t, parentChat, &fakeBroker{}, parentModelConfig(), clients.newClient)
+	defer cleanup()
+
+	contexts := []context.Context{
+		requestctx.WithParentModel(dispatchContext(testPrincipal(), "discord:dm:31"), "pinned-alt-model", "alt"),
+		requestctx.WithParentModel(dispatchContext(testPrincipal(), "discord:dm:32"), "pinned-keyless-model", "keyless"),
+	}
+	errs := make([]error, 8)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = m.Execute(contexts[i%len(contexts)], map[string]interface{}{"goal": "Concurrent synthetic parent task"})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("dispatch %d: %v", i, err)
+		}
+	}
+	if requests := parentChat.captured(); len(requests) != 0 {
+		t.Fatalf("default transport received %d child call(s), want 0", len(requests))
+	}
+	if got := len(altChat.captured()) + len(keylessChat.captured()); got != len(errs) {
+		t.Fatalf("parent-transport child calls = %d, want %d", got, len(errs))
 	}
 }

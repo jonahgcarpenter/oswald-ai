@@ -29,8 +29,13 @@ unchanged, so they share the parent's workspace, sandbox home (`~` = the profile
 and file groups; their catalog is the parent's toolsets minus `delegate` (unless
 nesting is enabled and allowed), `clarify`, `memory`, `session_search`,
 `cronjob_manage`, and `image_generate`, with the MCP allowlist inherited and
-narrowed. Model routing mirrors the parent unless `delegation.model`,
-`delegation.provider`, or `delegation.base_url` override it.
+narrowed. Model routing mirrors the calling turn's resolved session model
+(pin > per-profile channel override > global channel override > profile
+default) unless `delegation.model`, `delegation.provider`, or
+`delegation.base_url` explicitly override it: the explicit path keeps its
+credential rules (a named provider must exist and carry a key), while the
+parent-mirror path resolves the same provider endpoints the router used
+(keyless endpoints included, cached like the router does).
 
 `finishUnit` is the single-winner commit: the worker and the stall monitor
 race for the live-set transition, and the loser drops its result. `/new` and

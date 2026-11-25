@@ -57,7 +57,8 @@ The running server never restarts itself: `startup/reload.go::Reloader` fingerpr
 `config.yaml`/`.env` (plus plugin markers) on a 2s poll (500ms settle), then on change validates the candidate —
 invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps the
 `runtime` log level, gateway admission policy, and live model routing (defaults, selected
-transports of profiles present before and after, and channel routing overrides)
+transports of profiles present before and after, and channel routing overrides including each
+profile's own overlays)
 (`config.reload.applied`). The attached model applier rotates router views, re-seats summarizers,
 and swaps delegate live configs after the Directory swap; an overrides-only diff rotates the views
 without re-seating (the default routing did not move), and a failed apply WARNs

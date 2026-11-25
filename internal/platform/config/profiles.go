@@ -361,6 +361,54 @@ func validatePlatformKeys(name string, node *yaml.Node) error {
 	return nil
 }
 
+// profilePlatformKeys is the complete allow-list for a named profile's
+// platforms subtree: per-channel model routes for the two transport-backed
+// gateways and nothing else. Listener, credential, admission, and enabled
+// configuration stays in the global block, so profile platforms entries are
+// narrowed by rejection rather than silently dropped.
+var profilePlatformKeys = map[string]bool{"discord": true, "bluebubbles": true}
+
+// validateProfilePlatforms enforces the profile allow-list and checks the
+// channel-override key shape without resolving values. It runs while the
+// profile document is merged, independently of whether the global platform
+// block is enabled, so a typo never hides behind a disabled listener.
+func validateProfilePlatforms(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return configErr("config_profile_override_invalid", "platforms")
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		platform := node.Content[i].Value
+		path := "platforms." + platform
+		if !profilePlatformKeys[platform] {
+			// Includes api: channel routes and any other platform content are
+			// refused at the profile layer, so the error names the profile
+			// override contract rather than the global platform schema.
+			return configErr("config_profile_override_invalid", path)
+		}
+		entry := node.Content[i+1]
+		if entry.Kind != yaml.MappingNode {
+			return configErr("config_profile_override_invalid", path)
+		}
+		hasOverrides := false
+		for j := 0; j+1 < len(entry.Content); j += 2 {
+			key := entry.Content[j].Value
+			if key != "channel_overrides" {
+				return configErr("config_profile_override_invalid", path+"."+key)
+			}
+			hasOverrides = true
+			if err := validateChannelOverrideKeys(path+".channel_overrides", entry.Content[j+1]); err != nil {
+				return err
+			}
+		}
+		if !hasOverrides {
+			// An empty platform entry is not one of the two supported
+			// channel-override maps; keep the profile surface exact.
+			return configErr("config_profile_override_invalid", path)
+		}
+	}
+	return nil
+}
+
 // pruneDisabledPlatforms drops disabled platform subtrees before strict
 // interpolation. Operators do not need credentials for platforms turned off,
 // while unknown keys and unsupported platform names are still rejected.
@@ -957,6 +1005,11 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 		profileProviders := map[string]providerYAML{}
 		profileSelected := ""
 		if err := applyDocument(&profile, profileDoc, profileProviders, &profileSelected); err != nil {
+			return nil, err
+		}
+		// The profile starts from the global resolved map (struct copy) and
+		// overlays its own routes, validated against its merged providers.
+		if err := applyProfileChannelOverrides(&profile, profileDoc.Platforms, profileProviders); err != nil {
 			return nil, err
 		}
 		cfg.Profiles[name] = &profile

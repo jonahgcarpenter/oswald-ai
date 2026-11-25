@@ -85,8 +85,9 @@ type Config struct {
 	ProviderEndpoints map[string]ProviderEndpoint
 	// ChannelOverrides routes platform channels to provider/model pairs,
 	// keyed by internal gateway name ("discord"/"imessage") then channel or
-	// chat id. Global-only: named profiles inherit the resolved map and can
-	// never set or override it.
+	// chat id. The root holds the global resolved map; a named profile starts
+	// from that map and overlays its own routes, validated against the
+	// profile's merged providers.
 	ChannelOverrides map[string]map[string]ChannelOverride
 	// TerminalEnvPassthrough lists variable names forwarded into sandboxed
 	// children (terminal, execute_code, background processes) for this

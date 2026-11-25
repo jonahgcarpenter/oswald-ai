@@ -42,3 +42,26 @@ func TestInputImagesUseDefensiveCopies(t *testing.T) {
 		t.Fatal("returned catalog shares context storage")
 	}
 }
+func TestParentModelRoundTrip(t *testing.T) {
+	ctx := WithParentModel(context.Background(), "  pinned-model  ", " alt-provider ")
+	got, ok := ParentModelFromContext(ctx)
+	if !ok || got.Model != "pinned-model" || got.Provider != "alt-provider" {
+		t.Fatalf("parent model = %+v ok=%v", got, ok)
+	}
+}
+func TestParentModelAbsentWhenEmpty(t *testing.T) {
+	if _, ok := ParentModelFromContext(context.Background()); ok {
+		t.Fatal("unsignaled context reported a parent model")
+	}
+	for _, tc := range []struct{ model, provider string }{
+		{"", ""},
+		{"   ", "   "},
+		{"pinned-model", "  "},
+		{"  ", "alt-provider"},
+	} {
+		ctx := WithParentModel(context.Background(), tc.model, tc.provider)
+		if _, ok := ParentModelFromContext(ctx); ok {
+			t.Fatalf("empty parent model %q/%q was attached", tc.model, tc.provider)
+		}
+	}
+}

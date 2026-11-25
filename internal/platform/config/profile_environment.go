@@ -360,6 +360,12 @@ func profileDocument(global, override *yaml.Node) (*yaml.Node, error) {
 	for i := 0; i < len(override.Content); i += 2 {
 		switch override.Content[i].Value {
 		case "providers", "model", "tools", "mcp_servers", "api", "plugins", "delegation":
+		case "platforms":
+			// A profile may add per-channel routes only; the global platform
+			// block owns listeners, credentials, admission, and enable flags.
+			if err := validateProfilePlatforms(override.Content[i+1]); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, configErr("config_profile_override_invalid", override.Content[i].Value)
 		}
