@@ -105,6 +105,115 @@ func TestModelApplierRotatesChangedProfileOnly(t *testing.T) {
 	}
 }
 
+func channelOverrideConfig(name, model string, overrides map[string]map[string]config.ChannelOverride) *config.Config {
+	cfg := routingConfig(name, model)
+	cfg.ProviderEndpoints = map[string]config.ProviderEndpoint{
+		"fake":  {URL: "http://localhost:9999/v1", APIKey: "synthetic-key"},
+		"other": {URL: "http://localhost:9998/v1", APIKey: "synthetic-other-key"},
+	}
+	cfg.ChannelOverrides = overrides
+	return cfg
+}
+
+func TestModelApplierRotatesViewsForOverrideOnlyChange(t *testing.T) {
+	oldOverrides := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000111": {Provider: "other", Model: "other/model"}},
+	}
+	nextOverrides := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000111": {Provider: "other", Model: "other/model-next"}},
+	}
+	old := channelOverrideConfig("default", "fake/default", oldOverrides)
+	old.Profiles = map[string]*config.Config{"alice": channelOverrideConfig("alice", "fake/alice", oldOverrides)}
+	next := channelOverrideConfig("default", "fake/default", nextOverrides)
+	next.Profiles = map[string]*config.Config{"alice": channelOverrideConfig("alice", "fake/alice", nextOverrides)}
+
+	defaultRouter := newTestModelRouter(modelViewFor(old))
+	aliceRouter := newTestModelRouter(modelViewFor(old.Profiles["alice"]))
+	defaultRotator := &fakeSummarizerRotator{}
+	aliceRotator := &fakeSummarizerRotator{}
+	defaultDelegate := &fakeDelegateSwapper{}
+	aliceDelegate := &fakeDelegateSwapper{}
+	handles := map[string]modelRoutingHandles{
+		"default": {router: defaultRouter, summarizer: defaultRotator, delegate: defaultDelegate},
+		"alice":   {router: aliceRouter, summarizer: aliceRotator, delegate: aliceDelegate},
+	}
+	log := config.NewLogger(config.LevelDebug)
+	log.SetOutput(&strings.Builder{})
+
+	buildModelApplier(handles, log)(old, next)
+
+	wantDefaults := map[string]string{"default": "fake/default", "alice": "fake/alice"}
+	for name, router := range map[string]*agent.ModelRouter{"default": defaultRouter, "alice": aliceRouter} {
+		if target, _ := router.Resolve(context.Background(), "", "", "discord", "555000111"); target.Provider != "other" || target.Model != "other/model-next" {
+			t.Fatalf("%s override target = %+v, want the next override", name, target)
+		}
+		if target, _ := router.Resolve(context.Background(), "", "", "discord", "555000999"); target.Model != wantDefaults[name] {
+			t.Fatalf("%s default target = %+v after an override-only rotation", name, target)
+		}
+	}
+	if defaultRotator.count() != 0 || aliceRotator.count() != 0 {
+		t.Fatal("override-only diff re-seated a summarizer")
+	}
+	if defaultDelegate.last() != nil || aliceDelegate.last() != nil {
+		t.Fatal("override-only diff swapped delegate config")
+	}
+}
+
+func TestModelApplierRotatesFullyWhenRoutingAndOverridesChange(t *testing.T) {
+	oldOverrides := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000111": {Provider: "other", Model: "other/model"}},
+	}
+	nextOverrides := map[string]map[string]config.ChannelOverride{
+		"discord": {"555000111": {Provider: "other", Model: "other/model-next"}},
+	}
+	old := channelOverrideConfig("default", "fake/default", oldOverrides)
+	old.Profiles = map[string]*config.Config{"alice": channelOverrideConfig("alice", "fake/alice", oldOverrides)}
+	next := channelOverrideConfig("default", "fake/default-next", nextOverrides)
+	next.Profiles = map[string]*config.Config{"alice": channelOverrideConfig("alice", "fake/alice-next", nextOverrides)}
+
+	aliceRouter := newTestModelRouter(modelViewFor(old.Profiles["alice"]))
+	aliceRotator := &fakeSummarizerRotator{}
+	aliceDelegate := &fakeDelegateSwapper{}
+	handles := map[string]modelRoutingHandles{
+		"alice": {router: aliceRouter, summarizer: aliceRotator, delegate: aliceDelegate},
+	}
+	log := config.NewLogger(config.LevelDebug)
+	log.SetOutput(&strings.Builder{})
+
+	buildModelApplier(handles, log)(old, next)
+
+	if aliceRotator.count() != 1 {
+		t.Fatalf("routing+override rotations = %d, want 1", aliceRotator.count())
+	}
+	if got := aliceDelegate.last(); got != next.Profiles["alice"] {
+		t.Fatalf("delegate config = %+v, want the next profile", got)
+	}
+	if target, _ := aliceRouter.Resolve(context.Background(), "", "", "", ""); target.Model != "fake/alice-next" {
+		t.Fatalf("default target = %+v, want the next default", target)
+	}
+	if target, _ := aliceRouter.Resolve(context.Background(), "", "", "discord", "555000111"); target.Model != "other/model-next" {
+		t.Fatalf("override target = %+v, want the next override", target)
+	}
+}
+
+func TestModelViewForCopiesChannelOverrides(t *testing.T) {
+	cfg := routingConfig("default", "fake/default")
+	cfg.ChannelOverrides = map[string]map[string]config.ChannelOverride{
+		"discord": {"555000111": {Provider: "other", Model: "other/model"}},
+	}
+	view := modelViewFor(cfg)
+	if got := view.Overrides["discord"]["555000111"]; got.Provider != "other" || got.Model != "other/model" {
+		t.Fatalf("view override = %+v", got)
+	}
+	view.Overrides["discord"]["555000111"] = agent.ChannelOverride{Provider: "mutated", Model: "mutated"}
+	if cfg.ChannelOverrides["discord"]["555000111"].Provider != "other" {
+		t.Fatal("view aliases the config override map")
+	}
+	if empty := modelViewFor(nil); empty.Overrides != nil {
+		t.Fatal("nil profile produced overrides")
+	}
+}
+
 func TestModelApplierWarnsAndContinuesAfterRotationFailure(t *testing.T) {
 	old := routingConfig("default", "fake/default")
 	old.Profiles = map[string]*config.Config{

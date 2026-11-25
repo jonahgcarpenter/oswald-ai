@@ -122,9 +122,14 @@ type platformExtraYAML struct {
 	APIHost             string   `yaml:"api_host"`
 	APIPort             int      `yaml:"api_port"`
 }
+type modelOverrideYAML struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+}
 type platformYAML struct {
-	Enabled bool              `yaml:"enabled"`
-	Extra   platformExtraYAML `yaml:"extra"`
+	Enabled          bool                         `yaml:"enabled"`
+	Extra            platformExtraYAML            `yaml:"extra"`
+	ChannelOverrides map[string]modelOverrideYAML `yaml:"channel_overrides"`
 }
 type apiYAML struct {
 	Key *string `yaml:"key"`
@@ -272,7 +277,7 @@ func privateDirectory(path, source, profile string) error {
 // knownPlatforms bounds configured platform names before any validation.
 var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true}
 
-var platformTopKeys = map[string]bool{"enabled": true, "extra": true}
+var platformTopKeys = map[string]bool{"enabled": true, "extra": true, "channel_overrides": true}
 
 var platformExtraKeys = map[string]bool{
 	"token": true, "allowed_users": true, "banned_users": true,
@@ -336,16 +341,20 @@ func validatePlatformKeys(name string, node *yaml.Node) error {
 		if !platformTopKeys[key] {
 			return configErr("config_key_unknown", path+"."+key)
 		}
-		if key != "extra" {
-			continue
-		}
-		extra := node.Content[i+1]
-		if extra.Kind != yaml.MappingNode {
-			return configErr("config_key_invalid", path+".extra")
-		}
-		for j := 0; j+1 < len(extra.Content); j += 2 {
-			if field := extra.Content[j].Value; !platformExtraKeys[field] {
-				return configErr("config_key_unknown", path+".extra."+field)
+		switch key {
+		case "extra":
+			extra := node.Content[i+1]
+			if extra.Kind != yaml.MappingNode {
+				return configErr("config_key_invalid", path+".extra")
+			}
+			for j := 0; j+1 < len(extra.Content); j += 2 {
+				if field := extra.Content[j].Value; !platformExtraKeys[field] {
+					return configErr("config_key_unknown", path+".extra."+field)
+				}
+			}
+		case "channel_overrides":
+			if err := validateChannelOverrideKeys(path+".channel_overrides", node.Content[i+1]); err != nil {
+				return err
 			}
 		}
 	}
@@ -847,6 +856,9 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 			if x.RequireMention != nil {
 				cfg.DiscordGroupRequireMention = *x.RequireMention
 			}
+			if err := applyChannelOverrides(cfg, "discord", "discord", settings.ChannelOverrides, providers); err != nil {
+				return nil, err
+			}
 		case "bluebubbles":
 			cfg.BlueBubblesURL = x.ServerURL
 			endpoint, parseErr := url.Parse(x.ServerURL)
@@ -883,7 +895,13 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
+			if err := applyChannelOverrides(cfg, "bluebubbles", "imessage", settings.ChannelOverrides, providers); err != nil {
+				return nil, err
+			}
 		case "api":
+			if len(settings.ChannelOverrides) > 0 {
+				return nil, configErr("config_value_invalid", "platforms.api.channel_overrides")
+			}
 			if x.APIHost != "" && x.APIHost != "127.0.0.1" && x.APIHost != "0.0.0.0" {
 				return nil, configErr("config_platform_host_unsupported", base+"api_host")
 			}

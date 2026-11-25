@@ -17,16 +17,18 @@ import (
 // Hot-apply covers the shared log level, gateway admission policy (allow/ban
 // lists, group mention rules), and live model routing: the default model,
 // provider, endpoint, and key plus the selected routing overrides of profiles
-// present both before and after. The log level and admission policy swap on
-// the next watcher tick; model routing is rotated into the running router
-// views, summarizers, and delegate configs by the attached applier. Model
-// windows (context lengths) and profile additions/removals stay restart-class.
-// Everything else (listeners, credentials, routes, mention patterns, tool
-// backends, MCP sessions, plugin installs) is load-bearing and needs
-// `oswald restart`: mutating CLI commands print "run `oswald restart` to
-// apply" and the watcher only logs an advisory `config.reload.restart_required`.
-// Restart is explicit so the model batches edits and restarts once, never
-// killing its own turn with an automatic rebuild.
+// present both before and after, and the global platform channel-override map.
+// The log level and admission policy swap on the next watcher tick; model
+// routing is rotated into the running router views, summarizers, and delegate
+// configs by the attached applier, while a channel-override-only diff swaps
+// router views without re-seating summarizers. Model windows (context lengths)
+// and profile additions/removals stay restart-class. Everything else
+// (listeners, credentials, routes, mention patterns, tool backends, MCP
+// sessions, plugin installs) is load-bearing and needs `oswald restart`:
+// mutating CLI commands print "run `oswald restart` to apply" and the watcher
+// only logs an advisory `config.reload.restart_required`. Restart is explicit
+// so the model batches edits and restarts once, never killing its own turn
+// with an automatic rebuild.
 const (
 	reloadPollInterval = 2 * time.Second
 	reloadSettleDelay  = 500 * time.Millisecond
@@ -38,7 +40,8 @@ const (
 // `config.reload.restart_required` (the operator runs `oswald restart` when
 // ready). Hot model-routing diffs also invoke the attached model applier,
 // which rotates router views, re-seats summarizers, and swaps delegate live
-// configs. The Directory is the configuration truth after a successful swap;
+// configs (a channel-override-only diff swaps views only). The Directory is
+// the configuration truth after a successful swap;
 // an applier failure only WARNs `config.reload.apply_failed` and keeps the
 // previous runtime view, so runtime views can lag the Directory until the next
 // tick or a restart. The reloader never rewrites operator files and never
@@ -80,8 +83,9 @@ func NewReloader(root string, last *config.Config, directory *profiles.Directory
 // SetModelApplier attaches the live model-routing rotate hook. It is safe to
 // call after Start, including while the poll goroutine runs; a nil apply
 // disables the hook. The applier runs only when a hot diff includes the
-// `model` or `providers` class, and owns its own failure logging so a runtime
-// view that could not rotate never fails the configuration swap.
+// `model`, `providers`, or `channel_overrides` class, and owns its own failure
+// logging so a runtime view that could not rotate never fails the
+// configuration swap.
 func (r *Reloader) SetModelApplier(apply func(old, next *config.Config)) {
 	if r == nil {
 		return
@@ -175,7 +179,7 @@ func (r *Reloader) Check() {
 		return
 	}
 	r.rootLog.SetLevel(candidate.LogLevel)
-	if apply := r.modelApplier(); apply != nil && (classListed(classes, "model") || classListed(classes, "providers")) {
+	if apply := r.modelApplier(); apply != nil && (classListed(classes, "model") || classListed(classes, "providers") || classListed(classes, "channel_overrides")) {
 		apply(r.last, candidate)
 	}
 	r.last = candidate

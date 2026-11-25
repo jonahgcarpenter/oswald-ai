@@ -6,11 +6,12 @@ import "reflect"
 // change applies live plus the differing classes from a fixed vocabulary for
 // logging and CLI effect reporting. Hot classes are runtime (log level),
 // admission (allow/ban/mention rules), providers (the default profile's
-// selected transport), and model (the default model plus named-profile routing
-// overrides: model, provider, URL, or key). Every other class forces a
-// restart: model_window (context windows), profiles (any other named-profile
-// change, including profiles added to or removed from the map), and api,
-// gateway, platforms, tools, mcp_servers, plugins, and delegation.
+// selected transport), model (the default model plus named-profile routing
+// overrides: model, provider, URL, or key), and channel_overrides (the global
+// platform channel routing map). Every other class forces a restart:
+// model_window (context windows), profiles (any other named-profile change,
+// including profiles added to or removed from the map), and api, gateway,
+// platforms, tools, mcp_servers, plugins, and delegation.
 func ClassifyReload(old, next *Config) (bool, []string) {
 	if old == nil || next == nil {
 		return false, []string{"unavailable"}
@@ -39,6 +40,7 @@ func ClassifyReload(old, next *Config) (bool, []string) {
 		old.BlueBubblesListenPort == next.BlueBubblesListenPort && old.BlueBubblesWebhookPath == next.BlueBubblesWebhookPath &&
 		old.BlueBubblesWebhookCallbackHost == next.BlueBubblesWebhookCallbackHost &&
 		reflect.DeepEqual(old.BlueBubblesMentionPatterns, next.BlueBubblesMentionPatterns))
+	add("channel_overrides", reflect.DeepEqual(old.ChannelOverrides, next.ChannelOverrides))
 	add("tools", old.BraveAPIKey == next.BraveAPIKey && old.SearxngURL == next.SearxngURL &&
 		old.ComfyUIURL == next.ComfyUIURL && old.ComfyUIGenerationTimeout == next.ComfyUIGenerationTimeout &&
 		old.BrowserLaunchCommand == next.BrowserLaunchCommand && old.BrowserEndpointURL == next.BrowserEndpointURL &&
@@ -60,7 +62,7 @@ func ClassifyReload(old, next *Config) (bool, []string) {
 	}
 	for _, class := range classes {
 		switch class {
-		case "runtime", "admission", "providers", "model":
+		case "runtime", "admission", "providers", "model", "channel_overrides":
 		default:
 			return false, classes
 		}
@@ -102,8 +104,10 @@ func profileRoutingDiff(old, next map[string]*Config) (routingChanged, windowCha
 }
 
 // withoutModelRouting copies cfg with the hot-applied routing and window
-// fields blanked. The struct copy aliases shared maps and slices, which is
-// fine for the equality check in profileRoutingDiff.
+// fields blanked, plus the global channel-override map (classified separately
+// as channel_overrides; every profile aliases the same global map). The struct
+// copy aliases shared maps and slices, which is fine for the equality check in
+// profileRoutingDiff.
 func withoutModelRouting(cfg *Config) *Config {
 	snapshot := *cfg
 	snapshot.LLMGatewayModel = ""
@@ -111,13 +115,14 @@ func withoutModelRouting(cfg *Config) *Config {
 	snapshot.LLMGatewayURL = ""
 	snapshot.LLMGatewayAPIKey = ""
 	snapshot.ModelContextWindow = 0
+	snapshot.ChannelOverrides = nil
 	return &snapshot
 }
 
 // ReloadEffect reports whether a validated change applies live or needs a
 // restart. It is the CLI-facing wrapper over ClassifyReload: "live" when every
-// differing class is hot, "restart" for anything else (context windows and
-// named-profile changes included).
+// differing class is hot (routing overrides included), "restart" for anything
+// else (context windows and named-profile changes included).
 func ReloadEffect(old, next *Config) string {
 	if hot, _ := ClassifyReload(old, next); hot {
 		return "live"

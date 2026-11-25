@@ -83,6 +83,11 @@ type Config struct {
 	// (normalized URL + interpolated key, memory only) so delegate dispatch
 	// can build a client for a non-default provider.
 	ProviderEndpoints map[string]ProviderEndpoint
+	// ChannelOverrides routes platform channels to provider/model pairs,
+	// keyed by internal gateway name ("discord"/"imessage") then channel or
+	// chat id. Global-only: named profiles inherit the resolved map and can
+	// never set or override it.
+	ChannelOverrides map[string]map[string]ChannelOverride
 	// TerminalEnvPassthrough lists variable names forwarded into sandboxed
 	// children (terminal, execute_code, background processes) for this
 	// profile. Values resolve against the profile dotenv scope; provider

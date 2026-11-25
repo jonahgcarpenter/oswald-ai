@@ -214,6 +214,45 @@ func TestReloaderAppliesHotModelChangeWithoutApplier(t *testing.T) {
 	}
 }
 
+func TestReloaderAppliesHotChannelOverrideChange(t *testing.T) {
+	text := strings.Replace(reloadFixture, "      banned_users: []\n", "      banned_users: []\n    channel_overrides:\n      \"555000111\":\n        provider: custom:fake\n        model: fake/channel\n", 1)
+	text = strings.Replace(text, "log_level: info", "log_level: debug", 1)
+	root, directory, log, output := reloadSetup(t, text)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader.settle = 10 * time.Millisecond
+	calls := 0
+	loader.SetModelApplier(func(_, _ *config.Config) { calls++ })
+	rewrite(t, root, "model: fake/channel", "model: fake/channel-next")
+	loader.Check()
+	if calls != 1 {
+		t.Fatalf("model applier calls = %d, want 1 for an override-only diff", calls)
+	}
+	profile, ok := directory.Config("default")
+	if !ok || profile.ChannelOverrides["discord"]["555000111"].Model != "fake/channel-next" {
+		t.Fatal("hot channel override change did not take effect")
+	}
+	if !strings.Contains(output.String(), `"event":"config.reload.applied"`) {
+		t.Fatalf("applied event missing: %s", output.String())
+	}
+}
+
+func TestReloaderAppliesHotChannelOverrideChangeWithoutApplier(t *testing.T) {
+	text := strings.Replace(reloadFixture, "      banned_users: []\n", "      banned_users: []\n    channel_overrides:\n      \"555000111\":\n        provider: custom:fake\n        model: fake/channel\n", 1)
+	text = strings.Replace(text, "log_level: info", "log_level: debug", 1)
+	root, directory, log, output := reloadSetup(t, text)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader.settle = 10 * time.Millisecond
+	rewrite(t, root, "model: fake/channel", "model: fake/channel-next")
+	loader.Check()
+	profile, ok := directory.Config("default")
+	if !ok || profile.ChannelOverrides["discord"]["555000111"].Model != "fake/channel-next" {
+		t.Fatal("hot channel override change did not swap without an applier")
+	}
+	if !strings.Contains(output.String(), `"event":"config.reload.applied"`) {
+		t.Fatalf("applied event missing: %s", output.String())
+	}
+}
+
 func TestReloaderSkipsApplierForWindowOnlyChange(t *testing.T) {
 	root, directory, log, output := reloadSetup(t, reloadFixture)
 	loader := NewReloader(root, mustValidate(t, root), directory, log)

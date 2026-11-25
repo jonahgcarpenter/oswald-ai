@@ -13,7 +13,10 @@ variable (values and error text are never logged). Disabled platforms prune befo
 so their credentials are never required, but unknown keys inside a disabled block are still
 rejected. Process env wins over dotenv and loading never mutates the process environment; named
 profiles inherit the default `.env` and override per key, and can only add providers, model, tools,
-MCP servers, and `api` — never shared listeners or routes.
+MCP servers, and `api` — never shared listeners or routes. `platforms.discord` and
+`platforms.bluebubbles` also accept `channel_overrides` mapping a channel or chat id to
+`{provider, model}`; it is global-only (never profile-overridable), validated against the global
+providers map, and consulted between a conversation's pin and the profile default.
 
 Files are bounded (256 KiB, no symlinks/aliases/duplicate/unknown keys, depth ≤32) and dotenv
 files must be private regular files. Profile names are bounded lowercase ASCII with `default`
@@ -29,10 +32,10 @@ section has a scoped command group (`providers`, `model`, `delegation`, `api`, `
 `tools`, `runtime`, `mcp_servers` via `oswald mcp`) that whitelists its own leaves, so no edit
 can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
 so each command reports `applied live` (runtime log level, admission allow/ban/mention rules,
-model defaults, and the selected transports/routing overrides of profiles present in both
-configs) vs `restarting service to apply` (everything else — context windows, profile
-additions/removals, and remaining sections — picked up by the server's supervised rebuild
-within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
+model defaults, channel routing overrides, and the selected transports/routing overrides of
+profiles present in both configs) vs `restarting service to apply` (everything else — context
+windows, profile additions/removals, and remaining sections — picked up by the server's supervised
+rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
 keeps reads on the calling scope with contradictions failing closed,
 `ResolveProfile` keeps mutations on the calling scope with
 contradictions failing closed, and `RequireDefaultScope` gates global mutations and profile

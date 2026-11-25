@@ -1,6 +1,8 @@
 package startup
 
 import (
+	"reflect"
+
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -35,12 +37,20 @@ type delegateConfigSwapper interface {
 // profile and from the Profiles map for named profiles. A profile absent from
 // either side is skipped (classification already makes add/remove non-hot).
 // The hook never writes operator files: it only mutates in-memory runtime
-// views. The new summarizer is built before any view is touched, so a failure
-// WARNs `config.reload.apply_failed`, leaves the profile's router, summarizer,
-// and delegation config on the previous revision, and continues with the rest.
+// views. Two paths apply:
+//
+//   - A routing-field diff (model, provider, endpoint, or key) performs the
+//     full rotation: the new summarizer is built BEFORE any view is touched,
+//     so a failure WARNs `config.reload.apply_failed`, leaves the profile's
+//     router, summarizer, and delegation config on the previous revision, and
+//     continues with the rest. On success the view, summarizer, and delegate
+//     config all move together.
+//   - A channel-override-only diff swaps the router view ONLY: the default
+//     routing did not move, so the summarizer and delegate config stay put.
 func buildModelApplier(handles map[string]modelRoutingHandles, rootLog *config.Logger) func(old, next *config.Config) {
 	log := rootLog.Server("app")
 	return func(old, next *config.Config) {
+		overridesChanged := old != nil && next != nil && !reflect.DeepEqual(old.ChannelOverrides, next.ChannelOverrides)
 		for name, handle := range handles {
 			oldCfg := modelRoutingConfig(old, name)
 			nextCfg := modelRoutingConfig(next, name)
@@ -48,6 +58,9 @@ func buildModelApplier(handles map[string]modelRoutingHandles, rootLog *config.L
 				continue
 			}
 			if !modelRoutingChanged(oldCfg, nextCfg) {
+				if overridesChanged {
+					handle.router.SwapView(modelViewFor(nextCfg))
+				}
 				continue
 			}
 			client := llm.NewGatewayClient(nextCfg.LLMGatewayURL, nextCfg.LLMGatewayAPIKey, nextCfg.LLMGatewayVirtualKey, rootLog)

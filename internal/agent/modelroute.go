@@ -49,9 +49,9 @@ type DefaultTarget struct {
 	VirtualKey string
 }
 
-// ChannelOverride routes one platform channel to a provider/model pair.
-// Populated from platforms.<name>.channel_overrides in a later phase;
-// nil/empty maps in a view mean no overrides.
+// ChannelOverride routes one platform channel to a provider/model pair,
+// populated from platforms.<name>.channel_overrides in each router view.
+// Nil/empty maps in a view mean no overrides.
 type ChannelOverride struct {
 	Provider string
 	Model    string

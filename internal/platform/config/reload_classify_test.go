@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -264,6 +265,109 @@ func TestClassifyReloadModelRouting(t *testing.T) {
 				t.Fatalf("effect=%q want %q", got, wantEffect)
 			}
 		})
+	}
+}
+
+const classifyOverrideBase = `providers:
+  fake:
+    api: http://127.0.0.1:9999/v1
+    key: test-key
+  other:
+    api: http://127.0.0.1:9998/v1
+    key: other-key
+model:
+  provider: custom:fake
+  default: fake/model
+  context_length: 32768
+gateway:
+  multiplex_profiles: true
+  profile_routes:
+    - platform: discord
+      user_id: "555555555555555555"
+      profile: alice
+platforms:
+  discord:
+    enabled: true
+    extra:
+      token: test-token
+    channel_overrides:
+      "555000111":
+        provider: custom:other
+        model: other/model
+runtime:
+  log_level: info
+`
+
+const classifyOverrideNoProfile = `providers:
+  fake:
+    api: http://127.0.0.1:9999/v1
+    key: test-key
+  other:
+    api: http://127.0.0.1:9998/v1
+    key: other-key
+model:
+  provider: custom:fake
+  default: fake/model
+  context_length: 32768
+platforms:
+  discord:
+    enabled: true
+    extra:
+      token: test-token
+    channel_overrides:
+      "555000111":
+        provider: custom:other
+        model: other/model
+runtime:
+  log_level: info
+`
+
+func TestClassifyReloadChannelOverrides(t *testing.T) {
+	const profile = "model:\n  default: fake/alice\n"
+	for _, tc := range []struct {
+		name        string
+		defaultText string
+		hot         bool
+		classes     []string
+	}{
+		{"unchanged", classifyOverrideBase, true, nil},
+		{
+			"override only",
+			strings.Replace(classifyOverrideBase, "model: other/model", "model: other/next", 1),
+			true,
+			[]string{"channel_overrides"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, next := classifyRoutingPair(t, classifyOverrideBase, profile, tc.defaultText, profile)
+			if alice := base.Profiles["alice"]; alice == nil || !reflect.DeepEqual(alice.ChannelOverrides, base.ChannelOverrides) {
+				t.Fatalf("fixture missing inherited overrides: %+v", alice)
+			}
+			hot, classes := ClassifyReload(base, next)
+			if hot != tc.hot {
+				t.Fatalf("hot=%v want %v (classes=%v)", hot, tc.hot, classes)
+			}
+			if !slices.Equal(classes, tc.classes) {
+				t.Fatalf("classes=%v want %v", classes, tc.classes)
+			}
+		})
+	}
+}
+
+func TestClassifyReloadChannelOverridesWithPlatformRestart(t *testing.T) {
+	base, err := Validate(classifyRoot(t, classifyOverrideNoProfile))
+	if err != nil {
+		t.Fatalf("fixture invalid: %v", err)
+	}
+	nextText := strings.Replace(classifyOverrideNoProfile, "token: test-token", "token: other-token", 1)
+	nextText = strings.Replace(nextText, "model: other/model", "model: other/next", 1)
+	next, err := Validate(classifyRoot(t, nextText))
+	if err != nil {
+		t.Fatalf("variant invalid: %v", err)
+	}
+	hot, classes := ClassifyReload(base, next)
+	if hot || !slices.Equal(classes, []string{"platforms", "channel_overrides"}) {
+		t.Fatalf("override+token = hot=%v classes=%v, want restart [platforms channel_overrides]", hot, classes)
 	}
 }
 
