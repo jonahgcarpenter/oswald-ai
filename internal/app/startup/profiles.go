@@ -218,7 +218,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	log := rootLog.Server("app")
 	processor := &profileProcessor{agents: map[string]*agent.Agent{}}
 	stores := map[string]*memory.ProfileStore{}
-	summarizers := map[string]*compaction.Summarizer{}
+	summarizers := map[string]*summarizerHolder{}
 	var pruneWorkers []*prune.Worker
 	var cronTickers []*cron.Ticker
 	cronStores := make(map[string]*cron.Store)
@@ -230,6 +230,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	var gateways []gateway.Service
 	var mcpManagers []*mcp.Manager
 	var delegates []*managerdelegate.Manager
+	delegateManagers := make(map[string]*managerdelegate.Manager)
 	defer func() {
 		started := time.Now()
 		for _, service := range gateways {
@@ -278,8 +279,6 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		return &Error{Event: "app.profiles.init_failed", Message: "invalid profile routing", Cause: err}
 	}
 	reloader := NewReloader(cfg.ProfileRoot, cfg, directory, rootLog)
-	reloader.Start(ctx)
-	maintenanceStops = append(maintenanceStops, reloader.Stop)
 	names := []string{"default"}
 	for name := range cfg.Profiles {
 		names = append(names, name)
@@ -328,16 +327,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		publishPluginEnvPassthrough(pluginManager, name, log)
 		client := seams.newClient(profile, rootLog)
-		modelRouter := agent.NewModelRouter(agent.View{
-			Default: agent.DefaultTarget{
-				Model:      profile.LLMGatewayModel,
-				Provider:   profile.LLMGatewayProvider,
-				URL:        profile.LLMGatewayURL,
-				APIKey:     profile.LLMGatewayAPIKey,
-				VirtualKey: profile.LLMGatewayVirtualKey,
-			},
-			Endpoints: profile.ProviderEndpoints,
-		}, client, func(url, apiKey, virtualKey string) llm.Chatter {
+		modelRouter := agent.NewModelRouter(modelViewFor(profile), client, func(url, apiKey, virtualKey string) llm.Chatter {
 			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog)
 		}, func(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error) {
 			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog).ListModels(ctx)
@@ -346,7 +336,8 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		if err != nil {
 			return &Error{Event: "app.session_summarizer.init_failed", Message: "failed to initialize profile summarizer", Cause: err}
 		}
-		summarizers[name] = summarizer
+		holder := newSummarizerHolder(summarizer)
+		summarizers[name] = holder
 		manager, err := mcp.NewProfileManager(name, profile.ProfileRoot, profile.MCPServers, rootLog)
 		if err != nil {
 			return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize profile MCP configuration", Cause: err}
@@ -360,7 +351,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetImageCache(cache)
 		engine.SetMediaCache(mediaCache)
 		engine.SetPluginHooks(pluginManager)
-		engine.SetMarkdownSummarizer(summarizer)
+		engine.SetMarkdownSummarizer(holder)
 		engine.SetWorkspace(profile.ProfileRoot)
 		engine.SetPluginSkills(tools.PluginSkillRoots(profile))
 		engine.SetModelRouter(modelRouter)
@@ -433,6 +424,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			}
 			dmgr.Start(ctx)
 			delegates = append(delegates, dmgr)
+			delegateManagers[name] = dmgr
 			delegateStarter = &newSessionCanceller{Starter: store, profile: name, delegate: dmgr}
 			stopCanceler = &stopWithDelegate{broker: requestBroker, profile: name, delegate: dmgr}
 		}
@@ -442,6 +434,20 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		profileDeps[name] = gatewayruntime.Dependencies{Broker: requestBroker, Commands: commands, Log: rootLog, Compaction: worker}
 	}
+	handles := make(map[string]modelRoutingHandles, len(runtimes))
+	for name, rt := range runtimes {
+		if rt == nil {
+			continue
+		}
+		summarizer := summarizers[name]
+		if summarizer == nil {
+			continue
+		}
+		handles[name] = modelRoutingHandles{router: rt.router, summarizer: summarizer, delegate: delegateManagers[name]}
+	}
+	reloader.SetModelApplier(buildModelApplier(handles, rootLog))
+	reloader.Start(ctx)
+	maintenanceStops = append(maintenanceStops, reloader.Stop)
 	deps := gatewayruntime.Dependencies{Broker: requestBroker, Log: rootLog, ForProfile: func(name string) (gatewayruntime.Dependencies, bool) {
 		value, ok := profileDeps[name]
 		return value, ok

@@ -55,15 +55,19 @@ write the command diffs pre/post effective configs with `config.ClassifyReload` 
 
 The running server never restarts itself: `startup/reload.go::Reloader` fingerprints every profile's
 `config.yaml`/`.env` (plus plugin markers) on a 2s poll (500ms settle), then on change validates the candidate —
-invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps only the
-`runtime` log level and gateway admission policy (`config.reload.applied`); a validated non-hot
-diff only logs an advisory `config.reload.restart_required` (with `reason_code`). The operator
-(or model) batches edits and runs `oswald restart` once when ready: it signals the
-local oswald-server process (nearest `oswald-server` ancestor, else PID 1 when
+invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps the
+`runtime` log level, gateway admission policy, and live model routing (defaults plus selected
+transports of profiles present before and after) (`config.reload.applied`). The attached model
+applier rotates router views, re-seats summarizers, and swaps delegate live configs after the
+Directory swap; a failed apply WARNs `config.reload.apply_failed` and keeps the previous runtime
+view. A validated non-hot diff only logs an advisory `config.reload.restart_required` (with
+`reason_code`). The operator (or model) batches edits and runs `oswald restart` once when ready:
+it signals the local oswald-server process (nearest `oswald-server` ancestor, else PID 1 when
 it is the server) with `SIGTERM` so the supervisor restarts the service in
-place. Non-hot changes are reloaded on entry
-after that restart; hot changes apply live with no restart. The watcher never rewrites operator
-files, and a stable fingerprint never fires twice, so rapid successive writes coalesce.
+place. Non-hot changes (context windows, profile additions/removals, listeners, MCP sessions,
+plugins, and the remaining sections) are reloaded on entry after that restart; hot changes apply
+live with no restart. The watcher never rewrites operator files, and a stable fingerprint never
+fires twice, so rapid successive writes coalesce.
 
 ## Behaviors worth knowing cold
 

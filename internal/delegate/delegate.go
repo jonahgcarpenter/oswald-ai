@@ -103,6 +103,7 @@ type Manager struct {
 	media    *docache.Cache
 	window   int
 	vkey     string
+	cfgMu    sync.RWMutex
 	cfg      *config.Config
 
 	parentClient llm.Chatter

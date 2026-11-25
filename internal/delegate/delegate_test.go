@@ -431,6 +431,98 @@ func TestOutputSchemaValidation(t *testing.T) {
 	}
 }
 
+func TestSwapConfigUpdatesResolveTarget(t *testing.T) {
+	chat := &fakeChatter{}
+	br := &fakeBroker{}
+	m, _, cleanup := testManager(t, chat, br)
+	defer cleanup()
+
+	model, provider, url, client, err := m.resolveTarget()
+	if err != nil || model != "fake/model" || provider != "fake" || url != "http://localhost:9999/v1" || client != chat {
+		t.Fatalf("startup routing = %q %q %q client=%v err=%v", model, provider, url, client, err)
+	}
+
+	next := &config.Config{
+		LLMGatewayModel:    "fake/parent-next",
+		LLMGatewayProvider: "fake",
+		LLMGatewayURL:      "http://localhost:9999/v1",
+		LLMGatewayAPIKey:   "synthetic-key",
+		DelegationModel:    "fake/delegate-next",
+		DelegationProvider: "alt",
+		ProviderEndpoints: map[string]config.ProviderEndpoint{
+			"alt": {URL: "http://localhost:7777/v1", APIKey: "synthetic-alt-key"},
+		},
+	}
+	m.SwapConfig(next)
+
+	model, provider, url, _, err = m.resolveTarget()
+	if err != nil || model != "fake/delegate-next" || provider != "alt" || url != "http://localhost:7777/v1" {
+		t.Fatalf("swapped routing = %q %q %q err=%v", model, provider, url, err)
+	}
+
+	m.SwapConfig(&config.Config{LLMGatewayModel: "fake/parent-next", LLMGatewayProvider: "fake", LLMGatewayURL: "http://localhost:9999/v1", LLMGatewayAPIKey: "synthetic-key"})
+	model, provider, _, _, err = m.resolveTarget()
+	if err != nil || model != "fake/parent-next" || provider != "fake" {
+		t.Fatalf("mirrored routing = %q %q err=%v", model, provider, err)
+	}
+}
+
+func TestSwapConfigConcurrentResolveTarget(t *testing.T) {
+	chat := &fakeChatter{}
+	br := &fakeBroker{}
+	m, _, cleanup := testManager(t, chat, br)
+	defer cleanup()
+
+	configs := []*config.Config{
+		{LLMGatewayModel: "fake/alpha", LLMGatewayProvider: "fake", LLMGatewayURL: "http://localhost:9999/v1", LLMGatewayAPIKey: "synthetic-key"},
+		{LLMGatewayModel: "fake/beta", LLMGatewayProvider: "fake", LLMGatewayURL: "http://localhost:9999/v1", LLMGatewayAPIKey: "synthetic-key"},
+	}
+	m.SwapConfig(configs[0])
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for index := 1; ; index++ {
+			select {
+			case <-stop:
+				return
+			default:
+				m.SwapConfig(configs[index%len(configs)])
+			}
+		}
+	}()
+	for range 200 {
+		model, _, _, _, err := m.resolveTarget()
+		if err != nil || (model != "fake/alpha" && model != "fake/beta") {
+			t.Errorf("concurrent resolve = %q err=%v", model, err)
+			break
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+func TestSwapConfigNilSafety(t *testing.T) {
+	var manager *Manager
+	manager.SwapConfig(&config.Config{LLMGatewayModel: "fake/model"})
+	if manager.config() != nil {
+		t.Fatal("nil manager returned a configuration")
+	}
+	if _, _, _, _, err := manager.resolveTarget(); err == nil {
+		t.Fatal("nil manager resolved a target")
+	}
+
+	chat := &fakeChatter{}
+	br := &fakeBroker{}
+	m, _, cleanup := testManager(t, chat, br)
+	defer cleanup()
+	m.SwapConfig(nil)
+	if got := m.config(); got == nil || got.LLMGatewayModel != "fake/model" {
+		t.Fatal("nil swap displaced the live configuration")
+	}
+}
+
 func TestChildBlockedTools(t *testing.T) {
 	kept := childBlockedTools(true)
 	for _, name := range kept {

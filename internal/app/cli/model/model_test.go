@@ -64,12 +64,23 @@ func TestSetDefaultRoundTrip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("set = %d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(out, "restart required - run `oswald restart` to apply") {
-		t.Fatalf("set missing applying hint = %q", out)
+	if !strings.Contains(out, "applied live") {
+		t.Fatalf("set missing live hint = %q", out)
 	}
 	code, out, _ = run(t, root, "show")
 	if code != 0 || !strings.Contains(out, "fake/other") {
 		t.Fatalf("show after set = %d %q", code, out)
+	}
+}
+
+func TestSetContextLengthRestartRequired(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, out, stderr := run(t, root, "set", "--context-length", "65536")
+	if code != 0 {
+		t.Fatalf("set = %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "restart required - run `oswald restart` to apply") {
+		t.Fatalf("set missing restart hint = %q", out)
 	}
 }
 

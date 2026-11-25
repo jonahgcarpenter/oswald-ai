@@ -84,10 +84,11 @@ var ErrUnmappedIdentity = errors.New("gateway identity has no configured profile
 
 // Directory resolves trusted gateway identities to operator-managed profiles.
 // The live configuration is read per call under a read lock; config reload
-// swaps it wholesale via Swap so admission policy and group mention rules take
-// effect without a restart. Callers must still treat returned configuration as
-// immutable: reload only swaps hot-only diffs, and anything it cannot hot-apply
-// stays on the previous revision until a restart.
+// swaps it wholesale via Swap so admission policy, group mention rules, and
+// model routing overrides take effect without a restart. Callers must still
+// treat returned configuration as immutable: reload only swaps hot-only diffs,
+// and anything it cannot hot-apply stays on the previous revision until a
+// restart.
 type Directory struct {
 	mutex  sync.RWMutex
 	global *config.Config
@@ -107,8 +108,9 @@ func (d *Directory) get() *config.Config {
 
 // Swap replaces the live global configuration after a hot-only reload. The
 // candidate must already have validated; routes are rebuilt from it so future
-// resolutions use the new mapping. Listeners, model clients, and MCP sessions
-// assembled from an earlier revision keep it until a restart.
+// resolutions use the new mapping. Listeners and MCP sessions assembled from
+// an earlier revision keep it until a restart; model routers, summarizers, and
+// delegate configs rotate separately through the reload applier.
 func (d *Directory) Swap(cfg *config.Config) error {
 	if cfg == nil || cfg.ProfileRoot == "" || cfg.ProfileName != "default" {
 		return errors.New("invalid global profile configuration")

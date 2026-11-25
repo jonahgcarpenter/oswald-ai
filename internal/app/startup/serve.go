@@ -18,9 +18,12 @@ import (
 //
 // `oswald restart` signals the local oswald-server process to exit gracefully;
 // the supervisor (container runtime or service manager) restarts it in place.
-// Load-bearing config and plugin changes never restart automatically: mutating
-// CLI commands print "run `oswald restart` to apply" and non-hot watcher hits
-// only log `config.reload.restart_required` as an advisory.
+// Load-bearing changes (context windows, listeners, credentials, profiles,
+// plugins, and remaining sections) never restart automatically: mutating CLI
+// commands print "run `oswald restart` to apply" and non-hot watcher hits only
+// log `config.reload.restart_required` as an advisory. Hot changes — the
+// runtime log level, gateway admission policy, and live model routing — apply
+// without a restart.
 func Serve(ctx context.Context, root string, stdout io.Writer) error {
 	cfg, err := config.LoadProfiles(root)
 	if file, ok := stdout.(*os.File); ok {

@@ -28,9 +28,11 @@ values. `oswald config` itself is read-only (`show|get|validate`); each top-leve
 section has a scoped command group (`providers`, `model`, `delegation`, `api`, `gateway`, `platforms`,
 `tools`, `runtime`, `mcp_servers` via `oswald mcp`) that whitelists its own leaves, so no edit
 can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
-so each command reports `applied live` (runtime log level, admission allow/ban/mention rules)
-vs `restarting service to apply` (everything else, picked up by the server's supervised
-rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
+so each command reports `applied live` (runtime log level, admission allow/ban/mention rules,
+model defaults, and the selected transports/routing overrides of profiles present in both
+configs) vs `restarting service to apply` (everything else — context windows, profile
+additions/removals, and remaining sections — picked up by the server's supervised rebuild
+within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
 keeps reads on the calling scope with contradictions failing closed,
 `ResolveProfile` keeps mutations on the calling scope with
 contradictions failing closed, and `RequireDefaultScope` gates global mutations and profile
