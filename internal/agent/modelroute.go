@@ -3,12 +3,31 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
+
+const (
+	listingFetchTimeout     = 8 * time.Second
+	listingFetchConcurrency = 4
+)
+
+// listingCacheTTL bounds how long a provider's listing (success or failure) is
+// reused. It is a var so tests can shorten it.
+var listingCacheTTL = 60 * time.Second
+
+// ErrProviderUnknown reports a provider name that is not configured in the
+// current view's endpoint map.
+var ErrProviderUnknown = errors.New("provider is not configured")
+
+// errModelsListUnavailable is returned when no listing seam was wired.
+var errModelsListUnavailable = errors.New("models list unavailable")
 
 // Target is the resolved model routing for one turn: consumed once at turn
 // start and never re-read, so an in-flight turn finishes on it even if pins,
@@ -72,6 +91,29 @@ type LinkDegradation struct {
 // wires llm.NewGatewayClient).
 type NewClientFunc func(url, apiKey, virtualKey string) llm.Chatter
 
+// ListModelsFunc fetches one provider's model listing (startup wires the
+// llm.GatewayClient implementation). Nil makes every provider report
+// unavailable instead of panicking.
+type ListModelsFunc func(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error)
+
+// ProviderStatus is one provider's listing availability for command display.
+// ModelCount is the number of reported models when Available is true and 0
+// otherwise.
+type ProviderStatus struct {
+	Name       string
+	Available  bool
+	ModelCount int
+}
+
+// listingCacheEntry is one provider's cached listing result. Failures are
+// cached alongside successes so a dead provider is not re-hammered within
+// listingCacheTTL.
+type listingCacheEntry struct {
+	models    []llm.ModelEntry
+	err       error
+	expiresAt time.Time
+}
+
 // ModelRouter resolves the model transport for one turn: conversation pin
 // first, then channel override, then the profile default. It never fails;
 // unusable links degrade forward and are reported as LinkDegradation values.
@@ -86,26 +128,37 @@ type ModelRouter struct {
 	defaultURL    string
 	defaultAPIKey string
 	newClient     NewClientFunc
+	listModels    ListModelsFunc
 	pins          SessionPinStore
 
 	clientsMu sync.Mutex
 	clients   map[string]llm.Chatter
+
+	listingMu    sync.Mutex
+	listingCache map[string]listingCacheEntry
+
+	knownWindowsMu sync.Mutex
+	knownWindows   map[string]int
 }
 
 // NewModelRouter builds a router over the startup view. defaultClient is the
 // client already pinned to the startup default transport, reused whenever a
 // resolved endpoint matches that transport; a rotated default transport is
-// constructed through newClient instead. pins may be nil; the pin link then
+// constructed through newClient instead. listModels may be nil, in which case
+// every provider reports unavailable. pins may be nil; the pin link then
 // degrades as "store_unavailable".
-func NewModelRouter(view View, defaultClient llm.Chatter, newClient NewClientFunc, pins SessionPinStore) *ModelRouter {
+func NewModelRouter(view View, defaultClient llm.Chatter, newClient NewClientFunc, listModels ListModelsFunc, pins SessionPinStore) *ModelRouter {
 	return &ModelRouter{
 		view:          view,
 		defaultClient: defaultClient,
 		defaultURL:    view.Default.URL,
 		defaultAPIKey: view.Default.APIKey,
 		newClient:     newClient,
+		listModels:    listModels,
 		pins:          pins,
 		clients:       make(map[string]llm.Chatter),
+		listingCache:  make(map[string]listingCacheEntry),
+		knownWindows:  make(map[string]int),
 	}
 }
 
@@ -293,4 +346,147 @@ func pinValueUnreadable(err error) bool {
 		return true
 	}
 	return false
+}
+
+// ListProviders reports every configured provider's listing availability. It
+// snapshots the view once, fetches uncached listings with bounded parallelism
+// (listingFetchConcurrency, listingFetchTimeout each), caches successes and
+// failures for listingCacheTTL, and sorts the result by provider name. A
+// failed fetch degrades to Available:false with no error; the method never
+// logs.
+func (r *ModelRouter) ListProviders(ctx context.Context) []ProviderStatus {
+	view := r.snapshot()
+	names := make([]string, 0, len(view.Endpoints))
+	for name := range view.Endpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	statuses := make([]ProviderStatus, len(names))
+	semaphore := make(chan struct{}, listingFetchConcurrency)
+	var wg sync.WaitGroup
+	for index, name := range names {
+		index, name := index, name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			models, err := r.providerModels(ctx, view, name, view.Endpoints[name])
+			statuses[index] = ProviderStatus{
+				Name:       name,
+				Available:  err == nil,
+				ModelCount: len(models),
+			}
+		}()
+	}
+	wg.Wait()
+	return statuses
+}
+
+// ListModels returns one provider's model listing through the shared cache.
+// A provider name that is not in the current view's endpoint map wraps
+// ErrProviderUnknown. Fetch failures are returned unchanged; the listing seam
+// already launders endpoint and credential data out of them.
+func (r *ModelRouter) ListModels(ctx context.Context, provider string) ([]llm.ModelEntry, error) {
+	provider = strings.TrimSpace(provider)
+	view := r.snapshot()
+	endpoint, ok := view.Endpoints[provider]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrProviderUnknown, provider)
+	}
+	return r.providerModels(ctx, view, provider, endpoint)
+}
+
+// HasProvider reports whether the current view configures the provider.
+func (r *ModelRouter) HasProvider(provider string) bool {
+	_, ok := r.snapshot().Endpoints[strings.TrimSpace(provider)]
+	return ok
+}
+
+// Providers returns the configured provider names sorted alphabetically. It
+// performs no fetch, so command validation stays cheap.
+func (r *ModelRouter) Providers() []string {
+	view := r.snapshot()
+	names := make([]string, 0, len(view.Endpoints))
+	for name := range view.Endpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// KnownWindow reports the last successfully harvested context window for a
+// provider/model pair. Windows are sticky for the router's lifetime (no
+// expiry) and are populated by successful listing fetches.
+func (r *ModelRouter) KnownWindow(provider, model string) (int, bool) {
+	r.knownWindowsMu.Lock()
+	defer r.knownWindowsMu.Unlock()
+	window, ok := r.knownWindows[provider+"\x00"+model]
+	return window, ok
+}
+
+// providerModels serves a provider's listing from the TTL cache or fetches it.
+// The cache holds failures too, so a dead provider is not re-fetched on every
+// command. A nil listing seam reports unavailable without caching.
+func (r *ModelRouter) providerModels(ctx context.Context, view View, provider string, endpoint config.ProviderEndpoint) ([]llm.ModelEntry, error) {
+	if r.listModels == nil {
+		return nil, errModelsListUnavailable
+	}
+
+	r.listingMu.Lock()
+	r.pruneListingsLocked()
+	if entry, ok := r.listingCache[provider]; ok {
+		r.listingMu.Unlock()
+		return entry.models, entry.err
+	}
+	r.listingMu.Unlock()
+
+	fetchCtx, cancel := context.WithTimeout(ctx, listingFetchTimeout)
+	defer cancel()
+	models, err := r.listModels(fetchCtx, endpoint.URL, endpoint.APIKey, view.Default.VirtualKey)
+	r.storeListing(provider, models, err)
+	return models, err
+}
+
+// storeListing caches one fetch result and harvests context windows from
+// successful listings. Windows never expire; issue #295 consumes them.
+func (r *ModelRouter) storeListing(provider string, models []llm.ModelEntry, err error) {
+	if err == nil {
+		r.recordWindows(provider, models)
+	}
+
+	r.listingMu.Lock()
+	defer r.listingMu.Unlock()
+	if r.listingCache == nil {
+		r.listingCache = make(map[string]listingCacheEntry)
+	}
+	r.pruneListingsLocked()
+	r.listingCache[provider] = listingCacheEntry{
+		models:    models,
+		err:       err,
+		expiresAt: time.Now().Add(listingCacheTTL),
+	}
+}
+
+func (r *ModelRouter) recordWindows(provider string, models []llm.ModelEntry) {
+	r.knownWindowsMu.Lock()
+	defer r.knownWindowsMu.Unlock()
+	if r.knownWindows == nil {
+		r.knownWindows = make(map[string]int)
+	}
+	for _, model := range models {
+		if model.Window > 0 {
+			r.knownWindows[provider+"\x00"+model.ID] = model.Window
+		}
+	}
+}
+
+func (r *ModelRouter) pruneListingsLocked() {
+	now := time.Now()
+	for provider, entry := range r.listingCache {
+		if !entry.expiresAt.After(now) {
+			delete(r.listingCache, provider)
+		}
+	}
 }

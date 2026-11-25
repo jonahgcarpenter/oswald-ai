@@ -87,13 +87,13 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 				return nil
 			}
 			definitions := selected.Commands.Definitions()
-			if len(definitions) != 7 {
+			if len(definitions) != 8 {
 				done <- errors.New("unexpected profile commands")
 				cancel()
 				return nil
 			}
 			for _, definition := range definitions {
-				if definition.Name != "help" && definition.Name != "new" && definition.Name != "stop" && definition.Name != "approve" && definition.Name != "deny" && definition.Name != "compact" && definition.Name != "queue" {
+				if definition.Name != "help" && definition.Name != "new" && definition.Name != "stop" && definition.Name != "approve" && definition.Name != "deny" && definition.Name != "compact" && definition.Name != "queue" && definition.Name != "model" {
 					done <- errors.New("obsolete command registered")
 					cancel()
 					return nil

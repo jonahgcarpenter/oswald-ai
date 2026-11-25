@@ -41,8 +41,8 @@ calling scope (`OSWALD_HOME` profile): reads (`show`, `get`, `list`,
 contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`) and profile
 lifecycle (`profile create|rename|delete`) additionally require the default scope.
 `commands/` holds the `Definition/Request/Result/Handler` contract and
-`/name` parsing; `builtin/` registers the seven public handlers (`/help`, `/new`, `/stop`,
-`/approve`, `/deny`, `/compact`, `/queue`).
+`/name` parsing; `builtin/` registers the eight public handlers (`/help`, `/new`, `/stop`,
+`/approve`, `/deny`, `/compact`, `/queue`, `/model`).
 
 ## Validation and reload (how edits take effect)
 
@@ -76,6 +76,10 @@ files, and a stable fingerprint never fires twice, so rapid successive writes co
 - `/queue <prompt>` forces FIFO queueing for the next turn. Plain messages steer into the running
   turn by default (text-only, consumed after the next tool result); unconsumed steers auto-run
   as the next turn.
+- `/model` shows the conversation's resolved model and configured providers; `/model <provider>`
+  lists that provider's models live (capped at 40 with an ellipsis note); `/model
+  <provider>/<model>` pins the conversation — live from the next turn, survives `/new`, changed
+  only by setting another model; `--global` is rejected until the hot-apply phase lands.
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.

@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -212,7 +214,7 @@ func TestModelRouterPrecedence(t *testing.T) {
 		store := newRouterPinStore()
 		store.set("alice", "discord:55501", "local-provider", "pin-model")
 		factory := newRouterClientFactory()
-		router := NewModelRouter(view, routerTestDefaultClient(), factory.newClient, store)
+		router := NewModelRouter(view, routerTestDefaultClient(), factory.newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -228,7 +230,7 @@ func TestModelRouterPrecedence(t *testing.T) {
 		view.Overrides = map[string]map[string]ChannelOverride{
 			"discord": {"55501": {Provider: "alt-provider", Model: "override-model"}},
 		}
-		router := NewModelRouter(view, routerTestDefaultClient(), newRouterClientFactory().newClient, newRouterPinStore())
+		router := NewModelRouter(view, routerTestDefaultClient(), newRouterClientFactory().newClient, nil, newRouterPinStore())
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -243,7 +245,7 @@ func TestModelRouterPrecedence(t *testing.T) {
 
 	t.Run("default when nothing matches", func(t *testing.T) {
 		factory := newRouterClientFactory()
-		router := NewModelRouter(routerTestView(), routerTestDefaultClient(), factory.newClient, newRouterPinStore())
+		router := NewModelRouter(routerTestView(), routerTestDefaultClient(), factory.newClient, nil, newRouterPinStore())
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -263,7 +265,7 @@ func TestModelRouterPrecedence(t *testing.T) {
 func TestModelRouterDefaultReusesStartupClient(t *testing.T) {
 	defaultClient := routerTestDefaultClient()
 	factory := newRouterClientFactory()
-	router := NewModelRouter(routerTestView(), defaultClient, factory.newClient, newRouterPinStore())
+	router := NewModelRouter(routerTestView(), defaultClient, factory.newClient, nil, newRouterPinStore())
 
 	target, degradations := router.Resolve(context.Background(), "alice", "discord:55501", "discord", "55501")
 
@@ -279,7 +281,7 @@ func TestModelRouterConstructedClientCache(t *testing.T) {
 	store := newRouterPinStore()
 	store.set("alice", "discord:55501", "alt-provider", "alt-model")
 	factory := newRouterClientFactory()
-	router := NewModelRouter(routerTestView(), routerTestDefaultClient(), factory.newClient, store)
+	router := NewModelRouter(routerTestView(), routerTestDefaultClient(), factory.newClient, nil, store)
 
 	first, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 	requireDegradations(t, degradations)
@@ -328,7 +330,7 @@ func TestModelRouterPinOnDefaultTransport(t *testing.T) {
 	store.set("alice", "discord:55501", "default-provider", "pinned-default-model")
 	factory := newRouterClientFactory()
 	defaultClient := routerTestDefaultClient()
-	router := NewModelRouter(routerTestView(), defaultClient, factory.newClient, store)
+	router := NewModelRouter(routerTestView(), defaultClient, factory.newClient, nil, store)
 
 	target, degradations := router.Resolve(context.Background(), "alice", "discord:55501", "discord", "55501")
 
@@ -344,7 +346,7 @@ func TestModelRouterKeylessEndpoint(t *testing.T) {
 	store := newRouterPinStore()
 	store.set("alice", "discord:55501", "local-provider", "local-model")
 	factory := newRouterClientFactory()
-	router := NewModelRouter(routerTestView(), routerTestDefaultClient(), factory.newClient, store)
+	router := NewModelRouter(routerTestView(), routerTestDefaultClient(), factory.newClient, nil, store)
 
 	first, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 	requireDegradations(t, degradations)
@@ -379,7 +381,7 @@ func TestModelRouterUnreadablePin(t *testing.T) {
 		}
 		store := newRouterPinStore()
 		store.fail(routerUnreadablePinError{cause: context.Canceled})
-		router := NewModelRouter(view, routerTestDefaultClient(), newRouterClientFactory().newClient, store)
+		router := NewModelRouter(view, routerTestDefaultClient(), newRouterClientFactory().newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -393,7 +395,7 @@ func TestModelRouterUnreadablePin(t *testing.T) {
 		defaultClient := routerTestDefaultClient()
 		store := newRouterPinStore()
 		store.fail(routerUnreadablePinError{})
-		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, store)
+		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -417,7 +419,7 @@ func TestModelRouterStoreUnavailable(t *testing.T) {
 			defaultClient := routerTestDefaultClient()
 			store := newRouterPinStore()
 			store.fail(tc.err)
-			router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, store)
+			router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, nil, store)
 
 			target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -428,7 +430,7 @@ func TestModelRouterStoreUnavailable(t *testing.T) {
 
 	t.Run("nil store", func(t *testing.T) {
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, nil)
+		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, nil, nil)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -444,7 +446,7 @@ func TestModelRouterPinDegradations(t *testing.T) {
 		store := newRouterPinStore()
 		store.set("alice", "discord:55501", "missing-provider", "ghost-model")
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, store)
+		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -459,7 +461,7 @@ func TestModelRouterPinDegradations(t *testing.T) {
 		}
 		store := newRouterPinStore()
 		store.set("alice", "discord:55501", "missing-provider", "ghost-model")
-		router := NewModelRouter(view, routerTestDefaultClient(), newRouterClientFactory().newClient, store)
+		router := NewModelRouter(view, routerTestDefaultClient(), newRouterClientFactory().newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -473,7 +475,7 @@ func TestModelRouterPinDegradations(t *testing.T) {
 		store := newRouterPinStore()
 		store.set("alice", "discord:55501", "alt-provider", "")
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, store)
+		router := NewModelRouter(routerTestView(), defaultClient, newRouterClientFactory().newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -491,7 +493,7 @@ func TestModelRouterOverrideDegradations(t *testing.T) {
 			"discord": {"55501": {Provider: "missing-provider", Model: "ghost-model"}},
 		}
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, newRouterPinStore())
+		router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, nil, newRouterPinStore())
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -505,7 +507,7 @@ func TestModelRouterOverrideDegradations(t *testing.T) {
 			"discord": {"55501": {Provider: "alt-provider"}},
 		}
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, newRouterPinStore())
+		router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, nil, newRouterPinStore())
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -521,7 +523,7 @@ func TestModelRouterClientUnavailable(t *testing.T) {
 		store := newRouterPinStore()
 		store.set("alice", "discord:55501", "alt-provider", "alt-model")
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(routerTestView(), defaultClient, nil, store)
+		router := NewModelRouter(routerTestView(), defaultClient, nil, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -539,7 +541,7 @@ func TestModelRouterClientUnavailable(t *testing.T) {
 		store.set("alice", "discord:55501", "broken-provider", "broken-model")
 		factory := newRouterClientFactory()
 		factory.failURLs = map[string]bool{"https://broken.example.com/v1": true}
-		router := NewModelRouter(view, routerTestDefaultClient(), factory.newClient, store)
+		router := NewModelRouter(view, routerTestDefaultClient(), factory.newClient, nil, store)
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -556,7 +558,7 @@ func TestModelRouterClientUnavailable(t *testing.T) {
 			"discord": {"55501": {Provider: "alt-provider", Model: "override-model"}},
 		}
 		defaultClient := routerTestDefaultClient()
-		router := NewModelRouter(view, defaultClient, nil, newRouterPinStore())
+		router := NewModelRouter(view, defaultClient, nil, nil, newRouterPinStore())
 
 		target, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 
@@ -573,7 +575,7 @@ func TestModelRouterSwapViewRotation(t *testing.T) {
 	}
 	defaultClient := routerTestDefaultClient()
 	factory := newRouterClientFactory()
-	router := NewModelRouter(view, defaultClient, factory.newClient, newRouterPinStore())
+	router := NewModelRouter(view, defaultClient, factory.newClient, nil, newRouterPinStore())
 
 	unchangedDefault, degradations := router.Resolve(ctx, "alice", "discord:55502", "discord", "55502")
 	requireDegradations(t, degradations)
@@ -669,7 +671,7 @@ func TestModelRouterMissingOverrideIsSilent(t *testing.T) {
 			view := routerTestView()
 			view.Overrides = tc.overrides
 			defaultClient := routerTestDefaultClient()
-			router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, newRouterPinStore())
+			router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, nil, newRouterPinStore())
 
 			target, degradations := router.Resolve(ctx, "alice", "discord:55501", tc.gateway, tc.chatID)
 
@@ -695,7 +697,7 @@ func TestModelRouterConcurrentSwapAndResolve(t *testing.T) {
 		"second-model|local-provider|" + routerLocalURL:  true,
 	}
 
-	router := NewModelRouter(first, routerTestDefaultClient(), newRouterClientFactory().newClient, newRouterPinStore())
+	router := NewModelRouter(first, routerTestDefaultClient(), newRouterClientFactory().newClient, nil, newRouterPinStore())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -741,5 +743,325 @@ func TestFixedTarget(t *testing.T) {
 	if target.Model != "fixed-model" || target.Provider != "fixed-provider" ||
 		target.BillingBaseURL != "https://fixed.example.com/v1" || target.Client != client {
 		t.Fatalf("fixed target = %#v", target)
+	}
+}
+
+// Synthetic listing fixtures. URLs and keys are obviously fake.
+const (
+	routerListingAlphaURL = "https://alpha.example.com/v1"
+	routerListingBetaURL  = "https://beta.example.com/v1"
+	routerListingAlphaKey = "fake-alpha-key"
+	routerListingBetaKey  = "fake-beta-key"
+)
+
+// routerListingFake is a concurrency-safe ListModelsFunc double keyed by
+// provider URL. started/release let concurrency tests hold fetches open.
+type routerListingFake struct {
+	mu       sync.Mutex
+	models   map[string][]llm.ModelEntry
+	failures map[string]error
+	calls    map[string]int
+	inFlight int
+	peak     int
+	started  chan string
+	release  chan struct{}
+}
+
+func newRouterListingFake() *routerListingFake {
+	return &routerListingFake{
+		models:   map[string][]llm.ModelEntry{},
+		failures: map[string]error{},
+		calls:    map[string]int{},
+	}
+}
+
+func (f *routerListingFake) list(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error) {
+	f.mu.Lock()
+	f.calls[url]++
+	f.inFlight++
+	if f.inFlight > f.peak {
+		f.peak = f.inFlight
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+	}()
+
+	if f.started != nil {
+		f.started <- url
+	}
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if err := f.failures[url]; err != nil {
+		return nil, err
+	}
+	return f.models[url], nil
+}
+
+func (f *routerListingFake) callCount(url string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[url]
+}
+
+func (f *routerListingFake) peakInFlight() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.peak
+}
+
+// routerListingView has two providers whose endpoint map insertion order is
+// deliberately not alphabetical.
+func routerListingView() View {
+	return View{
+		Default: DefaultTarget{
+			Model:      "default-model",
+			Provider:   "alpha-provider",
+			URL:        routerListingAlphaURL,
+			APIKey:     routerListingAlphaKey,
+			VirtualKey: routerVirtualKey,
+		},
+		Endpoints: map[string]config.ProviderEndpoint{
+			"beta-provider":  {URL: routerListingBetaURL, APIKey: routerListingBetaKey},
+			"alpha-provider": {URL: routerListingAlphaURL, APIKey: routerListingAlphaKey},
+		},
+	}
+}
+
+func TestModelRouterListProviders(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("reports counts sorted by provider", func(t *testing.T) {
+		fake := newRouterListingFake()
+		fake.models[routerListingAlphaURL] = []llm.ModelEntry{
+			{ID: "alpha-1", Window: 128000},
+			{ID: "alpha-2"},
+		}
+		fake.models[routerListingBetaURL] = []llm.ModelEntry{{ID: "beta-1"}}
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		statuses := router.ListProviders(ctx)
+
+		want := []ProviderStatus{
+			{Name: "alpha-provider", Available: true, ModelCount: 2},
+			{Name: "beta-provider", Available: true, ModelCount: 1},
+		}
+		if !reflect.DeepEqual(statuses, want) {
+			t.Fatalf("statuses = %#v, want %#v", statuses, want)
+		}
+	})
+
+	t.Run("failed provider is unavailable", func(t *testing.T) {
+		fake := newRouterListingFake()
+		fake.models[routerListingAlphaURL] = []llm.ModelEntry{{ID: "alpha-1"}}
+		fake.failures[routerListingBetaURL] = errors.New("provider listing failed")
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		statuses := router.ListProviders(ctx)
+
+		want := []ProviderStatus{
+			{Name: "alpha-provider", Available: true, ModelCount: 1},
+			{Name: "beta-provider"},
+		}
+		if !reflect.DeepEqual(statuses, want) {
+			t.Fatalf("statuses = %#v, want %#v", statuses, want)
+		}
+	})
+
+	t.Run("nil lister reports every provider unavailable", func(t *testing.T) {
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, nil, newRouterPinStore())
+
+		statuses := router.ListProviders(ctx)
+
+		want := []ProviderStatus{
+			{Name: "alpha-provider"},
+			{Name: "beta-provider"},
+		}
+		if !reflect.DeepEqual(statuses, want) {
+			t.Fatalf("statuses = %#v, want %#v", statuses, want)
+		}
+	})
+}
+
+func TestModelRouterListProvidersBoundedConcurrency(t *testing.T) {
+	ctx := context.Background()
+	view := View{Endpoints: map[string]config.ProviderEndpoint{}}
+	const providerCount = 8
+	for i := 0; i < providerCount; i++ {
+		name := fmt.Sprintf("provider-%d", i)
+		view.Endpoints[name] = config.ProviderEndpoint{URL: fmt.Sprintf("https://provider-%d.example.com/v1", i)}
+	}
+
+	fake := newRouterListingFake()
+	fake.started = make(chan string, providerCount)
+	release := make(chan struct{})
+	fake.release = release
+	router := NewModelRouter(view, routerTestDefaultClient(), nil, fake.list, nil)
+
+	done := make(chan []ProviderStatus, 1)
+	go func() { done <- router.ListProviders(ctx) }()
+
+	for i := 0; i < listingFetchConcurrency; i++ {
+		select {
+		case <-fake.started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("fetch %d did not start", i)
+		}
+	}
+	close(release)
+
+	statuses := <-done
+	if len(statuses) != providerCount {
+		t.Fatalf("statuses = %d, want %d", len(statuses), providerCount)
+	}
+	if peak := fake.peakInFlight(); peak != listingFetchConcurrency {
+		t.Fatalf("peak concurrent fetches = %d, want %d", peak, listingFetchConcurrency)
+	}
+}
+
+func TestModelRouterListingCache(t *testing.T) {
+	ctx := context.Background()
+	originalTTL := listingCacheTTL
+	listingCacheTTL = 250 * time.Millisecond
+	defer func() { listingCacheTTL = originalTTL }()
+
+	t.Run("success is reused within the TTL and refetched after", func(t *testing.T) {
+		fake := newRouterListingFake()
+		fake.models[routerListingAlphaURL] = []llm.ModelEntry{{ID: "alpha-1"}}
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		if _, err := router.ListModels(ctx, "alpha-provider"); err != nil {
+			t.Fatalf("first ListModels: %v", err)
+		}
+		if got := fake.callCount(routerListingAlphaURL); got != 1 {
+			t.Fatalf("fetches after first call = %d, want 1", got)
+		}
+		if _, err := router.ListModels(ctx, "alpha-provider"); err != nil {
+			t.Fatalf("second ListModels: %v", err)
+		}
+		if got := fake.callCount(routerListingAlphaURL); got != 1 {
+			t.Fatalf("refetched within TTL: %d fetches, want 1", got)
+		}
+
+		time.Sleep(500 * time.Millisecond)
+		if _, err := router.ListModels(ctx, "alpha-provider"); err != nil {
+			t.Fatalf("third ListModels: %v", err)
+		}
+		if got := fake.callCount(routerListingAlphaURL); got != 2 {
+			t.Fatalf("fetches after expiry = %d, want 2", got)
+		}
+	})
+
+	t.Run("failure is cached too", func(t *testing.T) {
+		fetchErr := errors.New("provider listing failed (status 503)")
+		fake := newRouterListingFake()
+		fake.failures[routerListingAlphaURL] = fetchErr
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		for i := 0; i < 2; i++ {
+			if _, err := router.ListModels(ctx, "alpha-provider"); err != fetchErr {
+				t.Fatalf("call %d error = %v, want the fetch error", i, err)
+			}
+		}
+		if got := fake.callCount(routerListingAlphaURL); got != 1 {
+			t.Fatalf("failed fetch was repeated: %d fetches, want 1", got)
+		}
+	})
+}
+
+func TestModelRouterListModels(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success", func(t *testing.T) {
+		fake := newRouterListingFake()
+		want := []llm.ModelEntry{{ID: "alpha-1", Window: 128000}, {ID: "alpha-2"}}
+		fake.models[routerListingAlphaURL] = want
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		models, err := router.ListModels(ctx, "alpha-provider")
+		if err != nil {
+			t.Fatalf("ListModels: %v", err)
+		}
+		if !reflect.DeepEqual(models, want) {
+			t.Fatalf("models = %#v, want %#v", models, want)
+		}
+	})
+
+	t.Run("unknown provider wraps sentinel", func(t *testing.T) {
+		fake := newRouterListingFake()
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		_, err := router.ListModels(ctx, "ghost-provider")
+		if !errors.Is(err, ErrProviderUnknown) {
+			t.Fatalf("error = %v, want ErrProviderUnknown", err)
+		}
+	})
+
+	t.Run("fetch error passes through unchanged", func(t *testing.T) {
+		fetchErr := errors.New("models list unavailable")
+		fake := newRouterListingFake()
+		fake.failures[routerListingAlphaURL] = fetchErr
+		router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+		_, err := router.ListModels(ctx, "alpha-provider")
+		if err != fetchErr {
+			t.Fatalf("error = %v, want the fetch error unchanged", err)
+		}
+	})
+}
+
+func TestModelRouterKnownWindow(t *testing.T) {
+	ctx := context.Background()
+	fake := newRouterListingFake()
+	fake.models[routerListingAlphaURL] = []llm.ModelEntry{
+		{ID: "alpha-1", Window: 128000},
+		{ID: "alpha-2"},
+	}
+	router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, fake.list, newRouterPinStore())
+
+	if _, err := router.ListModels(ctx, "alpha-provider"); err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+
+	if window, ok := router.KnownWindow("alpha-provider", "alpha-1"); !ok || window != 128000 {
+		t.Fatalf("KnownWindow(alpha-1) = %d/%v, want 128000/true", window, ok)
+	}
+	if _, ok := router.KnownWindow("alpha-provider", "alpha-2"); ok {
+		t.Fatal("KnownWindow reported a window for an entry without one")
+	}
+	if _, ok := router.KnownWindow("beta-provider", "alpha-1"); ok {
+		t.Fatal("KnownWindow crossed provider boundaries")
+	}
+	if _, ok := router.KnownWindow("alpha-provider", "ghost-model"); ok {
+		t.Fatal("KnownWindow reported an unknown model")
+	}
+}
+
+func TestModelRouterProviders(t *testing.T) {
+	router := NewModelRouter(routerListingView(), routerTestDefaultClient(), nil, nil, newRouterPinStore())
+
+	if got := router.Providers(); !reflect.DeepEqual(got, []string{"alpha-provider", "beta-provider"}) {
+		t.Fatalf("Providers() = %#v", got)
+	}
+	if !router.HasProvider("alpha-provider") || !router.HasProvider(" beta-provider ") {
+		t.Fatal("HasProvider missed a configured provider")
+	}
+	if router.HasProvider("ghost-provider") {
+		t.Fatal("HasProvider accepted an unknown provider")
+	}
+
+	empty := NewModelRouter(View{}, routerTestDefaultClient(), nil, nil, newRouterPinStore())
+	if got := empty.Providers(); len(got) != 0 {
+		t.Fatalf("Providers() with no endpoint map = %#v, want empty", got)
+	}
+	if empty.HasProvider("alpha-provider") {
+		t.Fatal("HasProvider accepted a provider with no endpoint map")
 	}
 }

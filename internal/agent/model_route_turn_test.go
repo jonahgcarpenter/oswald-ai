@@ -43,7 +43,7 @@ func newPinnedTurnAgent(t *testing.T) (*Agent, *agentMemoryFixture, *fakeChatter
 			t.Errorf("router constructed client for %q/%q, want the alternate transport", url, apiKey)
 		}
 		return pinnedChat
-	}, pins)
+	}, nil, pins)
 	agent.SetModelRouter(router)
 	return agent, fixture, defaultChat, pinnedChat
 }
@@ -174,7 +174,7 @@ func TestModelRouteTurnUnreadablePinWarnsOnce(t *testing.T) {
 	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
 		t.Fatalf("unreadable pin constructed a client for %q", url)
 		return nil
-	}, pins)
+	}, nil, pins)
 	agent.SetModelRouter(router)
 
 	response, err := processAgent(agent, "req-unreadable", "discord", pinnedTurnSessionKey, "user-1", "Test User", "question", nil, nil)
@@ -247,7 +247,7 @@ func TestModelRouteTurnSwapViewIsolation(t *testing.T) {
 	router := NewModelRouter(routerTestView(), blocking, func(url, apiKey, virtualKey string) llm.Chatter {
 		constructed.Add(1)
 		return &fakeChatter{responses: []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "rotated answer"}}}}
-	}, newRouterPinStore())
+	}, nil, newRouterPinStore())
 	agent.SetModelRouter(router)
 
 	type turnResult struct {

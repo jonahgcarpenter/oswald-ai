@@ -120,7 +120,7 @@ commands:
   runtime show|set         read and safely modify runtime configuration
   providers list|show|add|remove
                          manage LLM providers
-  model show|set         manage model selection
+  model show|list|set    manage model selection
   delegation show|set|unset
                           manage subagent model routing
   tools show|set|unset      manage tool backends

@@ -339,6 +339,8 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			Endpoints: profile.ProviderEndpoints,
 		}, client, func(url, apiKey, virtualKey string) llm.Chatter {
 			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog)
+		}, func(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error) {
+			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog).ListModels(ctx)
 		}, store)
 		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
@@ -403,7 +405,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		worker := compaction.NewProfileService(store)
 		delegateStarter := sessioncommands.Starter(store)
 		stopCanceler := stopcommands.Canceler(requestBroker)
+		var modelRouter *agent.ModelRouter
 		if rt := runtimes[name]; rt != nil {
+			modelRouter = rt.router
 			dmgr := managerdelegate.NewManager(managerdelegate.Deps{
 				Profile:     name,
 				ProfileRoot: profile.ProfileRoot,
@@ -432,7 +436,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			delegateStarter = &newSessionCanceller{Starter: store, profile: name, delegate: dmgr}
 			stopCanceler = &stopWithDelegate{broker: requestBroker, profile: name, delegate: dmgr}
 		}
-		commands, err := commandbuiltin.NewProfileService(delegateStarter, stopCanceler, profile.ProfileRoot, summarizers[name], store, requestBroker)
+		commands, err := commandbuiltin.NewProfileService(delegateStarter, stopCanceler, profile.ProfileRoot, summarizers[name], store, requestBroker, modelRouter, store)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}
