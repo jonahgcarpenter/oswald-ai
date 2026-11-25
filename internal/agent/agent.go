@@ -95,6 +95,9 @@ type Agent struct {
 	pluginSkills   []skills.PluginRoot
 	pluginHooks    plugins.HookInvoker
 	log            *config.Logger
+	// router resolves the per-turn model target once at turn start. Nil keeps
+	// the construction-pinned fields above, which is how delegate children run.
+	router *ModelRouter
 }
 
 // SetPluginHooks installs the per-profile plugin hook host. Nil disables hooks.
@@ -151,6 +154,15 @@ func (a *Agent) SetBillingBaseURL(url string) {
 	}
 }
 
+// SetModelRouter installs the per-profile model router consulted once per
+// turn. Nil keeps the construction-pinned model fields, which is how delegate
+// children run.
+func (a *Agent) SetModelRouter(router *ModelRouter) {
+	if a != nil {
+		a.router = router
+	}
+}
+
 // SetWorkspace installs the profile working directory rendered in the system
 // prompt and bound into workspace tool handlers at registry construction.
 func (a *Agent) SetWorkspace(root string) {
@@ -203,22 +215,24 @@ func NewAgent(
 // generated images are finalized with a partial response. Cancellation still aborts.
 // recordChatUsage persists one completed provider call into the session's
 // model usage ledger. Stateless requests and synthetic fallback responses are
-// skipped; recording failures are debug-logged and never fail the turn.
-func (a *Agent) recordChatUsage(ctx context.Context, reqLog *config.Logger, owner, sessionKey string, generation int, resp *llm.ChatResponse) {
+// skipped; recording failures are debug-logged and never fail the turn. The
+// caller supplies attribution explicitly: turn calls pass the resolved target
+// and compaction calls pass the summarizer's pinned profile default.
+func (a *Agent) recordChatUsage(ctx context.Context, reqLog *config.Logger, owner, sessionKey string, generation int, resp *llm.ChatResponse, fallbackModel, billingProvider, billingBaseURL string) {
 	if a == nil || a.userMemory == nil || resp == nil || generation <= 0 {
 		return
 	}
 	model := strings.TrimSpace(resp.Model)
 	if model == "" {
-		model = strings.TrimSpace(a.model)
+		model = strings.TrimSpace(fallbackModel)
 	}
 	if model == "" {
 		return
 	}
 	record := memory.ModelUsageRecord{
 		SessionID: sessionKey, UserID: owner, Generation: generation,
-		Model: model, BillingProvider: strings.TrimSpace(a.provider),
-		BillingBaseURL:   strings.TrimSpace(a.billingBaseURL),
+		Model: model, BillingProvider: strings.TrimSpace(billingProvider),
+		BillingBaseURL:   strings.TrimSpace(billingBaseURL),
 		ApiCalls:         1,
 		PromptTokens:     max(0, resp.PromptTokens),
 		CompletionTokens: max(0, resp.CompletionTokens),
@@ -250,14 +264,30 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	userDocuments := request.Documents
 	streamCallback := request.StreamFunc
 	startedAt := time.Now()
-	reqLog := a.log.Agent("agent", requestID, senderID, gateway, a.model)
+	// Resolve the turn's model target exactly once. Every provider call,
+	// ledger row, snapshot, and persisted attribute below reads this turn-local
+	// value, so pins, overrides, and config swaps mid-turn cannot split one
+	// turn across transports. Override-link degradations cannot occur yet (no
+	// channel overrides exist); the loop covers them for the later phase.
+	var target Target
+	var degradations []LinkDegradation
+	if a.router != nil {
+		target, degradations = a.router.Resolve(ctx, senderID, sessionKey, gateway, strings.TrimSpace(request.ChatID))
+	} else {
+		target = FixedTarget(a.model, a.provider, a.billingBaseURL, a.chatClient)
+	}
+	reqLog := a.log.Agent("agent", requestID, senderID, gateway, target.Model)
 	if name := strings.TrimSpace(displayName); name != "" {
 		reqLog = reqLog.With(config.F("user_id", name))
+	}
+	for _, degradation := range degradations {
+		reqLog.Warn("agent.model.pin_invalid", "conversation model routing link skipped; falling back",
+			config.F("link", degradation.Link), config.F("reason", degradation.Reason))
 	}
 	modelIterations, toolExecutionCount, toolBlockedCount := 0, 0, 0
 	persistenceStatus := "not_attempted"
 	usage := requestctx.UsageCollectorFromContext(ctx)
-	usage.SetExecution(requestctx.ExecutionSnapshot{Model: a.model, PersistenceStatus: "unknown"})
+	usage.SetExecution(requestctx.ExecutionSnapshot{Model: target.Model, PersistenceStatus: "unknown"})
 	defer func() {
 		kind, status := "answer", "ok"
 		if processErr != nil {
@@ -284,7 +314,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount,
-			PersistenceStatus: persistenceStatus, ResponseKind: kind, Model: a.model, IsComplete: true})
+			PersistenceStatus: persistenceStatus, ResponseKind: kind, Model: target.Model, IsComplete: true})
 		reqLog.Debug("agent.response.complete", "completed agent generation", config.F("iteration_count", modelIterations),
 			config.F("is_execution_complete", true), config.F("tool_blocked_count", toolBlockedCount),
 			config.F("tool_execution_count", toolExecutionCount), config.F("duration_ms", time.Since(startedAt).Milliseconds()),
@@ -315,7 +345,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithPrincipal(ctx, request.Principal)
 	formationSourceText, _ := stripReplyContext(userPrompt)
 	inherited := requestctx.MetadataFromContext(ctx)
-	inherited.RequestID, inherited.SessionID, inherited.Model, inherited.CurrentUserText = requestID, sessionKey, a.model, formationSourceText
+	inherited.RequestID, inherited.SessionID, inherited.Model, inherited.CurrentUserText = requestID, sessionKey, target.Model, formationSourceText
 	if inherited.Workload == "" {
 		inherited.Workload = "foreground"
 	}
@@ -343,7 +373,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		ChatDisplayName: request.ChatDisplayName, TransportProfile: request.TransportProfile,
 		PlatformMessage: request.PlatformMessageID, IsDirect: request.IsDirect,
 	})
-	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
+	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(target.Client, target.Model))
 	// Parked approval asks surface while the tool call blocks: keep a
 	// gateway-provided asker (real message on transports without live
 	// progress), else fall back to a streaming status chunk.
@@ -442,7 +472,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			suffixBlocks += "\n\n" + block
 		}
 	}
-	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway))
+	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, target.Model, target.Provider, gateway))
 	appendContext(environmentInfoBlock(a.workspaceRoot))
 	if !request.Stateless {
 		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
@@ -527,7 +557,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if choiceErr.Error() == "no_tools_available" {
 				errCode = "no_tools_available"
 			}
-			return &Response{Kind: "invalid_tool_choice", Model: a.model, ToolChoiceError: errCode}, nil
+			return &Response{Kind: "invalid_tool_choice", Model: target.Model, ToolChoiceError: errCode}, nil
 		}
 	}
 	// The skills index joins the trusted context only when its tool is
@@ -569,7 +599,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
 						config.F("status", "degraded"), config.ErrorField(markErr))
 				}
-				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
+				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage, a.model, a.provider, a.billingBaseURL)
 				cachedMarkdown = markdown
 				promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 				reqLog.Debug("agent.context.compacted", "compacted session context to markdown",
@@ -641,7 +671,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		promptContext.EstimatedAfter = promptContext.RequiredEstimate
 		promptContext.RequiredOverBudget = promptContext.RequiredEstimate > inputLimit
 		if promptContext.RequiredOverBudget {
-			return &Response{Kind: "over_budget", Model: a.model}, nil
+			return &Response{Kind: "over_budget", Model: target.Model}, nil
 		}
 	}
 	if promptContext.RequiredOverBudget {
@@ -661,7 +691,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	)
 
 	req := llm.ChatRequest{
-		Model: a.model,
+		Model: target.Model,
 		User:  requestUser,
 		// Model transport is independent of whether the gateway displays progress.
 		Stream: true,
@@ -775,7 +805,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	useFallback := func(content string) {
 		accumulatedContent.Reset()
 		accumulatedContent.WriteString(content)
-		lastResp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: content}}
+		lastResp = &llm.ChatResponse{Model: target.Model, Message: llm.ChatMessage{Role: "assistant", Content: content}}
 		if streamCallback != nil {
 			streamCallback(StreamChunk{Type: ChunkContent, Text: content})
 		}
@@ -856,7 +886,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		drainSteers()
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
-			return &Response{Kind: "over_budget", Model: a.model}, nil
+			return &Response{Kind: "over_budget", Model: target.Model}, nil
 		}
 		if request.MaxModelResponses > 0 && modelIterations >= request.MaxModelResponses {
 			toolGovernanceStopReason = iterationBudgetStopReason
@@ -873,7 +903,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		)
 
 		modelIterations++
-		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
+		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, target.Client, req, chatCallback, reqLog)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
@@ -889,7 +919,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 							reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
 								config.F("status", "degraded"), config.ErrorField(markErr))
 						}
-						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
+						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage, a.model, a.provider, a.billingBaseURL)
 						rebuilt := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, markdown, preservedRecentTailCount(recentTurns, inputLimit), recentTurns, req.Tools, inputLimit)
 						messages = rebuilt.Messages
 						if emptyConsecutive > 0 && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
@@ -899,7 +929,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
 							config.F("iteration", iteration), config.F("status", "retry"))
 						modelIterations++
-						resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
+						resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, target.Client, req, chatCallback, reqLog)
 					}
 				}
 			}
@@ -922,7 +952,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
 				respSynthetic = true
-				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
+				resp = &llm.ChatResponse{Model: target.Model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 				if streamCallback != nil {
 					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 				}
@@ -935,7 +965,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					config.F("status", "retry"),
 				)
 				modelIterations++
-				resp, err = a.chatClient.Chat(ctx, req, chatCallback)
+				resp, err = target.Client.Chat(ctx, req, chatCallback)
 				if errors.Is(err, context.Canceled) {
 					return nil, err
 				}
@@ -968,13 +998,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					if llm.IsTemporaryOllamaToolParserError(err) {
 						temporaryParserFallback = true
 						respSynthetic = true
-						resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: emptyResponseFallback}}
+						resp = &llm.ChatResponse{Model: target.Model, Message: llm.ChatMessage{Role: "assistant", Content: emptyResponseFallback}}
 						if streamCallback != nil {
 							streamCallback(StreamChunk{Type: ChunkContent, Text: emptyResponseFallback})
 						}
 					} else {
 						errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-						return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
+						return &Response{Model: target.Model, Response: errorText, Error: errorText}, nil
 					}
 				}
 			} else if emptyConsecutive > 0 && len(generatedImages) == 0 {
@@ -989,7 +1019,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				goto finalize
 			} else {
 				errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-				return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
+				return &Response{Model: target.Model, Response: errorText, Error: errorText}, nil
 			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -999,7 +1029,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		normalizeToolCallIDs(&resp.Message, iteration)
 		lastResp = resp
 		if !respSynthetic {
-			a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, resp)
+			a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, resp, target.Model, target.Provider, target.BillingBaseURL)
 		}
 		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
@@ -1073,7 +1103,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				reqLog.Debug("agent.loop.client_tools", "returning caller-owned tool calls",
 					config.F("iteration", iteration),
 					config.F("tool_call_count", len(clientCalls)))
-				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls, OswaldTools: oswaldTimeline, ServiceTier: request.ServiceTier}
+				response := &Response{Kind: "tool_calls", Model: target.Model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls, OswaldTools: oswaldTimeline, ServiceTier: request.ServiceTier}
 				response.setObservedUsage(usage.Snapshot())
 				return response, nil
 			}
@@ -1121,7 +1151,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 			if decision.Allowed && !isClientTool {
 				toolExecutionCount++
-				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: a.model})
+				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: target.Model})
 				toolMeta := requestctx.MetadataFromContext(ctx)
 				toolMeta.ParentOperationID = toolMeta.OperationID
 				toolMeta.OperationID = config.NewRequestID()
@@ -1264,7 +1294,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				}
 			} else if !isClientTool {
 				toolBlockedCount++
-				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: a.model})
+				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: target.Model})
 				toolContent = governanceResultText(decision.ReasonCode)
 				safeName := toolName
 				if !advertised {
@@ -1413,11 +1443,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		finalReq.Tools = nil
 		finalReq.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(finalReq.Messages, nil) > inputLimit {
-			return &Response{Kind: "over_budget", Model: a.model}, nil
+			return &Response{Kind: "over_budget", Model: target.Model}, nil
 		}
 
 		modelIterations++
-		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
+		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, target.Client, finalReq, chatCallback, reqLog)
 		if err == nil && len(generatedImages) == 0 && emptyTotal < maxEmptyRetriesPerTurn && ctx.Err() == nil {
 			visibleFinal := accumulatedContent.String()
 			if visibleFinal == "" && resp != nil {
@@ -1438,7 +1468,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					config.F("status", "retry"),
 				)
 				modelIterations++
-				resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
+				resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, target.Client, finalReq, chatCallback, reqLog)
 			}
 		}
 		if err != nil {
@@ -1457,13 +1487,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					goto finalize
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
+					resp = &llm.ChatResponse{Model: target.Model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 					if streamCallback != nil {
 						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 					}
 				} else {
 					errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-					return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
+					return &Response{Model: target.Model, Response: errorText, Error: errorText}, nil
 				}
 			}
 		}
@@ -1550,11 +1580,11 @@ finalize:
 	// Session-row attributes are resolved before persistence. The system
 	// prompt ledger stores the exact rendered system message alongside its
 	// hex SHA-256, matching operator data.
-	sessionModel := strings.TrimSpace(a.model)
+	sessionModel := strings.TrimSpace(target.Model)
 	if lastResp != nil && strings.TrimSpace(lastResp.Model) != "" {
 		sessionModel = strings.TrimSpace(lastResp.Model)
 	}
-	modelConfig, _ := json.Marshal(map[string]any{"gateway_runtime": map[string]any{"provider": strings.TrimSpace(a.provider), "base_url": strings.TrimSpace(a.billingBaseURL), "api_mode": "chat_completions"}})
+	modelConfig, _ := json.Marshal(map[string]any{"gateway_runtime": map[string]any{"provider": strings.TrimSpace(target.Provider), "base_url": strings.TrimSpace(target.BillingBaseURL), "api_mode": "chat_completions"}})
 	systemPromptText := ""
 	if len(promptContext.Messages) > 0 && promptContext.Messages[0].Role == "system" {
 		systemPromptText = promptContext.Messages[0].Content
@@ -1604,7 +1634,7 @@ finalize:
 			completionTokens = lastResp.CompletionTokens
 		}
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, AssistantFinishReason: finishReason, AssistantReasoning: finalThinking, AssistantReasoningContent: finalThinking, AssistantTokenCount: completionTokens, UserPlatformMessageID: request.PlatformMessageID, Model: sessionModel, BillingProvider: strings.TrimSpace(a.provider), BillingBaseURL: strings.TrimSpace(a.billingBaseURL), ModelConfig: string(modelConfig), ChatID: strings.TrimSpace(request.ChatID), ChatType: chatType, ChatDisplayName: strings.TrimSpace(request.ChatDisplayName), Platform: strings.TrimSpace(gateway), TransportProfile: strings.TrimSpace(request.TransportProfile), PlatformUserID: strings.TrimSpace(request.Principal.ExternalID), PlatformDisplayName: strings.TrimSpace(displayName), SystemPromptHash: systemPromptHash, SystemPromptText: systemPromptText, ActivityDescription: responseKind, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, AssistantFinishReason: finishReason, AssistantReasoning: finalThinking, AssistantReasoningContent: finalThinking, AssistantTokenCount: completionTokens, UserPlatformMessageID: request.PlatformMessageID, Model: sessionModel, BillingProvider: strings.TrimSpace(target.Provider), BillingBaseURL: strings.TrimSpace(target.BillingBaseURL), ModelConfig: string(modelConfig), ChatID: strings.TrimSpace(request.ChatID), ChatType: chatType, ChatDisplayName: strings.TrimSpace(request.ChatDisplayName), Platform: strings.TrimSpace(gateway), TransportProfile: strings.TrimSpace(request.TransportProfile), PlatformUserID: strings.TrimSpace(request.Principal.ExternalID), PlatformDisplayName: strings.TrimSpace(displayName), SystemPromptHash: systemPromptHash, SystemPromptText: systemPromptText, ActivityDescription: responseKind, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(target.Model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(generatedImages) > 0 {
@@ -1636,7 +1666,7 @@ finalize:
 	)
 	final := &Response{
 		Kind:              responseKind,
-		Model:             a.model,
+		Model:             target.Model,
 		Response:          finalContent,
 		Thinking:          finalThinking,
 		OswaldTools:       oswaldTimeline,

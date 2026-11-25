@@ -17,7 +17,7 @@ const (
 	imageInitialScaleMaxEdge = 1920
 )
 
-func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, callback func(llm.ChatMessage), log *config.Logger) (*llm.ChatResponse, error, bool) {
+func (a *Agent) chatWithImageRetries(ctx context.Context, client llm.Chatter, req llm.ChatRequest, callback func(llm.ChatMessage), log *config.Logger) (*llm.ChatResponse, error, bool) {
 	originalMessages := req.Messages
 	imageCount := 0
 	for _, message := range originalMessages {
@@ -47,7 +47,7 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 			req.Messages = messages
 		}
 
-		resp, err := a.chatClient.Chat(ctx, req, callback)
+		resp, err := client.Chat(ctx, req, callback)
 		if ctx.Err() != nil {
 			return nil, ctx.Err(), false
 		}

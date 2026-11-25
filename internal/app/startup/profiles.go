@@ -64,6 +64,10 @@ type profileRuntime struct {
 	client   llm.Chatter
 	cache    *imagecache.Cache
 	media    *docache.Cache
+	// router owns this profile's per-turn model resolution. Kept here so later
+	// phases (command service, delegate hot view) share the live routing state
+	// the agent resolves against.
+	router *agent.ModelRouter
 }
 
 // newSessionCanceller ends the open session, then interrupts the profile's
@@ -324,6 +328,18 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		publishPluginEnvPassthrough(pluginManager, name, log)
 		client := seams.newClient(profile, rootLog)
+		modelRouter := agent.NewModelRouter(agent.View{
+			Default: agent.DefaultTarget{
+				Model:      profile.LLMGatewayModel,
+				Provider:   profile.LLMGatewayProvider,
+				URL:        profile.LLMGatewayURL,
+				APIKey:     profile.LLMGatewayAPIKey,
+				VirtualKey: profile.LLMGatewayVirtualKey,
+			},
+			Endpoints: profile.ProviderEndpoints,
+		}, client, func(url, apiKey, virtualKey string) llm.Chatter {
+			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog)
+		}, store)
 		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
 			return &Error{Event: "app.session_summarizer.init_failed", Message: "failed to initialize profile summarizer", Cause: err}
@@ -345,10 +361,11 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetMarkdownSummarizer(summarizer)
 		engine.SetWorkspace(profile.ProfileRoot)
 		engine.SetPluginSkills(tools.PluginSkillRoots(profile))
+		engine.SetModelRouter(modelRouter)
 		processor.agents[name] = engine
 		runtimes[name] = &profileRuntime{
 			registry: registry, mcp: mcpProvider, soul: soulStore,
-			client: client, cache: cache, media: mediaCache,
+			client: client, cache: cache, media: mediaCache, router: modelRouter,
 		}
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))

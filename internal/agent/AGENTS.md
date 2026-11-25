@@ -22,7 +22,10 @@ exposes all servers, empty exposes none), `tool_history.go` (model-visible vs pe
 `session_images.go` / `image_tool_results.go` /
 `image_retry.go` (image planning, newest-4 retention, downscaling retries), `media_tokens.go`
 (MEDIA/FILE resolution), `stream.go` (`StreamChunk`), `session_store.go` (persistence contract: resolve,
-bind, append, page).
+bind, append, page), `modelroute.go` (per-turn model resolution: conversation pin > channel override >
+profile default, resolved once per `Process` so in-flight turns never re-read routing; degraded links
+log `agent.model.pin_invalid` WARN; a nil router keeps the construction-pinned fields, as delegate
+children run).
 
 ## Turn loop (`agent.go::Process`)
 

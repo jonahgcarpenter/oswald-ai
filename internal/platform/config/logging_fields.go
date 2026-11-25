@@ -28,6 +28,8 @@ var stringLogFields = map[string]bool{
 	"status": true, "outcome": true, "error_code": true, "operation": true,
 	"tool_name": true, "provider": true, "primary_provider": true, "fallback_provider": true,
 	"kind": true, "scope": true, "reason": true, "failure_kind": true, "rate_limit_scope": true,
+	// Model-routing chain link labels ("pin"/"override"), never a value.
+	"link":      true,
 	"job_state": true, "formation_purpose": true, "generator_version": true, "extractor_version": true,
 	"input_type": true, "prompt_type": true, "finish_reason": true, "transport": true,
 	"phase": true, "reason_code": true, "response_kind": true, "request_kind": true,
