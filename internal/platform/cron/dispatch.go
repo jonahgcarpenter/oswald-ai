@@ -14,13 +14,16 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
-// AgentCall is one scheduled agent turn.
+// AgentCall is one scheduled agent turn. Model pins the turn to an explicit
+// provider/model pair; nil runs the profile default. Stale references fail
+// the turn; they never fall back.
 type AgentCall struct {
 	Profile         string
 	SessionKey      string
 	DisplayName     string
 	Prompt          string
 	SkipMemory      bool
+	Model           *JobModel
 	EnabledToolsets []string
 	// MCPServers scopes the MCP bridge for the turn. Nil exposes every
 	// profile server; an empty list exposes none. Passed through verbatim
@@ -287,7 +290,7 @@ func (d *Dispatcher) runAgentDispatch(ctx context.Context, job *Job, started tim
 		waitCtx, cancel := context.WithTimeout(ctx, waitBound)
 		result, agentErr = d.Agent(waitCtx, AgentCall{
 			Profile: d.Profile, SessionKey: session, DisplayName: displayName(job),
-			Prompt: prompt, SkipMemory: true, EnabledToolsets: job.EnabledToolsets, MCPServers: job.MCPServers,
+			Prompt: prompt, SkipMemory: true, Model: job.Model, EnabledToolsets: job.EnabledToolsets, MCPServers: job.MCPServers,
 		})
 		cancel()
 		if agentErr == nil {

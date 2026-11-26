@@ -9,6 +9,7 @@ package cron
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // AllowedToolsets bounds enabled_toolsets entries.
@@ -87,6 +89,42 @@ func (d Deliver) SessionKey() string {
 	return strings.TrimSpace(d.Platform) + ":" + strings.TrimSpace(d.ChatID) + ":" + strings.TrimSpace(d.UserID)
 }
 
+// JobModel pins one job to an explicit provider/model pair. Nil means the
+// profile default at tick time; it never inherits a session pin or a channel
+// override. Provider is the bare name (no custom: prefix); Model may contain
+// slashes and is matched verbatim against the provider listing.
+type JobModel struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// jobModelFieldRunes bounds each model reference leaf, matching the
+// conversation-pin and mediated-selection bounds.
+const jobModelFieldRunes = 256
+
+// NormalizeJobModel trims and validates a job model reference. It strips the
+// custom: selector prefix from the provider for identity; the stored form is
+// always bare.
+func NormalizeJobModel(provider, model string) (JobModel, error) {
+	provider = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(provider), "custom:"))
+	model = strings.TrimSpace(model)
+	if provider == "" || !utf8.ValidString(provider) || utf8.RuneCountInString(provider) > jobModelFieldRunes {
+		return JobModel{}, errors.New("model provider is required")
+	}
+	if model == "" || !utf8.ValidString(model) || utf8.RuneCountInString(model) > jobModelFieldRunes {
+		return JobModel{}, errors.New("model id is required")
+	}
+	return JobModel{Provider: provider, Model: model}, nil
+}
+
+// ModelValidator checks a normalized model reference against live provider
+// state at create/update time. Implementations must be read-only: no writes,
+// no side effects beyond a bounded listing fetch. A nil validator skips the
+// live check (hermetic unit tests); production always wires it.
+type ModelValidator interface {
+	ValidateModel(ctx context.Context, provider, model string) error
+}
+
 // Job is one scheduled unit of work. Timestamps are UTC RFC3339; a null
 // next_run_at means unscheduled (paused, completed, or settled one-shot).
 type Job struct {
@@ -103,17 +141,21 @@ type Job struct {
 	// MCPServers scopes the MCP bridge for the run: nil exposes every
 	// profile server, an empty list exposes none. Stored without omitempty
 	// so an explicit empty list survives a save/load round-trip.
-	MCPServers    []string `json:"mcp_servers"`
-	Enabled       bool     `json:"enabled"`
-	State         string   `json:"state,omitempty"`
-	PausedAt      *string  `json:"paused_at"`
-	PausedReason  string   `json:"paused_reason,omitempty"`
-	CreatedAt     string   `json:"created_at"`
-	NextRunAt     *string  `json:"next_run_at"`
-	LastRunAt     *string  `json:"last_run_at"`
-	LastStatus    string   `json:"last_status,omitempty"`
-	LastError     string   `json:"last_delivery_error,omitempty"`
-	FailureStreak int      `json:"failure_streak"`
+	MCPServers []string `json:"mcp_servers"`
+	// Model pins the job to an explicit provider/model pair. Nil (or absent)
+	// runs the profile default at tick time; explicit null on update clears
+	// back to default. Stale references fail the tick; they never fall back.
+	Model         *JobModel `json:"model,omitempty"`
+	Enabled       bool      `json:"enabled"`
+	State         string    `json:"state,omitempty"`
+	PausedAt      *string   `json:"paused_at"`
+	PausedReason  string    `json:"paused_reason,omitempty"`
+	CreatedAt     string    `json:"created_at"`
+	NextRunAt     *string   `json:"next_run_at"`
+	LastRunAt     *string   `json:"last_run_at"`
+	LastStatus    string    `json:"last_status,omitempty"`
+	LastError     string    `json:"last_delivery_error,omitempty"`
+	FailureStreak int       `json:"failure_streak"`
 	// SlotUnix is the claimed occurrence instant for ledger dedupe. It is
 	// never persisted; ClaimDue stamps it on the dispatched copy.
 	SlotUnix int64 `json:"-"`

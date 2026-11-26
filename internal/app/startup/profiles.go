@@ -162,11 +162,15 @@ func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cron
 	}
 	agentCall := func(ctx context.Context, call cron.AgentCall) (cron.AgentResult, error) {
 		resp := make(chan broker.Result, 1)
+		var override *agent.ModelOverride
+		if call.Model != nil {
+			override = &agent.ModelOverride{Provider: call.Model.Provider, Model: call.Model.Model}
+		}
 		err := requestBroker.Submit(&broker.Request{
 			RequestID:   config.NewRequestID(),
 			Principal:   identity.Principal{CanonicalUserID: call.Profile, Gateway: "cron", ExternalID: "cron:" + call.Profile, Assurance: identity.AssuranceCronScheduler},
 			DisplayName: call.DisplayName, SessionKey: call.SessionKey, Prompt: call.Prompt,
-			SkipMemory: call.SkipMemory, EnabledToolsets: call.EnabledToolsets, MCPServers: call.MCPServers,
+			SkipMemory: call.SkipMemory, ModelOverride: override, EnabledToolsets: call.EnabledToolsets, MCPServers: call.MCPServers,
 			ResponseChan: resp,
 		})
 		if err != nil {

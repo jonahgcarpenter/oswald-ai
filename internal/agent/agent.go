@@ -267,11 +267,19 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// Resolve the turn's model target exactly once. Every provider call,
 	// ledger row, snapshot, and persisted attribute below reads this turn-local
 	// value, so pins, overrides, and config swaps mid-turn cannot split one
-	// turn across transports. Override-link degradations cannot occur yet (no
-	// channel overrides exist); the loop covers them for the later phase.
+	// turn across transports.
 	var target Target
 	var degradations []LinkDegradation
-	if a.router != nil {
+	if request.ModelOverride != nil {
+		if a.router == nil {
+			return nil, errors.New("explicit model override is unavailable")
+		}
+		resolved, err := a.router.ResolveExplicit(request.ModelOverride.Provider, request.ModelOverride.Model)
+		if err != nil {
+			return nil, err
+		}
+		target = resolved
+	} else if a.router != nil {
 		target, degradations = a.router.Resolve(ctx, senderID, sessionKey, gateway, strings.TrimSpace(request.ChatID))
 	} else {
 		target = FixedTarget(a.model, a.provider, a.billingBaseURL, a.chatClient)

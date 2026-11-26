@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/brave"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/searxng"
@@ -180,7 +181,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		{toolterm.Name, governance.ToolPolicy{NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolterm.NewTerminalHandler(ws, pm))},
 		{toolexec.Name, governance.ToolPolicy{NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolexec.NewExecuteCodeHandler(ws))},
 		{toolprocess.Name, governance.ToolPolicy{NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolprocess.NewProcessManageHandler(ws, pm))},
-		{toolcron.Name, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolcron.NewCronjobManageHandler(ws, cronStore, cronValidators))},
+		{toolcron.Name, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(toolcron.NewCronjobManageHandler(ws, cronStore, cronValidators, cronModelValidatorFor(cfg, log)))},
 	}
 	for _, tool := range workspaceTools {
 		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
@@ -211,6 +212,59 @@ func cronTargetValidators(cfg *config.Config, log *config.Logger) map[string]cro
 		validators[cron.DeliverDiscord] = cron.NewDiscordTargetValidator("", token)
 	}
 	return validators
+}
+
+// cronModelChecker validates explicit cron model references against live
+// provider state. Errors name only the provider/model identity and the
+// configured provider set, never endpoints or credentials.
+type cronModelChecker struct {
+	endpoints  map[string]config.ProviderEndpoint
+	virtualKey string
+	log        *config.Logger
+}
+
+// ValidateModel implements cron.ModelValidator: the provider must be
+// configured and the model must appear in its live listing.
+func (c *cronModelChecker) ValidateModel(ctx context.Context, provider, model string) error {
+	provider = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(provider), "custom:"))
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return fmt.Errorf("model must be {provider, model}")
+	}
+	endpoint, ok := c.endpoints[provider]
+	if !ok {
+		return fmt.Errorf("unknown model provider %q (configured: %s)", provider, strings.Join(sortedEndpointNames(c.endpoints), ", "))
+	}
+	client := llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, c.virtualKey, c.log)
+	models, err := client.ListModels(ctx)
+	if err != nil {
+		return fmt.Errorf("model provider %q is unavailable", provider)
+	}
+	for _, entry := range models {
+		if entry.ID == model {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown model %q for provider %q", model, provider)
+}
+
+// cronModelValidatorFor builds the production cron model validator from the
+// profile's effective provider map. A nil config yields a nil validator so
+// registry construction never panics; the handler then enforces syntax only.
+func cronModelValidatorFor(cfg *config.Config, log *config.Logger) cron.ModelValidator {
+	if cfg == nil {
+		return nil
+	}
+	return &cronModelChecker{endpoints: cfg.ProviderEndpoints, virtualKey: cfg.LLMGatewayVirtualKey, log: log}
+}
+
+func sortedEndpointNames(endpoints map[string]config.ProviderEndpoint) []string {
+	names := make([]string, 0, len(endpoints))
+	for name := range endpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // DelegatePolicy returns the registry policy for the delegate tool: full

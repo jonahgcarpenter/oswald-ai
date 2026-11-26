@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -339,5 +340,67 @@ func TestModelRouteTurnCarriesParentModelToTools(t *testing.T) {
 	}
 	if !attached || got.Model != pinnedTurnModel || got.Provider != pinnedTurnProvider {
 		t.Fatalf("tool ctx parent model = %+v attached=%v", got, attached)
+	}
+}
+
+func TestExplicitModelOverrideTurnUsesExplicit(t *testing.T) {
+	defaultChat := &fakeChatter{responses: []*llm.ChatResponse{{
+		Model:   "default-model",
+		Message: llm.ChatMessage{Role: "assistant", Content: "default answer"},
+	}}}
+	explicitChat := &fakeChatter{responses: []*llm.ChatResponse{{
+		Message: llm.ChatMessage{Role: "assistant", Content: "explicit answer"},
+	}}}
+	testAgent, _ := newTestAgent(t, defaultChat, nil, nil)
+	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
+		if url == routerAlternateURL {
+			return explicitChat
+		}
+		return defaultChat
+	}, nil, newRouterPinStore())
+	testAgent.SetModelRouter(router)
+
+	response, err := testAgent.Process(context.Background(), Request{
+		RequestID:     "req-explicit",
+		Principal:     identity.Principal{CanonicalUserID: "user-1", Gateway: "cron", ExternalID: "cron:user-1", Assurance: identity.AssuranceCronScheduler},
+		SessionKey:    "cron:job1",
+		Prompt:        "question",
+		ModelOverride: &ModelOverride{Provider: "custom:alt-provider", Model: "explicit/model"},
+	})
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if response.Model != "explicit/model" {
+		t.Fatalf("response model = %q", response.Model)
+	}
+	if len(defaultChat.requests) != 0 {
+		t.Fatalf("default client got %d calls", len(defaultChat.requests))
+	}
+	if len(explicitChat.requests) != 1 || explicitChat.requests[0].Model != "explicit/model" {
+		t.Fatalf("explicit requests = %+v", explicitChat.requests)
+	}
+}
+
+func TestExplicitModelOverrideStaleFails(t *testing.T) {
+	defaultChat := &fakeChatter{responses: []*llm.ChatResponse{{
+		Model:   "default-model",
+		Message: llm.ChatMessage{Role: "assistant", Content: "default answer"},
+	}}}
+	testAgent, _ := newTestAgent(t, defaultChat, nil, nil)
+	router := NewModelRouter(routerTestView(), defaultChat, newRouterClientFactory().newClient, nil, newRouterPinStore())
+	testAgent.SetModelRouter(router)
+
+	_, err := testAgent.Process(context.Background(), Request{
+		RequestID:     "req-stale",
+		Principal:     identity.Principal{CanonicalUserID: "user-1", Gateway: "cron", ExternalID: "cron:user-1", Assurance: identity.AssuranceCronScheduler},
+		SessionKey:    "cron:job1",
+		Prompt:        "question",
+		ModelOverride: &ModelOverride{Provider: "missing", Model: "ghost"},
+	})
+	if err == nil {
+		t.Fatal("stale override succeeded")
+	}
+	if len(defaultChat.requests) != 0 {
+		t.Fatalf("default client got %d calls on stale override, want 0 (no fallback)", len(defaultChat.requests))
 	}
 }

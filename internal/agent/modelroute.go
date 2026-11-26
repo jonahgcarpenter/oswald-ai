@@ -404,6 +404,37 @@ func (r *ModelRouter) HasProvider(provider string) bool {
 	return ok
 }
 
+// ResolveExplicit resolves an explicit provider/model pin (cron jobs). It
+// never falls back: unknown providers, empty models, and unavailable clients
+// are errors so stale job references fail the tick instead of running the
+// wrong transport. Errors name only the provider/model identity, never
+// endpoint or credential data.
+func (r *ModelRouter) ResolveExplicit(provider, model string) (Target, error) {
+	provider = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(provider), "custom:"))
+	model = strings.TrimSpace(model)
+	if r == nil {
+		return Target{}, errors.New("model router is unavailable")
+	}
+	if provider == "" || model == "" {
+		return Target{}, errors.New("explicit model reference is invalid")
+	}
+	view := r.snapshot()
+	endpoint, ok := view.Endpoints[provider]
+	if !ok {
+		return Target{}, fmt.Errorf("unknown model provider %q", provider)
+	}
+	client, ok := r.clientFor(view, endpoint)
+	if !ok {
+		return Target{}, fmt.Errorf("model provider %q is unavailable", provider)
+	}
+	return Target{
+		Model:          model,
+		Provider:       provider,
+		BillingBaseURL: endpoint.URL,
+		Client:         client,
+	}, nil
+}
+
 // Providers returns the configured provider names sorted alphabetically. It
 // performs no fetch, so command validation stays cheap.
 func (r *ModelRouter) Providers() []string {

@@ -90,13 +90,15 @@ must exist) and run `/bin/sh` with the same sandbox env as terminal (`SandboxPat
 `HOME` = profile root, passthrough), so a command tested in the terminal behaves identically
 off-schedule. Every script body is also profile-scope scanned at create/update and again
 before each run, so a job can never retarget the `oswald` CLI away from its profile.
-Validation rejects injection, script escapes, profile-scope overrides, bad deliver targets, and user-owned
-`model/provider/base_url`; unknown or legacy fields fail closed with a manual-update error (no
+Validation rejects injection, script escapes, profile-scope overrides, bad deliver targets, and flat
+user-owned `provider/base_url` (the optional `model: {provider, model}` job pin is allowed:
+syntax plus live provider/listing checks, null clears to default, no_agent with model rejected);
+unknown or legacy fields fail closed with a manual-update error (no
 migration). Deliver targets are also liveness-checked at create/update time against the live
 transport (imessage group GUIDs and guild/channel membership via BlueBubbles/Discord lookups;
 DMs validate handle shape, never existence) — unverifiable targets are rejected, never scheduled. `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe
 (skipped duplicates stay silent), restore-once for orphaned runs, and one-shot grace retire;
-unparsable schedules record `blocked_config` instead of running. A per-profile 30s ticker with
+unparsable schedules record `blocked_config` instead of running. Job turns run the explicit `model` when set (stale references fail the tick, no fallback to default or session routing) and the profile default otherwise. A per-profile 30s ticker with
 re-arm wake drives dispatch at a 30m ceiling — `[SILENT]` suppresses, and nothing mirrors into
 history.
 

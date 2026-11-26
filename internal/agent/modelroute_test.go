@@ -1065,3 +1065,31 @@ func TestModelRouterProviders(t *testing.T) {
 		t.Fatal("HasProvider accepted a provider with no endpoint map")
 	}
 }
+
+func TestModelRouterResolveExplicit(t *testing.T) {
+	view := routerTestView()
+	defaultClient := routerTestDefaultClient()
+	router := NewModelRouter(view, defaultClient, newRouterClientFactory().newClient, nil, newRouterPinStore())
+
+	target, err := router.ResolveExplicit("custom:alt-provider", "my/model")
+	if err != nil {
+		t.Fatalf("ResolveExplicit: %v", err)
+	}
+	if target.Provider != "alt-provider" || target.Model != "my/model" || target.BillingBaseURL != routerAlternateURL {
+		t.Fatalf("target = %+v", target)
+	}
+	if target.Client == nil {
+		t.Fatal("missing client")
+	}
+
+	if _, err := router.ResolveExplicit("unknown", "m"); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+	if _, err := router.ResolveExplicit("alt-provider", ""); err == nil {
+		t.Fatal("empty model accepted")
+	}
+	broken := NewModelRouter(view, defaultClient, nil, nil, newRouterPinStore())
+	if _, err := broken.ResolveExplicit("other-key", "m"); err == nil {
+		t.Fatal("unavailable client accepted")
+	}
+}

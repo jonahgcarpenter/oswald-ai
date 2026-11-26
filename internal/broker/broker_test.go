@@ -1400,3 +1400,35 @@ func TestBrokerSteerConsumedFansOutMediaWithoutExtraCall(t *testing.T) {
 		t.Fatalf("drained steers = %d, want 1", got)
 	}
 }
+
+func TestBrokerForwardsModelOverride(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	req := &Request{
+		Principal:     identity.Principal{CanonicalUserID: "alice", Gateway: "cron", ExternalID: "cron:alice", Assurance: identity.AssuranceCronScheduler},
+		SessionKey:    "cron:job1",
+		ModelOverride: &agent.ModelOverride{Provider: "p", Model: "m"},
+		ResponseChan:  make(chan Result, 1),
+	}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-req.ResponseChan:
+		if result.Err != nil {
+			t.Fatalf("result err = %v", result.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never completed")
+	}
+	select {
+	case forwarded := <-processor.requests:
+		if forwarded.ModelOverride == nil || forwarded.ModelOverride.Provider != "p" || forwarded.ModelOverride.Model != "m" {
+			t.Fatalf("forwarded override = %+v", forwarded.ModelOverride)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("processor never received request")
+	}
+}
