@@ -24,7 +24,7 @@ func Definition() llm.ToolDefinition {
 	eight := 8
 	return llm.ToolDefinition{
 		Name:        Name,
-		Description: "Load a video into the conversation as still frames so you can see it. Use this for video files — for still images use vision_analyze. Either request evenly spaced frames (frames) or exact moments (timestamps); if both are given, timestamps win. 5–8 frames arrive as 2 labeled contact sheets. Motion between frames and the audio track are not perceived.",
+		Description: "Load a video into the conversation as still frames so you can see it. Use this for video files — for still images use vision_analyze. Either request evenly spaced frames (frames) or exact moments (timestamps); if both are given, timestamps win. Frames arrive as one labeled contact sheet (the single frame attaches directly for a 1-frame request) with per-frame cache paths for full-resolution drill-down. Motion between frames and the audio track are not perceived.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{

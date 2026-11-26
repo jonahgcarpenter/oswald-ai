@@ -70,12 +70,22 @@ func TestContactSheetGrid(t *testing.T) {
 	if img.Bounds().Dx() != sheetCellEdge*2 || img.Bounds().Dy() != sheetCellEdge*2 {
 		t.Fatalf("sheet bounds = %v", img.Bounds())
 	}
+	six := append(append([][]byte{}, frames...), frames...)
+	wide, err := ContactSheet(six)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wideImg, _, err := image.Decode(bytes.NewReader(wide))
+	if err != nil {
+		t.Fatalf("wide sheet is not a JPEG: %v", err)
+	}
+	if wideImg.Bounds().Dx() != sheetCellEdge*4 || wideImg.Bounds().Dy() != sheetCellEdge*2 {
+		t.Fatalf("wide sheet bounds = %v", wideImg.Bounds())
+	}
 	if _, err := ContactSheet(nil); err == nil {
 		t.Fatal("empty sheet accepted")
 	}
-	six := append(append([][]byte{}, frames...), frames...)
-	if _, err := ContactSheet(six); err == nil {
-		// 6 frames must be split into 2 sheets by the caller, never tiled whole.
+	if _, err := ContactSheet(append(six, frames[:3]...)); err == nil {
 		t.Fatal("oversized sheet accepted")
 	}
 }
@@ -119,19 +129,19 @@ func TestResultTextShapes(t *testing.T) {
 		}
 		return out
 	}
-	single := resultText("What?", []float64{7.0}, 13.0, 1, mkFrames(1))
+	single := resultText("What?", []float64{7.0}, 13.0, mkFrames(1))
 	if !strings.Contains(single, "1 still frame (t=7.0s of 13.0s") || strings.Contains(single, "Sheet") {
 		t.Fatalf("single text = %q", single)
 	}
 	if !strings.Contains(single, "Frame 1/1 @ 7.0s: 640×480 → /cache/media/f.jpg") {
 		t.Fatalf("single frame path missing: %q", single)
 	}
-	multi := resultText("What?", []float64{1.6, 4.9}, 13.0, 1, mkFrames(2))
-	if !strings.Contains(multi, "Sheet 1/1: top-left t=1.6s → /cache/media/f.jpg") {
+	multi := resultText("What?", []float64{1.6, 4.9}, 13.0, mkFrames(2))
+	if !strings.Contains(multi, "Sheet 1/1: tile 1/2 t=1.6s 640×480 → /cache/media/f.jpg, tile 2/2 t=4.9s 640×480 → /cache/media/f.jpg") {
 		t.Fatalf("multi text = %q", multi)
 	}
-	sheet := resultText("What?", []float64{1.0, 2.0, 3.0, 4.0, 5.0}, 20.0, 2, mkFrames(5))
-	if !strings.Contains(sheet, "Sheet 1/2: top-left t=1.0s → /cache/media/f.jpg, top-right t=2.0s → /cache/media/f.jpg, bottom-left t=3.0s → /cache/media/f.jpg, bottom-right t=4.0s → /cache/media/f.jpg") || !strings.Contains(sheet, "Sheet 2/2: top-left t=5.0s → /cache/media/f.jpg") {
+	sheet := resultText("What?", []float64{1.0, 2.0, 3.0, 4.0, 5.0}, 20.0, mkFrames(5))
+	if !strings.Contains(sheet, "Sheet 1/1: tile 1/5 t=1.0s 640×480 → /cache/media/f.jpg") || !strings.Contains(sheet, "tile 5/5 t=5.0s 640×480 → /cache/media/f.jpg") {
 		t.Fatalf("sheet text = %q", sheet)
 	}
 	for _, text := range []string{single, multi, sheet} {
