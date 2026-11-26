@@ -80,8 +80,24 @@ func TestSetProviderAndUnset(t *testing.T) {
 	if code, _, stderr := run(t, root, "unset", "provider"); code != 0 {
 		t.Fatalf("unset provider = %d %s", code, stderr)
 	}
-	if code, _, stderr := run(t, root, "unset", "max-iterations"); code == 0 {
-		t.Fatalf("unset of numeric leaf accepted: %s", stderr)
+}
+
+func TestUnsetBoundsRestoresDefaults(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	if code, _, stderr := run(t, root, "set", "--max-iterations", "40"); code != 0 {
+		t.Fatalf("set max-iterations = %d %s", code, stderr)
+	}
+	if code, _, stderr := run(t, root, "unset", "max-iterations"); code != 0 {
+		t.Fatalf("unset max-iterations = %d %s", code, stderr)
+	}
+	if code, _, stderr := run(t, root, "set", "--orchestrator", "false"); code != 0 {
+		t.Fatalf("set orchestrator = %d %s", code, stderr)
+	}
+	if code, _, stderr := run(t, root, "unset", "orchestrator"); code != 0 {
+		t.Fatalf("unset orchestrator = %d %s", code, stderr)
+	}
+	if code, _, stderr := run(t, root, "unset", "max-children"); code == 0 {
+		t.Fatalf("unset of never-set bound leaf accepted: %s", stderr)
 	}
 }
 
