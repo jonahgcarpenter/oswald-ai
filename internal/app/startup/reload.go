@@ -2,6 +2,8 @@ package startup
 
 import (
 	"context"
+	"crypto/sha256"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -67,7 +69,16 @@ type fileID struct {
 	size  int64
 	mtime int64
 	found bool
+	// sum is the content hash of small regular files. Size+mtime alone can
+	// miss a rewrite that keeps the size and lands in the same mtime tick
+	// (coarse-granularity filesystems, or same-length value edits), so the
+	// fingerprint hashes content it can read cheaply.
+	sum [32]byte
 }
+
+// maxFingerprintedBytes bounds one hashed file. Config artifacts stay far
+// below it (256 KiB cap); larger files keep the size+mtime identity.
+const maxFingerprintedBytes = 1 << 20
 
 // NewReloader captures the current fingerprint and effective config. The
 // directory and root log are updated in place on hot-only diffs.
@@ -226,9 +237,32 @@ func fingerprint(root string) map[string]fileID {
 			out[path] = fileID{}
 			continue
 		}
-		out[path] = fileID{size: info.Size(), mtime: info.ModTime().UnixNano(), found: true}
+		id := fileID{size: info.Size(), mtime: info.ModTime().UnixNano(), found: true}
+		if info.Mode().IsRegular() && info.Size() <= maxFingerprintedBytes {
+			if sum, err := hashFile(path); err == nil {
+				id.sum = sum
+			}
+		}
+		out[path] = id
 	}
 	return out
+}
+
+// hashFile returns the SHA-256 of one fingerprint file. A read failure
+// leaves the zero hash so the entry still compares by size+mtime.
+func hashFile(path string) ([32]byte, error) {
+	var sum [32]byte
+	f, err := os.Open(path)
+	if err != nil {
+		return sum, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, maxFingerprintedBytes+1)); err != nil {
+		return sum, err
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 // pluginFingerprintPaths lists the small marker files that identify a

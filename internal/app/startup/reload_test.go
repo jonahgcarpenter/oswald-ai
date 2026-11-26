@@ -445,3 +445,37 @@ func mustValidate(t *testing.T, root string) *config.Config {
 	}
 	return cfg
 }
+
+// TestReloaderDetectsSameSizeChangeWithinOneMtimeTick guards the fingerprint
+// against coarse-mtime filesystems: the context_length edit below keeps the
+// file size identical, so size+mtime alone can miss it when the rewrite lands
+// in the same tick. Resetting the mtime simulates that filesystem, and the
+// reloader must still fire the restart-required advisory from content.
+func TestReloaderDetectsSameSizeChangeWithinOneMtimeTick(t *testing.T) {
+	root, directory, log, output := reloadSetup(t, reloadFixture)
+	loader := NewReloader(root, mustValidate(t, root), directory, log)
+	loader.settle = 10 * time.Millisecond
+	path := filepath.Join(root, "config.yaml")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same-size rewrite: 32768 and 65536 are both five characters.
+	rewrite(t, root, "context_length: 32768", "context_length: 65536")
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	loader.SetModelApplier(func(_, _ *config.Config) { calls++ })
+	loader.Check()
+	if calls != 0 {
+		t.Fatalf("model applier calls = %d, want 0 for a window-only diff", calls)
+	}
+	if !strings.Contains(output.String(), `"event":"config.reload.restart_required"`) {
+		t.Fatalf("restart_required event missing after same-tick rewrite: %q", output.String())
+	}
+	profile, ok := directory.Config("default")
+	if !ok || profile.LLMGatewayModel != "fake/model" {
+		t.Fatal("window-only change displaced the live model")
+	}
+}
