@@ -87,8 +87,8 @@ type summarizerTurnPayload struct {
 
 // Summarize dumps the full session as JSON into one background chat call with
 // zero tools and returns trimmed markdown. No size cap is enforced.
-func (s *Summarizer) Summarize(ctx context.Context, turns []memory.SessionTurn) (string, *llm.ChatResponse, error) {
-	if s == nil || s.client == nil || s.model == "" {
+func SummarizeWithClient(ctx context.Context, client llm.Chatter, model string, turns []memory.SessionTurn) (string, *llm.ChatResponse, error) {
+	if client == nil || strings.TrimSpace(model) == "" {
 		return "", nil, fmt.Errorf("markdown summarizer is unavailable")
 	}
 	if len(turns) == 0 {
@@ -114,7 +114,7 @@ func (s *Summarizer) Summarize(ctx context.Context, turns []memory.SessionTurn) 
 		{Role: "system", Content: SummarizerSystemPrompt},
 		{Role: "user", Content: "Full session JSON follows. Summarize it as markdown.\n" + string(encoded)},
 	}
-	resp, err := s.client.Chat(ctx, llm.ChatRequest{Model: s.model, Messages: messages, Stream: false}, nil)
+	resp, err := client.Chat(ctx, llm.ChatRequest{Model: strings.TrimSpace(model), Messages: messages, Stream: false}, nil)
 	if err != nil {
 		return "", nil, fmt.Errorf("markdown summarizer model call: %w", err)
 	}
@@ -126,6 +126,17 @@ func (s *Summarizer) Summarize(ctx context.Context, turns []memory.SessionTurn) 
 		return "", resp, fmt.Errorf("markdown summarizer returned empty output")
 	}
 	return markdown, resp, nil
+}
+
+// Summarize dumps the full session as JSON into one background chat call with
+// zero tools using the summarizer's pinned client and model. Prefer
+// SummarizeWithClient with the session's resolved target so compaction runs on
+// the model selected for the conversation (issue #295).
+func (s *Summarizer) Summarize(ctx context.Context, turns []memory.SessionTurn) (string, *llm.ChatResponse, error) {
+	if s == nil {
+		return "", nil, fmt.Errorf("markdown summarizer is unavailable")
+	}
+	return SummarizeWithClient(ctx, s.client, s.model, turns)
 }
 
 // RenderMarkdownSummary quotes markdown compaction as lower-authority

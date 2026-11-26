@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
@@ -24,15 +26,28 @@ type Summarizer interface {
 	Set(string, string, int, string)
 }
 
+// Router resolves the session's selected model so manual compaction runs on
+// the same model as the conversation (issue #295). Nil disables resolution and
+// falls back to the summarizer's pinned model.
+type Router interface {
+	Resolve(ctx context.Context, owner, sessionKey, gateway, chatID string) (agent.Target, []agent.LinkDegradation)
+}
+
 type handler struct {
 	store      Store
 	summarizer Summarizer
+	router     Router
 	limit      int
 }
 
 // New creates the /compact command. Limit bounds the turn page; 0 uses 1000.
-func New(store Store, summarizer Summarizer) commands.Handler {
-	return &handler{store: store, summarizer: summarizer, limit: 1000}
+// An optional router resolves the session model for target-aware compaction.
+func New(store Store, summarizer Summarizer, router ...Router) commands.Handler {
+	h := &handler{store: store, summarizer: summarizer, limit: 1000}
+	if len(router) > 0 {
+		h.router = router[0]
+	}
+	return h
 }
 
 func (h *handler) Definition() commands.Definition {
@@ -61,7 +76,7 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	if len(candidates) == 0 {
 		return commands.Result{Text: "Nothing to compact yet.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "no_history"}}, nil
 	}
-	markdown, _, err := h.summarizer.Summarize(ctx, candidates)
+	markdown, err := h.summarizeWithSessionModel(ctx, req, candidates)
 	if err != nil {
 		return commands.Result{}, err
 	}
@@ -84,4 +99,20 @@ func compactedTurnIDs(turns []memory.SessionTurn) []int64 {
 		}
 	}
 	return ids
+}
+
+// summarizeWithSessionModel runs compaction on the session's resolved model so
+// manual /compact matches the conversation (issue #295). Without a router it
+// falls back to the summarizer's pinned model.
+func (h *handler) summarizeWithSessionModel(ctx context.Context, req commands.Request, candidates []memory.SessionTurn) (string, error) {
+	if h.router != nil {
+		target, _ := h.router.Resolve(ctx, req.Principal.CanonicalUserID, req.SessionKey, req.Principal.Gateway, req.ChatID)
+		if target.Client != nil && target.Model != "" {
+			if markdown, _, err := compaction.SummarizeWithClient(ctx, target.Client, target.Model, candidates); err == nil {
+				return markdown, nil
+			}
+		}
+	}
+	markdown, _, err := h.summarizer.Summarize(ctx, candidates)
+	return markdown, err
 }

@@ -117,7 +117,7 @@ func (m *Manager) runChild(ctx context.Context, spec childSpec, rec *liveChild) 
 
 // runOnce builds the child agent and runs a single turn to completion.
 func (m *Manager) runOnce(ctx context.Context, spec childSpec) (summary string, truncated bool, status string) {
-	child := agent.NewAgent(spec.client, m.registry, spec.model, spec.provider, m.soul, nil, budget.NewContextBudget(m.window), governance.DefaultGlobalPolicy(), m.log, m.mcp)
+	child := agent.NewAgent(spec.client, m.registry, spec.model, spec.provider, m.soul, nil, budget.NewContextBudget(m.windowFor(spec.provider, spec.model)), governance.DefaultGlobalPolicy(), m.log, m.mcp)
 	child.SetWorkspace(m.profileRoot)
 	child.SetImageCache(m.images)
 	child.SetMediaCache(m.media)

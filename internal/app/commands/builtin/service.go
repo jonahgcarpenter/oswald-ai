@@ -23,7 +23,7 @@ func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canc
 		{Handler: queuecommands.New(queuer)},
 	}
 	if compacter != nil && compactStore != nil {
-		cmds = append(cmds, commands.Command{Handler: compactcommands.New(compactStore, compacter)})
+		cmds = append(cmds, commands.Command{Handler: compactcommands.New(compactStore, compacter, modelRouter)})
 	}
 	if modelRouter != nil && modelPins != nil && modelDefaults != nil {
 		cmds = append(cmds, commands.Command{Handler: modelcommands.New(modelRouter, modelPins, modelDefaults)})

@@ -3,8 +3,10 @@ package startup
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
@@ -60,6 +62,17 @@ func (h *summarizerHolder) Summarize(ctx context.Context, turns []memory.Session
 		return "", nil, errors.New("markdown summarizer is unavailable")
 	}
 	return target.Summarize(ctx, turns)
+}
+
+// SummarizeWithTarget implements the session-model compaction path (issue
+// #295): the resolved turn target supplies the model and client so a pinned
+// muse-spark session compacts on muse-spark, not the profile default.
+// A missing client or model falls back to the pinned summarizer.
+func (h *summarizerHolder) SummarizeWithTarget(ctx context.Context, turns []memory.SessionTurn, target agent.Target) (string, *llm.ChatResponse, error) {
+	if strings.TrimSpace(target.Model) != "" && target.Client != nil {
+		return compaction.SummarizeWithClient(ctx, target.Client, target.Model, turns)
+	}
+	return h.Summarize(ctx, turns)
 }
 
 // Get reads the cached markdown for one session generation from the current

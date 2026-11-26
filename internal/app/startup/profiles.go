@@ -423,6 +423,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 				Window:     profile.ModelContextWindow,
 				VirtualKey: profile.LLMGatewayVirtualKey,
 				Config:     profile,
+				Router:     rt.router,
 			})
 			if err := rt.registry.RegisterHandler(tooldelegate.Name, tools.DelegatePolicy(), registry.Handler(dmgr.Execute)); err != nil {
 				return &Error{Event: "app.delegate.init_failed", Message: "failed to install live delegate handler", Cause: err}
