@@ -34,7 +34,8 @@ tools-disabled completion:
 
 ```
 refresh catalog; set ToolChoice (first call only)
-if pressure >= 70%: Summarize(full session JSON) -> markdown cache (blocking, lane-queued)
+if pressure >= 70%: Summarize(pre-keep turns + previous summary) -> merged markdown cache (blocking, lane-queued)
+if over 100%: trim pre-keep turns to 70% first (still searchable), then compact as above
 for iteration:
     response = chatWithImageRetries() // up to 5 attempts, shrinking images
     normalize tool call IDs; record usage
@@ -57,12 +58,11 @@ finalize: pick final content, resolve MEDIA/FILE, AppendPendingSessionTurn (skip
 ## Invariants (every change is reviewed against these)
 
 - **Budget math lives in `session/compaction/budget/`.** Usable input is `min(window, prompt
-  limit) − 256`, default window 32,768; recent-tail reserve is 25% of input clamped to
-  2,000–8,000, holding at most the two newest turns; markdown compaction summarizes all but the newest 3 turns at 70% and flags them `compacted=1` so later reads omit them.
-  Over-budget prompts (only after a model-window shrink) first flag oldest turns unsummarized to the 70% line, then compact the remainder on the session model; dropped turns stay searchable.
+  limit) − 256`, default window 32,768; the keep tail is a flat 15,000 newest tokens held verbatim beside the summary. Markdown compaction summarizes turns older than the keep tail at 70% and flags them `compacted=1` so later reads omit them, merging with the previous summary.
+  Long tool results ride projected (head+tail plus marker) in prompts and summarizer input; full text stays persisted and searchable.
+  Over-budget prompts (only after a model-window shrink) first flag oldest turns beyond the keep tail unsummarized to the 70% line, then compact the remainder on the session model; dropped turns stay searchable.
   Required oversize context is retained and reported — the agent never silently truncates
-  what the turn needs. The compaction call itself (`SYSTEM` prompt + session JSON of all
-  but the newest 3 turns as `USER`, zero tools) returns plain markdown with no size cap.
+  what the turn needs. The compaction call itself (`SYSTEM` prompt + previous summary plus session JSON of pre-keep turns as `USER`, zero tools) returns plain markdown with no size cap.
 - **Tool authorization is per-iteration.** Discovery can never authorize another call in the same
   emitted batch. Every declared call executes serially and gets a correlated result appended,
   including blocked ones — failures, empties, and repeats all run until progress signals

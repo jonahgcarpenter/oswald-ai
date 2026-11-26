@@ -423,10 +423,10 @@ func AssemblePromptContext(
 }
 
 func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memory.SessionTurn {
-	// All tool results stay in context: replay every persisted batch verbatim.
-	// Budget oversize still falls back per-turn via withoutToolHistory in
-	// AssemblePromptContext, and the 64 KiB aggregate bound in
-	// EncodeToolHistory still applies at persistence time.
+	// All tool results stay in context: replay every persisted batch with
+	// read-time projections. Budget oversize still falls back per-turn via
+	// withoutToolHistory in AssemblePromptContext, and the 256 KiB aggregate
+	// bound in EncodeToolHistory still applies at persistence time.
 	prepared := append([]memory.SessionTurn(nil), turns...)
 	_ = tools
 	return prepared
@@ -446,24 +446,6 @@ func turnIDs(turns []memory.SessionTurn) []int64 {
 		}
 	}
 	return ids
-}
-
-func preservedRecentTailCount(recentTurns []memory.SessionTurn, inputLimit int) int {
-	budget := tokenbudget.RecentTailLimit(inputLimit)
-	total := 0
-	count := 0
-	for _, turn := range recentTurns {
-		if count == 2 {
-			break
-		}
-		size := tokenbudget.EstimateRequest(memory.SessionTurnMessages(turn), nil)
-		if total+size > budget {
-			break
-		}
-		total += size
-		count++
-	}
-	return count
 }
 
 func messagesWithSummaryAndTurns(required []llm.ChatMessage, summary string, newestFirst []memory.SessionTurn) []llm.ChatMessage {

@@ -23,6 +23,7 @@ type Store interface {
 // Summarizer compacts turns to markdown and stores the ephemeral result.
 type Summarizer interface {
 	Summarize(context.Context, []memory.SessionTurn) (string, *llm.ChatResponse, error)
+	Get(string, string, int) string
 	Set(string, string, int, string)
 }
 
@@ -72,11 +73,11 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	if err != nil {
 		return commands.Result{}, err
 	}
-	candidates := tokenbudget.Candidates(turns)
+	_, candidates := compaction.SplitKeepTail(turns, tokenbudget.KeepTokens)
 	if len(candidates) == 0 {
 		return commands.Result{Text: "Nothing to compact yet.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "no_history"}}, nil
 	}
-	markdown, err := h.summarizeWithSessionModel(ctx, req, candidates)
+	markdown, err := h.summarizeWithSessionModel(ctx, req, session.Generation, candidates)
 	if err != nil {
 		return commands.Result{}, err
 	}
@@ -103,12 +104,14 @@ func compactedTurnIDs(turns []memory.SessionTurn) []int64 {
 
 // summarizeWithSessionModel runs compaction on the session's resolved model so
 // manual /compact matches the conversation (issue #295). Without a router it
-// falls back to the summarizer's pinned model.
-func (h *handler) summarizeWithSessionModel(ctx context.Context, req commands.Request, candidates []memory.SessionTurn) (string, error) {
+// falls back to the summarizer's pinned model. The cached summary seeds the
+// merge so manual compaction extends history instead of replacing it.
+func (h *handler) summarizeWithSessionModel(ctx context.Context, req commands.Request, generation int, candidates []memory.SessionTurn) (string, error) {
+	previous := h.summarizer.Get(req.Principal.CanonicalUserID, req.SessionKey, generation)
 	if h.router != nil {
 		target, _ := h.router.Resolve(ctx, req.Principal.CanonicalUserID, req.SessionKey, req.Principal.Gateway, req.ChatID)
 		if target.Client != nil && target.Model != "" {
-			if markdown, _, err := compaction.SummarizeWithClient(ctx, target.Client, target.Model, candidates); err == nil {
+			if markdown, _, err := compaction.SummarizeWithClient(ctx, target.Client, target.Model, candidates, previous); err == nil {
 				return markdown, nil
 			}
 		}

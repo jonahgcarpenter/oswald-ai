@@ -32,6 +32,7 @@ func (f *fakeStore) MarkSessionTurnsCompacted(_ context.Context, _, _ string, _ 
 
 type fakeSummarizer struct {
 	markdown string
+	cached   string
 	calls    int
 	set      string
 	got      int
@@ -43,7 +44,19 @@ func (f *fakeSummarizer) Summarize(_ context.Context, turns []memory.SessionTurn
 	return f.markdown, &llm.ChatResponse{Model: "m"}, nil
 }
 
+func (f *fakeSummarizer) Get(_, _ string, _ int) string { return f.cached }
+
 func (f *fakeSummarizer) Set(_, _ string, _ int, markdown string) { f.set = markdown }
+
+// bigCompactTurns builds newest-first turns exceeding the keep tail so
+// compaction has candidates. Each turn is ~1K tokens; 20 turns ≈ 20K.
+func bigCompactTurns(n int) []memory.SessionTurn {
+	turns := make([]memory.SessionTurn, 0, n)
+	for i := n; i >= 1; i-- {
+		turns = append(turns, memory.SessionTurn{ID: int64(i), UserText: "user " + strings.Repeat("u", 2000), AssistantText: "assistant " + strings.Repeat("a", 2000)})
+	}
+	return turns
+}
 
 func principal() identity.Principal {
 	return identity.Principal{CanonicalUserID: "u", Gateway: "discord", ExternalID: "u", Assurance: identity.AssuranceDiscordGateway}
@@ -61,32 +74,29 @@ func TestCompactRejectsArgsAndRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestCompactSummarizesAndStores(t *testing.T) {
-	store := &fakeStore{generation: 3, turns: []memory.SessionTurn{
-		{ID: 5, UserText: "newest", AssistantText: "answer5"},
-		{ID: 4, UserText: "newer", AssistantText: "answer4"},
-		{ID: 3, UserText: "keep", AssistantText: "answer3"},
-		{ID: 2, UserText: "old2", AssistantText: "answer2"},
-		{ID: 1, UserText: "old1", AssistantText: "answer1"},
-	}}
+func TestCompactSummarizesBeyondKeepTail(t *testing.T) {
+	store := &fakeStore{generation: 3, turns: bigCompactTurns(20)}
 	sum := &fakeSummarizer{markdown: "# Summary"}
 	h := New(store, sum)
 	result, err := h.Execute(context.Background(), commands.Request{Principal: principal(), SessionKey: "s", Raw: "/compact"})
 	if err != nil || sum.calls != 1 || sum.set != "# Summary" {
 		t.Fatalf("result=%+v err=%v calls=%d", result, err, sum.calls)
 	}
-	if sum.got != 2 {
-		t.Fatalf("summarized %d turns, want oldest 2: marked=%v", sum.got, store.marked)
+	if sum.got == 0 || len(store.marked) != sum.got {
+		t.Fatalf("summarized %d turns, marked=%v", sum.got, store.marked)
 	}
-	if len(store.marked) != 2 || store.marked[0] != 2 || store.marked[1] != 1 {
-		t.Fatalf("marked=%v, want [2 1]", store.marked)
+	newest := store.turns[0].ID
+	for _, id := range store.marked {
+		if id == newest {
+			t.Fatalf("keep tail turn %d was summarized", newest)
+		}
 	}
-	if !strings.Contains(result.Text, "2 turns") || result.Outcome.Operation != "session.compact" || !result.Outcome.IsChanged || result.Outcome.AffectedCount != 2 {
+	if !strings.Contains(result.Text, "turns") || result.Outcome.Operation != "session.compact" || !result.Outcome.IsChanged || result.Outcome.AffectedCount != sum.got {
 		t.Fatalf("result=%+v", result)
 	}
 }
 
-func TestCompactKeepsNewestThreeVerbatim(t *testing.T) {
+func TestCompactKeepsKeepTailVerbatim(t *testing.T) {
 	store := &fakeStore{generation: 1, turns: []memory.SessionTurn{
 		{ID: 3, UserText: "c", AssistantText: "C"},
 		{ID: 2, UserText: "b", AssistantText: "B"},
