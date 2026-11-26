@@ -15,6 +15,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
@@ -218,9 +220,10 @@ func cronTargetValidators(cfg *config.Config, log *config.Logger) map[string]cro
 // provider state. Errors name only the provider/model identity and the
 // configured provider set, never endpoints or credentials.
 type cronModelChecker struct {
-	endpoints  map[string]config.ProviderEndpoint
-	virtualKey string
-	log        *config.Logger
+	endpoints   map[string]config.ProviderEndpoint
+	virtualKey  string
+	profileRoot string
+	log         *config.Logger
 }
 
 // ValidateModel implements cron.ModelValidator: the provider must be
@@ -235,8 +238,7 @@ func (c *cronModelChecker) ValidateModel(ctx context.Context, provider, model st
 	if !ok {
 		return fmt.Errorf("unknown model provider %q (configured: %s)", provider, strings.Join(sortedEndpointNames(c.endpoints), ", "))
 	}
-	client := llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, c.virtualKey, c.log)
-	models, err := client.ListModels(ctx)
+	models, err := subscriptionListing(ctx, c.profileRoot, provider, endpoint, c.virtualKey, c.log)
 	if err != nil {
 		return fmt.Errorf("model provider %q is unavailable", provider)
 	}
@@ -255,7 +257,7 @@ func cronModelValidatorFor(cfg *config.Config, log *config.Logger) cron.ModelVal
 	if cfg == nil {
 		return nil
 	}
-	return &cronModelChecker{endpoints: cfg.ProviderEndpoints, virtualKey: cfg.LLMGatewayVirtualKey, log: log}
+	return &cronModelChecker{endpoints: cfg.ProviderEndpoints, virtualKey: cfg.LLMGatewayVirtualKey, profileRoot: cfg.ProfileRoot, log: log}
 }
 
 func sortedEndpointNames(endpoints map[string]config.ProviderEndpoint) []string {
@@ -265,6 +267,27 @@ func sortedEndpointNames(endpoints map[string]config.ProviderEndpoint) []string 
 	}
 	sort.Strings(names)
 	return names
+}
+
+// subscriptionListing resolves one provider's model listing for validation.
+// Subscription catalogs stay usable offline; key providers use the live
+// gateway listing.
+func subscriptionListing(ctx context.Context, profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) ([]llm.ModelEntry, error) {
+	switch endpoint.AuthKind {
+	case config.ProviderAuthChatGPT:
+		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil)
+		if err != nil {
+			return chatgpt.StaticModels(), nil
+		}
+		return client.ListModels(ctx)
+	case config.ProviderAuthClaudeSDK:
+		if _, err := claude.Check(ctx); err != nil {
+			return nil, err
+		}
+		return claude.StaticModels(), nil
+	default:
+		return llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, virtualKey, log).ListModels(ctx)
+	}
 }
 
 // DelegatePolicy returns the registry policy for the delegate tool: full

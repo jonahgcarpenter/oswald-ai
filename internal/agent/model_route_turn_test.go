@@ -42,9 +42,9 @@ func newPinnedTurnAgent(t *testing.T) (*Agent, *agentMemoryFixture, *fakeChatter
 	agent, fixture := newTestAgent(t, defaultChat, nil, nil)
 	pins := newRouterPinStore()
 	pins.set("user-1", pinnedTurnSessionKey, pinnedTurnProvider, pinnedTurnModel)
-	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
-		if url != routerAlternateURL || apiKey != routerAlternateKey {
-			t.Errorf("router constructed client for %q/%q, want the alternate transport", url, apiKey)
+	router := NewModelRouter(routerTestView(), defaultChat, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
+		if endpoint.URL != routerAlternateURL || endpoint.APIKey != routerAlternateKey {
+			t.Errorf("router constructed client for %q/%q, want the alternate transport", endpoint.URL, endpoint.APIKey)
 		}
 		return pinnedChat
 	}, nil, pins)
@@ -175,8 +175,8 @@ func TestModelRouteTurnUnreadablePinWarnsOnce(t *testing.T) {
 	agent.log = log
 	pins := newRouterPinStore()
 	pins.fail(routerUnreadablePinError{})
-	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
-		t.Fatalf("unreadable pin constructed a client for %q", url)
+	router := NewModelRouter(routerTestView(), defaultChat, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
+		t.Fatalf("unreadable pin constructed a client for %q", endpoint.URL)
 		return nil
 	}, nil, pins)
 	agent.SetModelRouter(router)
@@ -248,7 +248,7 @@ func TestModelRouteTurnSwapViewIsolation(t *testing.T) {
 	blocking := newSwapBlockingChatter()
 	agent, _ := newTestAgent(t, blocking, nil, nil)
 	var constructed atomic.Int32
-	router := NewModelRouter(routerTestView(), blocking, func(url, apiKey, virtualKey string) llm.Chatter {
+	router := NewModelRouter(routerTestView(), blocking, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
 		constructed.Add(1)
 		return &fakeChatter{responses: []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "rotated answer"}}}}
 	}, nil, newRouterPinStore())
@@ -320,9 +320,9 @@ func TestModelRouteTurnCarriesParentModelToTools(t *testing.T) {
 	}
 	pins := newRouterPinStore()
 	pins.set("user-1", pinnedTurnSessionKey, pinnedTurnProvider, pinnedTurnModel)
-	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
-		if url != routerAlternateURL || apiKey != routerAlternateKey {
-			t.Errorf("router constructed client for %q/%q, want the alternate transport", url, apiKey)
+	router := NewModelRouter(routerTestView(), defaultChat, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
+		if endpoint.URL != routerAlternateURL || endpoint.APIKey != routerAlternateKey {
+			t.Errorf("router constructed client for %q/%q, want the alternate transport", endpoint.URL, endpoint.APIKey)
 		}
 		return pinnedChat
 	}, nil, pins)
@@ -352,8 +352,8 @@ func TestExplicitModelOverrideTurnUsesExplicit(t *testing.T) {
 		Message: llm.ChatMessage{Role: "assistant", Content: "explicit answer"},
 	}}}
 	testAgent, _ := newTestAgent(t, defaultChat, nil, nil)
-	router := NewModelRouter(routerTestView(), defaultChat, func(url, apiKey, virtualKey string) llm.Chatter {
-		if url == routerAlternateURL {
+	router := NewModelRouter(routerTestView(), defaultChat, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
+		if endpoint.URL == routerAlternateURL {
 			return explicitChat
 		}
 		return defaultChat

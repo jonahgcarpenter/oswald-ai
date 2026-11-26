@@ -59,7 +59,7 @@ func routingConfig(name, model string) *config.Config {
 }
 
 func newTestModelRouter(view agent.View) *agent.ModelRouter {
-	return agent.NewModelRouter(view, &profileFakeModel{}, func(url, apiKey, virtualKey string) llm.Chatter {
+	return agent.NewModelRouter(view, &profileFakeModel{}, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
 		return &profileFakeModel{}
 	}, nil, nil)
 }

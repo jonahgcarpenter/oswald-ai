@@ -58,20 +58,20 @@ func newRouterClientFactory() *routerClientFactory {
 	return &routerClientFactory{clients: map[string]*routerTestChatter{}}
 }
 
-func (f *routerClientFactory) newClient(url, apiKey, virtualKey string) llm.Chatter {
+func (f *routerClientFactory) newClient(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failURLs[url] {
-		f.calls = append(f.calls, routerClientCall{url: url, apiKey: apiKey, virtualKey: virtualKey})
+	if f.failURLs[endpoint.URL] {
+		f.calls = append(f.calls, routerClientCall{url: endpoint.URL, apiKey: endpoint.APIKey, virtualKey: virtualKey})
 		return nil
 	}
-	key := url + "\x00" + apiKey
+	key := provider + "\x00" + endpoint.URL + "\x00" + endpoint.APIKey
 	client, ok := f.clients[key]
 	if !ok {
 		client = &routerTestChatter{label: key}
 		f.clients[key] = client
 	}
-	f.calls = append(f.calls, routerClientCall{url: url, apiKey: apiKey, virtualKey: virtualKey, client: client})
+	f.calls = append(f.calls, routerClientCall{url: endpoint.URL, apiKey: endpoint.APIKey, virtualKey: virtualKey, client: client})
 	return client
 }
 
@@ -313,15 +313,16 @@ func TestModelRouterConstructedClientCache(t *testing.T) {
 		t.Fatalf("second constructor call key = %q", call.apiKey)
 	}
 
-	// A provider alias sharing URL and key resolves to the same instance.
+	// A provider alias sharing URL and key is a distinct provider identity so
+	// per-provider subscription stores never mix; it constructs separately.
 	store.set("alice", "discord:55501", "alt-alias", "alias-model")
 	aliased, degradations := router.Resolve(ctx, "alice", "discord:55501", "discord", "55501")
 	requireDegradations(t, degradations)
-	if aliased.Client != first.Client {
-		t.Fatal("url+key alias did not reuse the cached client")
+	if aliased.Client == first.Client {
+		t.Fatal("provider alias reused a different provider's client")
 	}
-	if factory.callCount() != 2 {
-		t.Fatalf("constructor calls = %d, want 2", factory.callCount())
+	if factory.callCount() != 3 {
+		t.Fatalf("constructor calls = %d, want 3", factory.callCount())
 	}
 }
 
@@ -775,7 +776,8 @@ func newRouterListingFake() *routerListingFake {
 	}
 }
 
-func (f *routerListingFake) list(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error) {
+func (f *routerListingFake) list(ctx context.Context, provider string, endpoint config.ProviderEndpoint, virtualKey string) ([]llm.ModelEntry, error) {
+	url := endpoint.URL
 	f.mu.Lock()
 	f.calls[url]++
 	f.inFlight++

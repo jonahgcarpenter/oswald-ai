@@ -21,11 +21,38 @@ const (
 
 // ProviderEndpoint is a resolved provider transport: the normalized endpoint
 // URL plus the interpolated API key (empty when the provider declares none).
+// AuthKind is "", "key", "chatgpt-oauth", or "claude-sdk". Subscription kinds
+// never carry a static key: chatgpt-oauth resolves a bearer token per request
+// from the profile token store, claude-sdk shells to the installed CLI.
 // Retained per provider so subagent dispatch can build a client for a
 // non-default provider without re-reading operator files.
 type ProviderEndpoint struct {
-	URL    string
-	APIKey string
+	URL      string
+	APIKey   string
+	AuthKind string
+}
+
+// Subscription provider auth kinds. Empty and "key" are the historical static
+// key transport; the subscription kinds use the user's own subscription.
+const (
+	ProviderAuthKey       = "key"
+	ProviderAuthChatGPT   = "chatgpt-oauth"
+	ProviderAuthClaudeSDK = "claude-sdk"
+	DefaultChatGPTAPI     = "https://chatgpt.com/backend-api/codex"
+)
+
+// NormalizeProviderAuth trims and lowercases an auth kind, mapping empty to key.
+func NormalizeProviderAuth(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", ProviderAuthKey:
+		return ProviderAuthKey
+	case ProviderAuthChatGPT:
+		return ProviderAuthChatGPT
+	case ProviderAuthClaudeSDK:
+		return ProviderAuthClaudeSDK
+	default:
+		return ""
+	}
 }
 
 // delegationYAML is the on-disk delegation section shape. Unknown keys are
@@ -125,6 +152,8 @@ func applyDelegation(cfg *Config, doc documentYAML, providers map[string]provide
 
 // resolveProviderEndpoints retains every declared provider's transport so a
 // delegate turn can dial a non-default provider at dispatch time. Resolution
+// resolveProviderEndpoints retains every declared provider's transport so a
+// delegate turn can dial a non-default provider at dispatch time. Resolution
 // is best-effort and never fails validation: unusable entries are skipped
 // (a delegation naming one fails closed at dispatch instead), so dormant
 // providers keep today's load behavior exactly.
@@ -137,6 +166,43 @@ func resolveProviderEndpoints(providers map[string]providerYAML) map[string]Prov
 	sort.Strings(names)
 	for _, name := range names {
 		provider := providers[name]
+		kind := NormalizeProviderAuth(provider.Auth)
+		if kind == "" {
+			continue
+		}
+		if kind == ProviderAuthClaudeSDK {
+			if provider.Key != nil {
+				continue
+			}
+			api := strings.TrimSpace(provider.API)
+			if api != "" {
+				endpoint, err := url.Parse(api)
+				if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+					continue
+				}
+				endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
+				out[name] = ProviderEndpoint{URL: endpoint.String(), AuthKind: kind}
+				continue
+			}
+			out[name] = ProviderEndpoint{AuthKind: kind}
+			continue
+		}
+		if kind == ProviderAuthChatGPT {
+			if provider.Key != nil {
+				continue
+			}
+			api := strings.TrimSpace(provider.API)
+			if api == "" {
+				api = DefaultChatGPTAPI
+			}
+			endpoint, err := url.Parse(api)
+			if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+				continue
+			}
+			endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
+			out[name] = ProviderEndpoint{URL: endpoint.String(), AuthKind: kind}
+			continue
+		}
 		endpoint, err := url.Parse(strings.TrimSpace(provider.API))
 		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
 			continue
@@ -146,7 +212,7 @@ func resolveProviderEndpoints(providers map[string]providerYAML) map[string]Prov
 		if provider.Key != nil {
 			key = *provider.Key
 		}
-		out[name] = ProviderEndpoint{URL: endpoint.String(), APIKey: key}
+		out[name] = ProviderEndpoint{URL: endpoint.String(), APIKey: key, AuthKind: ProviderAuthKey}
 	}
 	return out
 }

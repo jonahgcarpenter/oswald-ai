@@ -20,6 +20,7 @@ func modelViewFor(profile *config.Config) agent.View {
 			Provider:   profile.LLMGatewayProvider,
 			URL:        profile.LLMGatewayURL,
 			APIKey:     profile.LLMGatewayAPIKey,
+			AuthKind:   profile.LLMGatewayAuthKind,
 			VirtualKey: profile.LLMGatewayVirtualKey,
 		},
 		Endpoints: profile.ProviderEndpoints,

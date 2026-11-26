@@ -115,7 +115,9 @@ func explicitDelegationRouting(cfg *config.Config) bool {
 // resolveExplicitTarget applies the explicit delegation overrides: model and
 // provider fall back to the gateway fields when unset, a named provider
 // supplies its own endpoint and key, and base_url overrides only the endpoint
-// while keeping that provider's key.
+// while keeping that provider's key. Subscription providers (chatgpt-oauth,
+// claude-sdk) need no static key; their clients resolve credentials at
+// request time from the subscription session.
 func (m *Manager) resolveExplicitTarget(cfg *config.Config) (model, provider, url string, client llm.Chatter, err error) {
 	model = strings.TrimSpace(cfg.DelegationModel)
 	if model == "" {
@@ -127,18 +129,26 @@ func (m *Manager) resolveExplicitTarget(cfg *config.Config) (model, provider, ur
 	}
 	url = strings.TrimSpace(cfg.LLMGatewayURL)
 	key := strings.TrimSpace(cfg.LLMGatewayAPIKey)
+	authKind := strings.TrimSpace(cfg.LLMGatewayAuthKind)
 	if name := strings.TrimSpace(cfg.DelegationProvider); name != "" {
 		ep, ok := cfg.ProviderEndpoints[name]
 		if !ok {
 			return "", "", "", nil, fmt.Errorf("delegate: provider %q has no usable endpoint", name)
 		}
-		if strings.TrimSpace(ep.URL) == "" {
-			return "", "", "", nil, fmt.Errorf("delegate: provider %q has no usable endpoint", name)
-		}
-		url = ep.URL
-		key = strings.TrimSpace(ep.APIKey)
-		if key == "" {
-			return "", "", "", nil, fmt.Errorf("delegate: provider %q has no credential configured", name)
+		if strings.TrimSpace(ep.AuthKind) == config.ProviderAuthClaudeSDK {
+			url = strings.TrimSpace(ep.URL)
+			key = ""
+			authKind = ep.AuthKind
+		} else {
+			if strings.TrimSpace(ep.URL) == "" {
+				return "", "", "", nil, fmt.Errorf("delegate: provider %q has no usable endpoint", name)
+			}
+			url = ep.URL
+			key = strings.TrimSpace(ep.APIKey)
+			authKind = strings.TrimSpace(ep.AuthKind)
+			if key == "" && authKind != config.ProviderAuthChatGPT && authKind != config.ProviderAuthClaudeSDK {
+				return "", "", "", nil, fmt.Errorf("delegate: provider %q has no credential configured", name)
+			}
 		}
 	}
 	if base := strings.TrimSpace(cfg.DelegationBaseURL); base != "" {
@@ -147,13 +157,13 @@ func (m *Manager) resolveExplicitTarget(cfg *config.Config) (model, provider, ur
 	if model == "" {
 		return "", "", "", nil, fmt.Errorf("delegate: no model configured")
 	}
-	if strings.TrimSpace(url) == "" {
+	if strings.TrimSpace(url) == "" && authKind != config.ProviderAuthClaudeSDK {
 		return "", "", "", nil, fmt.Errorf("delegate: no endpoint configured")
 	}
-	if key == "" && !m.reusesParentTransport(cfg, url, key) {
+	if key == "" && authKind != config.ProviderAuthChatGPT && authKind != config.ProviderAuthClaudeSDK && !m.reusesParentTransport(cfg, url, key) {
 		return "", "", "", nil, fmt.Errorf("delegate: no credential configured")
 	}
-	client, err = m.clientFor(cfg, url, key)
+	client, err = m.clientFor(cfg, provider, config.ProviderEndpoint{URL: url, APIKey: key, AuthKind: authKind})
 	if err != nil {
 		return "", "", "", nil, err
 	}
@@ -164,7 +174,7 @@ func (m *Manager) resolveExplicitTarget(cfg *config.Config) (model, provider, ur
 // delegate's own provider map. ok=false means the parent model was empty after
 // trim, so the caller falls through to the default path; an unknown provider
 // or unusable endpoint is an error so a pinned turn never silently runs
-// somewhere else.
+// somewhere else. Subscription endpoints resolve without a static key.
 func (m *Manager) resolveParentTarget(cfg *config.Config, parent requestctx.ParentModel) (model, provider, url string, client llm.Chatter, ok bool, err error) {
 	model = strings.TrimSpace(parent.Model)
 	provider = strings.TrimSpace(parent.Provider)
@@ -172,34 +182,38 @@ func (m *Manager) resolveParentTarget(cfg *config.Config, parent requestctx.Pare
 		return "", "", "", nil, false, nil
 	}
 	endpoint, found := cfg.ProviderEndpoints[provider]
-	if !found || strings.TrimSpace(endpoint.URL) == "" {
+	if !found {
 		return "", "", "", nil, false, fmt.Errorf("delegate: provider %q has no usable endpoint", provider)
 	}
-	client, err = m.clientFor(cfg, endpoint.URL, strings.TrimSpace(endpoint.APIKey))
+	if strings.TrimSpace(endpoint.URL) == "" && strings.TrimSpace(endpoint.AuthKind) != config.ProviderAuthClaudeSDK {
+		return "", "", "", nil, false, fmt.Errorf("delegate: provider %q has no usable endpoint", provider)
+	}
+	client, err = m.clientFor(cfg, provider, config.ProviderEndpoint{URL: strings.TrimSpace(endpoint.URL), APIKey: strings.TrimSpace(endpoint.APIKey), AuthKind: strings.TrimSpace(endpoint.AuthKind)})
 	if err != nil {
 		return "", "", "", nil, false, err
 	}
-	return model, provider, endpoint.URL, client, true, nil
+	return model, provider, strings.TrimSpace(endpoint.URL), client, true, nil
 }
 
 // resolveDefaultTarget mirrors the parent's gateway fields, the pre-router
 // behavior. Keyless endpoints are rejected unless the transport is the
-// construction-pinned parent client.
+// construction-pinned parent client or a subscription transport.
 func (m *Manager) resolveDefaultTarget(cfg *config.Config) (model, provider, url string, client llm.Chatter, err error) {
 	model = strings.TrimSpace(cfg.LLMGatewayModel)
 	provider = strings.TrimSpace(cfg.LLMGatewayProvider)
 	url = strings.TrimSpace(cfg.LLMGatewayURL)
 	key := strings.TrimSpace(cfg.LLMGatewayAPIKey)
+	authKind := strings.TrimSpace(cfg.LLMGatewayAuthKind)
 	if model == "" {
 		return "", "", "", nil, fmt.Errorf("delegate: no model configured")
 	}
-	if strings.TrimSpace(url) == "" {
+	if strings.TrimSpace(url) == "" && authKind != config.ProviderAuthClaudeSDK {
 		return "", "", "", nil, fmt.Errorf("delegate: no endpoint configured")
 	}
-	if key == "" && !m.reusesParentTransport(cfg, url, key) {
+	if key == "" && authKind != config.ProviderAuthChatGPT && authKind != config.ProviderAuthClaudeSDK && !m.reusesParentTransport(cfg, url, key) {
 		return "", "", "", nil, fmt.Errorf("delegate: no credential configured")
 	}
-	client, err = m.clientFor(cfg, url, key)
+	client, err = m.clientFor(cfg, provider, config.ProviderEndpoint{URL: url, APIKey: key, AuthKind: authKind})
 	if err != nil {
 		return "", "", "", nil, err
 	}
@@ -215,18 +229,21 @@ func (m *Manager) reusesParentTransport(cfg *config.Config, url, key string) boo
 }
 
 // clientFor returns the pinned parent client for the parent transport, else a
-// client cached by URL and key. Keyless endpoints cache under their own key.
-func (m *Manager) clientFor(cfg *config.Config, url, key string) (llm.Chatter, error) {
+// client cached by provider, URL, key, and auth kind. Subscription providers
+// with the same URL stay distinct by provider name so token stores never mix.
+func (m *Manager) clientFor(cfg *config.Config, provider string, endpoint config.ProviderEndpoint) (llm.Chatter, error) {
+	url := strings.TrimSpace(endpoint.URL)
+	key := strings.TrimSpace(endpoint.APIKey)
 	if m.reusesParentTransport(cfg, url, key) {
 		return m.parentClient, nil
 	}
-	cacheKey := url + "\x00" + key
+	cacheKey := provider + "\x00" + url + "\x00" + key + "\x00" + strings.TrimSpace(endpoint.AuthKind)
 	m.clientsMu.Lock()
 	defer m.clientsMu.Unlock()
 	if client, ok := m.clients[cacheKey]; ok {
 		return client, nil
 	}
-	client := m.newClient(url, key, m.vkey, m.log)
+	client := m.newClient(provider, config.ProviderEndpoint{URL: url, APIKey: key, AuthKind: strings.TrimSpace(endpoint.AuthKind)}, m.vkey, m.log)
 	if client == nil {
 		return nil, fmt.Errorf("delegate: client construction failed")
 	}

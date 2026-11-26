@@ -34,6 +34,7 @@ type Config struct {
 	LLMGatewayModel          string
 	LLMGatewayProvider       string
 	LLMGatewayAPIKey         string
+	LLMGatewayAuthKind       string
 	LLMGatewayVirtualKey     string
 	ModelContextWindow       int
 	BraveAPIKey              string

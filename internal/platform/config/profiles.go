@@ -71,8 +71,9 @@ var webhookPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,127}$`)
 var webhookCallbackLabelRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
 type providerYAML struct {
-	API string  `yaml:"api"`
-	Key *string `yaml:"key"`
+	API  string  `yaml:"api"`
+	Key  *string `yaml:"key"`
+	Auth string  `yaml:"auth"`
 }
 type modelYAML struct {
 	Provider      *string `yaml:"provider"`
@@ -567,16 +568,52 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		return configErr("config_model_provider_invalid", "model.provider")
 	}
 	cfg.LLMGatewayProvider = providerName
-	endpoint, err := url.Parse(provider.API)
-	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")
+	kind := NormalizeProviderAuth(provider.Auth)
+	if kind == "" {
+		return configErr("config_model_provider_invalid", "providers."+providerName+".auth")
 	}
-	// The LLM transport appends /v1 routes itself.
-	endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
-	cfg.LLMGatewayURL = endpoint.String()
-	cfg.LLMGatewayAPIKey, err = credential(provider.Key, provider.Key != nil)
-	if err != nil {
-		return withConfigPath(err, "providers."+providerName+".key")
+	if (kind == ProviderAuthChatGPT || kind == ProviderAuthClaudeSDK) && provider.Key != nil {
+		return configErr("config_value_invalid", "providers."+providerName+".key")
+	}
+	cfg.LLMGatewayAuthKind = kind
+	var err error
+	if kind == ProviderAuthClaudeSDK {
+		api := strings.TrimSpace(provider.API)
+		if api != "" {
+			endpoint, err := url.Parse(api)
+			if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+				return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")
+			}
+			endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
+			cfg.LLMGatewayURL = endpoint.String()
+		} else {
+			cfg.LLMGatewayURL = ""
+		}
+		cfg.LLMGatewayAPIKey = ""
+	} else if kind == ProviderAuthChatGPT {
+		api := strings.TrimSpace(provider.API)
+		if api == "" {
+			api = DefaultChatGPTAPI
+		}
+		endpoint, err := url.Parse(api)
+		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")
+		}
+		endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
+		cfg.LLMGatewayURL = endpoint.String()
+		cfg.LLMGatewayAPIKey = ""
+	} else {
+		endpoint, err := url.Parse(provider.API)
+		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")
+		}
+		// The LLM transport appends /v1 routes itself.
+		endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
+		cfg.LLMGatewayURL = endpoint.String()
+		cfg.LLMGatewayAPIKey, err = credential(provider.Key, provider.Key != nil)
+		if err != nil {
+			return withConfigPath(err, "providers."+providerName+".key")
+		}
 	}
 	if strings.TrimSpace(cfg.LLMGatewayModel) == "" || cfg.ModelContextWindow < 0 {
 		return configErr("config_model_invalid", "model")
