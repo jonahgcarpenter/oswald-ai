@@ -212,14 +212,18 @@ func TestReadFileRedirectsMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := workspace.NewWorkspace(wsRoot, "alice")
-	for _, name := range []string{"clip.mp4", "funny.gif", "voice.mp3"} {
+	for name, want := range map[string]string{
+		"clip.mp4":  "video_analyze",
+		"funny.gif": "vision_analyze",
+		"voice.mp3": "ffprobe",
+	} {
 		if err := os.WriteFile(filepath.Join(wsRoot, name), []byte("media bytes"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		read := NewReadFileHandler(ws)
 		_, err := read(testContext("req-media"), map[string]interface{}{"path": name})
-		if err == nil || !strings.Contains(err.Error(), "terminal ffmpeg") {
-			t.Fatalf("%s read = %v, want ffmpeg recipe redirect", name, err)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s read = %v, want %q redirect", name, err, want)
 		}
 	}
 }

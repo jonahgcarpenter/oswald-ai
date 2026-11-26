@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"reflect"
@@ -21,6 +22,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
+	videonalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/video_analyze"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
@@ -104,9 +106,15 @@ func TestRegisterCatalogOmitsRemovedMemoryTools(t *testing.T) {
 }
 
 func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
+	// Pin the ffmpeg gate present so the advertised inventory never depends
+	// on host binaries.
+	oldLookPath := videoBinaryLookPath
+	videoBinaryLookPath = func(string) (string, error) { return "/synthetic/ffmpeg", nil }
+	defer func() { videoBinaryLookPath = oldLookPath }()
 	reg := newTestRegistry(t, testConfig())
 	want := map[string]bool{
 		visionanalyze.Name: true,
+		videonalyze.Name:   true,
 		websearch.Name:     true,
 		toolmemory.Name:    true,
 		toolskill.Name:     true,
@@ -149,6 +157,27 @@ func TestVisionRegisteredWithoutComfyUIAndUsesTextHistory(t *testing.T) {
 	}
 	if reg.HasHandler(imagegenerate.Name) {
 		t.Fatal("vision registration enabled unconfigured image generation")
+	}
+}
+
+func TestVideoRegisteredWithBinariesAndDisabledWithout(t *testing.T) {
+	var errFakeBinaryMissing = errors.New("synthetic binary not found")
+	old := videoBinaryLookPath
+	defer func() { videoBinaryLookPath = old }()
+	videoBinaryLookPath = func(string) (string, error) { return "/synthetic/ffmpeg", nil }
+	present := newTestRegistry(t, &config.Config{})
+	tool, visible := visibleTestTool(present, videonalyze.Name)
+	policy, configured := present.Policy(videonalyze.Name)
+	if !visible || !configured || !present.HasHandler(videonalyze.Name) || len(tool.Function.Parameters.Properties) != 4 || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
+		t.Fatal("video tool was not registered with searchable text history")
+	}
+	videoBinaryLookPath = func(string) (string, error) { return "", errFakeBinaryMissing }
+	absent := newTestRegistry(t, &config.Config{})
+	if _, shown := visibleTestTool(absent, videonalyze.Name); shown || absent.HasHandler(videonalyze.Name) {
+		t.Fatal("video tool advertised without ffmpeg")
+	}
+	if _, shown := visibleTestTool(absent, visionanalyze.Name); !shown {
+		t.Fatal("missing ffmpeg disabled vision alongside video")
 	}
 }
 

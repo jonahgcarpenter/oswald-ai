@@ -20,6 +20,7 @@ var coreTools = []string{
 	"web_search",
 	"image_generate",
 	"vision_analyze",
+	"video_analyze",
 	"browser_navigate",
 	"browser_snapshot",
 	"browser_click",

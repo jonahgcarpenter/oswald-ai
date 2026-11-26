@@ -80,9 +80,10 @@ Media in: at most 4 images, 10 MiB each (JPEG/PNG/WebP/HEIC/HEIF/BMP/TIFF), norm
 GIF/video/audio (GIF/MP4/WebM/MOV/M4V/MKV/MP3/M4A/AAC/WAV/OGG/OGA/OPUS/FLAC/CAF/WMA) plus a
 catch-all bucket for any other bounded attachment (≤4 per message, 25 MiB each, 60 MiB total).
 Raw bytes and normalized image pins share the private `cache/media/` (0700, 24h sweep); the prompt carries the cache path
-plus best-effort duration/dimensions from one bounded ffprobe. The agent inspects AV files itself
-with its sandbox ffmpeg (frames → `cache/scratch` → `vision_analyze`; audio can be probed,
-trimmed, and transcoded but there is no listening or transcription capability), and opens
+plus best-effort duration/dimensions from one bounded ffprobe. The model inspects video
+with the `video_analyze` tool (built-in frame sampling, up to 8 frames as native images or
+labeled contact sheets) and GIF first frames with `vision_analyze`; audio can be probed,
+trimmed, and transcoded with sandbox ffmpeg but there is no listening or transcription capability, and the agent opens
 catch-all attachments with terminal tools. Link-shared GIFs (Discord gifv embeds) use the AV lane;
 a failed media download falls back to the static embed preview. Orientation is corrected before
 resize — all eight EXIF orientations for JPEG/EXIF-bearing PNG/WebP, ordered `irot`/`imir` for
@@ -98,8 +99,8 @@ are stripped before history and the text-only API.
 
 Cache files expire after 24 hours and are never reconstructed from SQLite — expired previews stay
 expired. Source decoding precedes resize, but the bounds don't guarantee strict peak decoded-memory
-limits. There are no general file or audio inputs; inbound GIF/video rides the media lane (raw
-cache + agent ffmpeg) instead of inline vision, and gateway tool previews stay suppressed:
+limits. There are no general file or audio inputs; inbound video rides the media lane
+(raw cache) into the `video_analyze` tool and GIF first frames ride `vision_analyze`, while gateway tool previews stay suppressed:
 follow-ups use text-only tool history.
 
 ## Tests

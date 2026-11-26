@@ -190,11 +190,12 @@ func MediaContextNote(doc DocumentRef) string {
 	return fmt.Sprintf("[%s attached at: %s ('%s'%s)]", kind, strings.TrimSpace(doc.Path), name, detail)
 }
 
-// MediaRecipeNote tells the model how to inspect media itself: the sandbox
-// has ffmpeg/ffprobe and vision_analyze accepts workspace frames. Audio is
-// honest about the missing capability — there is no listening or
+// MediaRecipeNote tells the model how to inspect media itself: video goes
+// through video_analyze (frame sampling built in), GIFs through
+// vision_analyze (first frame), audio keeps the terminal ffmpeg recipe.
+// Audio is honest about the missing capability — there is no listening or
 // transcription tool.
-const MediaRecipeNote = "[Media is not inlined. Video/GIF: extract frames from the attached cache path with terminal ffmpeg into cache/scratch (for example: ffmpeg -i <path> -vf fps=1/2 ~/cache/scratch/frame-%d.jpg), then vision_analyze the frames. Audio: use ffprobe for metadata and ffmpeg to trim/transcode; you cannot listen to audio or transcribe it. ffprobe also gives codec and timing details.]"
+const MediaRecipeNote = "[Media is not inlined. Video: use video_analyze (it samples frames for you); GIF: vision_analyze loads the first frame. Audio: use ffprobe for metadata and ffmpeg to trim/transcode; you cannot listen to audio or transcribe it. ffprobe also gives codec and timing details.]"
 
 // DocumentsNote joins per-file notes for the current turn, appending the
 // media recipe once when any AV media is present.

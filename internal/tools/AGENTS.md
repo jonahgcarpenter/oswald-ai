@@ -46,6 +46,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
 - `web_search` — query ≤400 runes/50 words, ≤100 results requested (default 5), 16 KiB
   model envelope with tracking-stripped destinations.
 - `vision_analyze` — question ≤2,000 runes, optional 4-int region, cached-or-URL sources.
+- `video_analyze` — question ≤2,000 runes; source is a managed media path, jailed absolute workspace video, or public HTTPS URL (no data URLs); `frames` 1–8 (default 4, evenly spaced) or `timestamps` 1–8 explicit seconds (wins over frames); >4 frames arrive as labeled 2×2 contact sheets so newest-4 retention never drops content. Result text lists sampled timestamps plus a motion/audio caveat.
 - `image_generate` — prompt ≤2,000 runes, fixed landscape/square/portrait ratios, HTTPS or
   cached-cache sources only; previews are request-local, durable history keeps text.
 - `browser_*` — eleven local-headless tools (`browser/` leaf package): `navigate` opens a URL
