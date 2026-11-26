@@ -34,16 +34,16 @@ func subscriptionClientFor(profileRoot, provider string, endpoint config.Provide
 	}
 }
 
-// subscriptionListModels fetches one provider's listing. ChatGPT tries the
-// live listing with subscription auth and falls back to its static catalog;
-// Claude stays on its static catalog gated on CLI login; key providers use
-// the gateway listing.
+// subscriptionListModels fetches one provider's listing. ChatGPT requires an
+// authorized subscription and degrades otherwise; authorized providers fall
+// back to the static catalog when the live listing fails. Claude stays on
+// its static catalog gated on CLI login; key providers use the gateway.
 func subscriptionListModels(ctx context.Context, profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) ([]llm.ModelEntry, error) {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
 		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil)
 		if err != nil {
-			return chatgpt.StaticModels(), nil
+			return nil, err
 		}
 		return client.ListModels(ctx)
 	case config.ProviderAuthClaudeSDK:

@@ -54,18 +54,18 @@ func testCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		}
 		tokens, ok, err := store.Load(ctx)
 		if err != nil || !ok || strings.TrimSpace(tokens.AccessToken) == "" {
-			fmt.Fprintf(stdout, "%s: not authorized (run \"oswald providers auth %s\")\n", name, name)
+			fmt.Fprintf(stdout, "%s: not authorized (run \"oswald providers auth start %s\")\n", name, name)
 			return exitOK
 		}
 		if chatgpt.Expired(tokens, time.Now()) && strings.TrimSpace(tokens.RefreshToken) == "" {
-			fmt.Fprintf(stdout, "%s: expired (run \"oswald providers auth %s\")\n", name, name)
+			fmt.Fprintf(stdout, "%s: expired (run \"oswald providers auth start %s\")\n", name, name)
 			return exitOK
 		}
 		fmt.Fprintf(stdout, "%s: authorized\n", name)
 		return exitOK
 	case config.ProviderAuthClaudeSDK:
 		if _, err := claude.Check(ctx); err != nil {
-			fmt.Fprintf(stdout, "%s: not logged in (run \"claude auth login\")\n", name)
+			fmt.Fprintf(stdout, "%s: not logged in (run \"claude auth login\" on the host, or \"claude setup-token\" headless)\n", name)
 			return exitOK
 		}
 		fmt.Fprintf(stdout, "%s: logged in\n", name)

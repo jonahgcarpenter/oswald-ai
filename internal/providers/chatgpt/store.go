@@ -113,6 +113,8 @@ func NewStore(profileRoot, provider string) (*Store, error) {
 
 func (s *Store) path() string { return filepath.Join(s.dir, "auth.json") }
 
+func (s *Store) pendingPath() string { return filepath.Join(s.dir, "pending.json") }
+
 func (s *Store) lockPath() string { return filepath.Join(s.dir, "auth.lock") }
 
 func (s *Store) locked(ctx context.Context, fn func() error) error {
@@ -192,6 +194,122 @@ func (s *Store) Clear(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// PendingAuth is the in-flight browser handoff state: the model starts it,
+// the user completes the browser step, and the model finishes the exchange.
+// It carries no secret, only the PKCE verifier needed to redeem the code.
+type PendingAuth struct {
+	Verifier    string `json:"verifier"`
+	State       string `json:"state"`
+	RedirectURI string `json:"redirect_uri"`
+	ExpiresAt   int64  `json:"expires_at"`
+}
+
+// SavePending records a started handoff, replacing any previous one.
+func (s *Store) SavePending(ctx context.Context, pending PendingAuth) error {
+	if strings.TrimSpace(pending.Verifier) == "" || strings.TrimSpace(pending.State) == "" {
+		return errors.New("pending authorization is incomplete")
+	}
+	return s.locked(ctx, func() error { return writePending(s.pendingPath(), pending) })
+}
+
+// LoadPending returns the in-flight handoff, or false when none was started.
+func (s *Store) LoadPending(ctx context.Context) (PendingAuth, bool, error) {
+	var out PendingAuth
+	var ok bool
+	if err := s.locked(ctx, func() error {
+		pending, found, err := readPending(s.pendingPath())
+		if err != nil || !found {
+			return err
+		}
+		out, ok = pending, true
+		return nil
+	}); err != nil {
+		return PendingAuth{}, false, err
+	}
+	if !ok {
+		return PendingAuth{}, false, nil
+	}
+	return out, true, nil
+}
+
+// ClearPending discards the in-flight handoff.
+func (s *Store) ClearPending(ctx context.Context) error {
+	return s.locked(ctx, func() error {
+		if err := os.Remove(s.pendingPath()); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	})
+}
+
+// PendingExpired reports whether a handoff is past its deadline.
+func PendingExpired(pending PendingAuth, now time.Time) bool {
+	if pending.ExpiresAt <= 0 {
+		return true
+	}
+	return !time.Unix(pending.ExpiresAt, 0).After(now)
+}
+
+func readPending(path string) (PendingAuth, bool, error) {
+	var zero PendingAuth
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return zero, false, nil
+		}
+		return zero, false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return zero, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return zero, false, fmt.Errorf("provider file %s is not private", filepath.Base(path))
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxFileBytes)+1))
+	if err != nil {
+		return zero, false, err
+	}
+	if len(data) > maxFileBytes {
+		return zero, false, fmt.Errorf("provider file %s exceeds size limit", filepath.Base(path))
+	}
+	var value PendingAuth
+	if err := json.Unmarshal(data, &value); err != nil {
+		return zero, false, fmt.Errorf("provider file %s is invalid", filepath.Base(path))
+	}
+	return value, true, nil
+}
+
+func writePending(path string, value PendingAuth) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func readFile(path string) (TokenSet, bool, error) {
@@ -279,7 +397,7 @@ func RepairProfile(profileRoot string) {
 		} else if info.Mode().Perm()&0077 != 0 {
 			_ = os.Chmod(dir, 0700)
 		}
-		for _, name := range []string{"auth.json", "auth.lock"} {
+		for _, name := range []string{"auth.json", "auth.lock", "pending.json"} {
 			p := filepath.Join(dir, name)
 			if info, err := os.Lstat(p); err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 				continue

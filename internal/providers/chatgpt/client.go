@@ -162,11 +162,13 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.Chat
 }
 
 // ListModels tries the live listing with subscription auth and falls back to
-// the static catalog so /model stays usable offline.
+// the static catalog when the provider is authorized but the live listing
+// fails. Unauthorized providers report an error so listings degrade instead
+// of advertising models that cannot run.
 func (c *Client) ListModels(ctx context.Context) ([]llm.ModelEntry, error) {
 	tokens, err := c.ensureToken(ctx)
 	if err != nil {
-		return StaticModels(), nil
+		return nil, err
 	}
 	models, err := c.gateway(tokens).ListModels(ctx)
 	if err != nil || len(models) == 0 {

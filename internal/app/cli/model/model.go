@@ -212,14 +212,15 @@ type providerModels struct {
 	unavailable bool
 }
 
-// subscriptionModels resolves one provider's listing: subscription catalogs
-// stay usable offline, key providers use the live gateway listing.
+// subscriptionModels resolves one provider's listing: unauthorized ChatGPT
+// subscriptions degrade instead of advertising models that cannot run; key
+// providers use the live gateway listing.
 func subscriptionModels(ctx context.Context, active *config.Config, name string, endpoint config.ProviderEndpoint) ([]llm.ModelEntry, error) {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
 		client, err := chatgpt.NewClient(endpoint.URL, active.ProfileRoot, name, active.LLMGatewayVirtualKey, nil)
 		if err != nil {
-			return chatgpt.StaticModels(), nil
+			return nil, err
 		}
 		return client.ListModels(ctx)
 	case config.ProviderAuthClaudeSDK:

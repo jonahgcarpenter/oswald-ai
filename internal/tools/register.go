@@ -270,14 +270,14 @@ func sortedEndpointNames(endpoints map[string]config.ProviderEndpoint) []string 
 }
 
 // subscriptionListing resolves one provider's model listing for validation.
-// Subscription catalogs stay usable offline; key providers use the live
-// gateway listing.
+// Unauthorized ChatGPT subscriptions degrade instead of advertising models
+// that cannot run; key providers use the live gateway listing.
 func subscriptionListing(ctx context.Context, profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) ([]llm.ModelEntry, error) {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
 		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil)
 		if err != nil {
-			return chatgpt.StaticModels(), nil
+			return nil, err
 		}
 		return client.ListModels(ctx)
 	case config.ProviderAuthClaudeSDK:

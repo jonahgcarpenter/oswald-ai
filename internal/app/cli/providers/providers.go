@@ -51,9 +51,15 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		case "test":
 			fmt.Fprintln(stdout, testUsage)
 			return exitOK
+		case "status":
+			fmt.Fprintln(stdout, statusUsage)
+			return exitOK
+		case "logout":
+			fmt.Fprintln(stdout, logoutUsage)
+			return exitOK
 		}
 	}
-	target, err := resolveTarget(root, profile, !(rest[0] == "list" || rest[0] == "show" || rest[0] == "test"))
+	target, err := resolveTarget(root, profile, !(rest[0] == "list" || rest[0] == "show" || rest[0] == "test" || rest[0] == "status"))
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -83,6 +89,10 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		return authCmd(target, rest[1:], stdout, stderr)
 	case "test":
 		return testCmd(target, rest[1:], stdout, stderr)
+	case "status":
+		return statusCmd(target, rest[1:], stdout, stderr)
+	case "logout":
+		return logoutCmd(target, rest[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		providersUsage(stdout)
 		return exitOK
@@ -100,19 +110,26 @@ const (
 	showUsage   = "usage: oswald providers show <name> [--profile NAME]"
 	addUsage    = "usage: oswald providers add <name> --api URL [--key REF] [--auth key|chatgpt-oauth|claude-sdk] [--profile NAME]"
 	removeUsage = "usage: oswald providers remove <name> [--profile NAME]"
-	authUsage   = "usage: oswald providers auth <name> [--no-browser] [--timeout DURATION] [--profile NAME]"
+	authUsage   = "usage: oswald providers auth <name> [--no-browser] [--timeout DURATION] [--profile NAME]\n       oswald providers auth start <name> [--timeout DURATION] [--profile NAME]\n       oswald providers auth finish <name> <code|url> [--profile NAME]"
 	testUsage   = "usage: oswald providers test <name> [--profile NAME]"
+	statusUsage = "usage: oswald providers status [--profile NAME]"
+	logoutUsage = "usage: oswald providers logout <name> [--profile NAME]"
 )
 
 func providersUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald providers [--profile NAME] <list|show|add|remove|auth|test> [options]")
+	fmt.Fprintln(w, "usage: oswald providers [--profile NAME] <list|show|add|remove|auth|test|status|logout> [options]")
 	fmt.Fprintln(w, "  list                  provider names with api host, key redacted")
 	fmt.Fprintln(w, "  show <name>           one provider entry, key redacted")
 	fmt.Fprintln(w, "  add <name> --api URL [--key REF] [--auth KIND]")
 	fmt.Fprintln(w, "                        add a provider through staged validation")
 	fmt.Fprintln(w, "  remove <name>         remove a provider not referenced by model.provider")
 	fmt.Fprintln(w, "  auth <name>           authorize a ChatGPT subscription (browser OAuth)")
+	fmt.Fprintln(w, "  auth start <name>     start a model-led handoff, print the sign-in URL")
+	fmt.Fprintln(w, "  auth finish <name> <code|url>")
+	fmt.Fprintln(w, "                        complete the handoff with the pasted browser response")
 	fmt.Fprintln(w, "  test <name>           check a subscription provider login")
+	fmt.Fprintln(w, "  status                auth state for every provider")
+	fmt.Fprintln(w, "  logout <name>         forget a ChatGPT subscription login")
 }
 
 type target struct {
