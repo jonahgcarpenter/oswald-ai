@@ -10,6 +10,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
 
@@ -85,9 +86,36 @@ type summarizerTurnPayload struct {
 	Batches   []memory.ToolHistoryBatch `json:"tool_batches,omitempty"`
 }
 
-// Summarize dumps the full session as JSON into one background chat call with
-// zero tools and returns trimmed markdown. No size cap is enforced.
-func SummarizeWithClient(ctx context.Context, client llm.Chatter, model string, turns []memory.SessionTurn) (string, *llm.ChatResponse, error) {
+// SplitKeepTail divides newest-first turns into a verbatim keep window and
+// summarization candidates (opencode keep.tokens parity). kept holds the
+// newest turns fitting keepTokens; candidates holds the rest (older). The
+// single newest turn is always kept so context is never empty. Empty input
+// yields nil, nil; input fitting the budget yields all kept, nil candidates.
+func SplitKeepTail(turns []memory.SessionTurn, keepTokens int) (kept, candidates []memory.SessionTurn) {
+	if len(turns) == 0 {
+		return nil, nil
+	}
+	total := 0
+	for i, turn := range turns {
+		if i > 0 {
+			size := tokenbudget.EstimateRequest(memory.SessionTurnMessages(turn), nil)
+			if total+size > keepTokens {
+				return turns[:i], turns[i:]
+			}
+			total += size
+		} else {
+			total += tokenbudget.EstimateRequest(memory.SessionTurnMessages(turn), nil)
+		}
+	}
+	return turns, nil
+}
+
+// Summarize dumps the session turns as JSON into one background chat call with
+// zero tools and returns trimmed markdown. Tool results ride projected
+// (head+tail with a marker). When previous holds the cached summary, it is
+// fed in as the base to update so compactions extend the summary instead of
+// replacing it. No size cap is enforced.
+func SummarizeWithClient(ctx context.Context, client llm.Chatter, model string, turns []memory.SessionTurn, previous string) (string, *llm.ChatResponse, error) {
 	if client == nil || strings.TrimSpace(model) == "" {
 		return "", nil, fmt.Errorf("markdown summarizer is unavailable")
 	}
@@ -101,18 +129,32 @@ func SummarizeWithClient(ctx context.Context, client llm.Chatter, model string, 
 
 	payload := make([]summarizerTurnPayload, 0, len(turns))
 	for _, turn := range turns {
+		batches := make([]memory.ToolHistoryBatch, 0, len(turn.ToolHistory.Batches))
+		for _, batch := range turn.ToolHistory.Batches {
+			projected := memory.ToolHistoryBatch{AssistantContent: batch.AssistantContent, Calls: make([]memory.ToolHistoryCall, 0, len(batch.Calls))}
+			for _, call := range batch.Calls {
+				call.Result = memory.ProjectToolResult(call.Result)
+				projected.Calls = append(projected.Calls, call)
+			}
+			batches = append(batches, projected)
+		}
 		payload = append(payload, summarizerTurnPayload{
 			TurnID: turn.ID, User: turn.UserText, Assistant: turn.AssistantText,
-			Tools: turn.ToolNames, Batches: turn.ToolHistory.Batches,
+			Tools: turn.ToolNames, Batches: batches,
 		})
 	}
 	encoded, err := json.Marshal(map[string]any{"turns": payload})
 	if err != nil {
 		return "", nil, fmt.Errorf("encode session for summarizer: %w", err)
 	}
+	userContent := "Full session JSON follows. Summarize it as markdown.\n" + string(encoded)
+	if strings.TrimSpace(previous) != "" {
+		userContent = "Previous summary to preserve and extend (keep its facts; update with what follows):\n" + strings.TrimSpace(previous) +
+			"\n\nNewer session turns as JSON follow. Update the summary as markdown.\n" + string(encoded)
+	}
 	messages := []llm.ChatMessage{
 		{Role: "system", Content: SummarizerSystemPrompt},
-		{Role: "user", Content: "Full session JSON follows. Summarize it as markdown.\n" + string(encoded)},
+		{Role: "user", Content: userContent},
 	}
 	resp, err := client.Chat(ctx, llm.ChatRequest{Model: strings.TrimSpace(model), Messages: messages, Stream: false}, nil)
 	if err != nil {
@@ -128,7 +170,7 @@ func SummarizeWithClient(ctx context.Context, client llm.Chatter, model string, 
 	return markdown, resp, nil
 }
 
-// Summarize dumps the full session as JSON into one background chat call with
+// Summarize dumps the session turns as JSON into one background chat call with
 // zero tools using the summarizer's pinned client and model. Prefer
 // SummarizeWithClient with the session's resolved target so compaction runs on
 // the model selected for the conversation (issue #295).
@@ -136,7 +178,7 @@ func (s *Summarizer) Summarize(ctx context.Context, turns []memory.SessionTurn) 
 	if s == nil {
 		return "", nil, fmt.Errorf("markdown summarizer is unavailable")
 	}
-	return SummarizeWithClient(ctx, s.client, s.model, turns)
+	return SummarizeWithClient(ctx, s.client, s.model, turns, "")
 }
 
 // RenderMarkdownSummary quotes markdown compaction as lower-authority

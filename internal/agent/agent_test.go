@@ -1191,23 +1191,25 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t 
 	}
 }
 
-func TestAutoCompactionExcludesNewestThreeAndFlagsRest(t *testing.T) {
+func TestAutoCompactionKeepsTokenTailAndFlagsRest(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	agent.budget = budget.ContextBudget{PromptLimit: 3000}
+	agent.budget = budget.ContextBudget{PromptLimit: 100000}
 	sum := &fakeMarkdownSummarizer{markdown: "# Summary\nEarlier turns."}
 	agent.SetMarkdownSummarizer(sum)
 	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i <= 6; i++ {
-		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, fmt.Sprintf("turn %d user", i), fmt.Sprintf("turn %d assistant", i), nil, time.Hour); err != nil {
+	const seedTurns = 150
+	for i := 1; i <= seedTurns; i++ {
+		big := strings.Repeat(fmt.Sprintf("turn-%d-", i), 140)
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, "user "+big, "assistant "+big, nil, time.Hour); err != nil {
 			t.Fatal(err)
 		}
 	}
-	before, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
-	if err != nil || len(before) != 6 {
+	before, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 500)
+	if err != nil || len(before) != seedTurns {
 		t.Fatalf("setup turns=%d err=%v", len(before), err)
 	}
 	if _, err := processAgent(agent, "req-compact", "imessage", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
@@ -1216,22 +1218,23 @@ func TestAutoCompactionExcludesNewestThreeAndFlagsRest(t *testing.T) {
 	if sum.calls != 1 {
 		t.Fatalf("compaction did not trigger: calls=%d", sum.calls)
 	}
-	if len(sum.gotIDs) != 3 {
-		t.Fatalf("summarized %d turns, want oldest 3: %v", len(sum.gotIDs), sum.gotIDs)
-	}
-	// Newest-first input: summarized IDs must be the three oldest.
-	for i, id := range sum.gotIDs {
-		if id != before[budget.ExcludedTail+i].ID {
-			t.Fatalf("summarized IDs %v, want oldest three of %v", sum.gotIDs, before)
+	oldest := before[len(before)-1].ID
+	foundOldest := false
+	for _, id := range sum.gotIDs {
+		if id == oldest {
+			foundOldest = true
 		}
 	}
-	after, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
+	if !foundOldest {
+		t.Fatalf("oldest turn %d was not summarized (no trim expected below 100%%): got %d turns", oldest, len(sum.gotIDs))
+	}
+	after, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 3 newest setup turns plus the just-completed turn remain; the 3 oldest are compacted away.
-	if len(after) != 4 {
-		t.Fatalf("context turns=%d, want 4: %+v", len(after), after)
+	// Keep tail (≈15K tokens) plus the just-completed turn remain; everything older is compacted away.
+	if len(after) <= 10 || len(after) >= seedTurns {
+		t.Fatalf("context turns=%d, want a wide keep tail, not newest-3", len(after))
 	}
 	for _, turn := range after {
 		for _, id := range sum.gotIDs {
@@ -1241,15 +1244,15 @@ func TestAutoCompactionExcludesNewestThreeAndFlagsRest(t *testing.T) {
 		}
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	if !messagesContain(messages, "compacted_session_history") || !messagesContain(messages, "turn 6 user") {
-		t.Fatalf("summary/tail missing from prompt: %+v", messages)
+	if !messagesContain(messages, "compacted_session_history") || !messagesContain(messages, fmt.Sprintf("turn-%d-", seedTurns)) {
+		t.Fatalf("summary/tail missing from prompt")
 	}
-	if messagesContain(messages, "turn 1 user") {
-		t.Fatalf("compacted turn leaked into prompt: %+v", messages)
+	if messagesContain(messages, "turn-1-") {
+		t.Fatalf("compacted turn leaked into prompt")
 	}
 }
 
-func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
+func TestProcessUsesCommittedSummaryWithKeepTail(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.SetMarkdownSummarizer(&fakeMarkdownSummarizer{markdown: "# Summary\nThe first two turns established Atlas.\n\n## Open tasks\n- Continue"})
@@ -1266,11 +1269,12 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	if len(messages) != 7 || !strings.Contains(messages[1].Content, "compacted_session_history") || !strings.Contains(messages[1].Content, "first two turns") {
+	// system + summary + 10 kept turns x2 + current = 23 messages.
+	if len(messages) != 23 || !strings.Contains(messages[1].Content, "compacted_session_history") || !strings.Contains(messages[1].Content, "first two turns") {
 		t.Fatalf("summary context missing or malformed: %+v", messages)
 	}
-	if messages[2].Content != "turn 9 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
-		t.Fatalf("recent verbatim tail is wrong: %+v", messages)
+	if messages[2].Content != "turn 1 user" || messages[len(messages)-3].Content != "turn 10 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
+		t.Fatalf("keep tail is wrong: first=%q second-last=%q last=%q", messages[2].Content, messages[len(messages)-2].Content, messages[len(messages)-1].Content)
 	}
 }
 

@@ -16,34 +16,12 @@ const CompactionTriggerPercent = 70
 // Dropped turns stay searchable via session_search.
 const TrimThresholdPercent = 100
 
-// ExcludedTail is the number of newest turns withheld from compaction input.
-// They stay verbatim in context; only older turns are summarized and flagged.
-const ExcludedTail = 3
-
-// Candidates returns the turns eligible for summarization from newest-first
-// input: all but the newest ExcludedTail. Short histories yield nil.
-func Candidates[T any](turns []T) []T {
-	if len(turns) <= ExcludedTail {
-		return nil
-	}
-	return turns[ExcludedTail:]
-}
-
-// RecentTailLimit reserves 25 percent of input for recent exchanges, bounded to
-// 2,000 through 8,000 tokens without exceeding the available input.
-func RecentTailLimit(inputLimit int) int {
-	limit := inputLimit / 4
-	if limit < 2000 {
-		limit = 2000
-	}
-	if limit > 8000 {
-		limit = 8000
-	}
-	if limit > inputLimit {
-		limit = inputLimit
-	}
-	return limit
-}
+// KeepTokens is the verbatim recent tail kept beside the compaction summary
+// (opencode keep.tokens parity). Newest turns fitting this token budget stay
+// in context; older turns are summarization candidates. Flat across models:
+// modern windows dwarf it, and the per-model 70% trigger still bounds total
+// pressure.
+const KeepTokens = 15000
 
 // ContextBudget describes the request-time prompt budget derived from the
 // active model's context window.

@@ -2,6 +2,7 @@ package compact
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
@@ -13,10 +14,12 @@ import (
 
 type sessionModelChatter struct {
 	lastModel string
+	lastMsgs  []llm.ChatMessage
 }
 
 func (c *sessionModelChatter) Chat(_ context.Context, req llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	c.lastModel = req.Model
+	c.lastMsgs = req.Messages
 	return &llm.ChatResponse{Model: req.Model, Message: llm.ChatMessage{Role: "assistant", Content: "session summary"}}, nil
 }
 
@@ -31,14 +34,8 @@ func (r *sessionModelRouter) Resolve(context.Context, string, string, string, st
 func TestCompactUsesSessionModel(t *testing.T) {
 	client := &sessionModelChatter{}
 	router := &sessionModelRouter{target: agent.Target{Model: "muse-spark-1.3", Provider: "bifrost", Client: client, BillingBaseURL: "https://example.com/v1"}}
-	store := &fakeStore{generation: 2, turns: []memory.SessionTurn{
-		{ID: 5, UserText: "n5", AssistantText: "a5"},
-		{ID: 4, UserText: "n4", AssistantText: "a4"},
-		{ID: 3, UserText: "n3", AssistantText: "a3"},
-		{ID: 2, UserText: "n2", AssistantText: "a2"},
-		{ID: 1, UserText: "n1", AssistantText: "a1"},
-	}}
-	sum := &fakeSummarizer{markdown: "# fallback"}
+	store := &fakeStore{generation: 2, turns: bigCompactTurns(20)}
+	sum := &fakeSummarizer{markdown: "# fallback", cached: "# Summary\nPrior decisions."}
 	h := New(store, sum, router)
 	result, err := h.Execute(context.Background(), commands.Request{Principal: principal(), SessionKey: "s", Raw: "/compact"})
 	if err != nil {
@@ -49,6 +46,9 @@ func TestCompactUsesSessionModel(t *testing.T) {
 	}
 	if client.lastModel != "muse-spark-1.3" {
 		t.Fatalf("compaction model = %q, want session model", client.lastModel)
+	}
+	if len(client.lastMsgs) != 2 || !strings.Contains(client.lastMsgs[1].Content, "Prior decisions.") {
+		t.Fatalf("previous summary not merged: %+v", client.lastMsgs)
 	}
 	if sum.calls != 0 {
 		t.Fatalf("fallback summarizer used: calls=%d", sum.calls)

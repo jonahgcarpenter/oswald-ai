@@ -35,7 +35,7 @@ exchanges per maintenance pass, 15-minute pending timeout, passive WAL checkpoin
   successful tool names, prompt pressure, delivery state, generated-image references.
 - `oswald:v1:summary:<sid>` (≤64 KiB) and `oswald:v1:compression:<sid>:<from>:<through>:<contract>`
   (≤64 KiB, at most 4 submissions): durable artifacts with source ranges, retry state, exact leases,
-  and provider credits. Tool history as encoded is capped at 64 KiB.
+  and provider credits. Tool history as encoded is capped at 256 KiB.
 - `oswald:v1:session_model:<source>:<session_key>` (≤1 KiB): version-1 JSON `{provider, model}`.
   Conversation-keyed so it survives `/new`; runtime-owned, never swept (deliberately absent from
   the `SweepProfile` prefix list), and changed only by setting another model.
@@ -69,17 +69,13 @@ load. Cache files expire after 24h and are never reconstructed from SQLite.
 ## Compaction (`compaction/summarizer.go`, `budget/`)
 
 70% of the usable input triggers one blocking markdown call inside the lane head:
-`SYSTEM=compaction prompt`, `USER=session JSON dump of all but the newest 3 turns`,
-zero tools, plain markdown out. Over budget (only possible after a model-window
-shrink — steady-state 70% compaction never lets prompts exceed 100%) the oldest
-turns are flagged `compacted=1` unsummarized to the 70% line first, then the
-remainder compacts normally on the session model; dropped turns stay
-searchable. On success the summarized message ranges are flagged
-`messages.compacted=1` (newest 3 stay verbatim) and the markdown is cached in memory
+`SYSTEM=compaction prompt`, `USER=previous summary (when present) plus session JSON dump of the turns older than the 15K-token keep tail`,
+zero tools, plain markdown out. The keep tail (≈15,000 newest tokens, flat across models) stays verbatim beside the summary; older turns are summarized and merged with the previous summary. Long tool results ride projected (head+tail with an explicit marker, attachments as short descriptors); the full text stays persisted and searchable. Over budget (only possible after a model-window shrink) the oldest turns beyond the keep tail are flagged `compacted=1` unsummarized to the 70% line first, then the remainder compacts normally on the session model; dropped turns stay searchable. On success the summarized message ranges are flagged
+`messages.compacted=1` (keep tail stays verbatim) and the markdown is cached in memory
 per session generation (no DDL, no size cap; restart recomputes from the transcript).
 Context reads exclude `compacted=1` rows, so prompt assembly is
-`system + markdown-user + non-compacted turns (newest-first tail) + current`.
-`/compact` forces the same call (no-op at ≤3 turns); the provider-overflow retry shares
+`system + markdown-user + keep tail + current`.
+`/compact` forces the same call (no-op when history fits the keep tail); the provider-overflow retry shares
 it. `ProfileService` only marks delivery (`Enqueue`/`MarkDeliveryFailed`); no worker,
 lease, campaign, or low-priority gate remains. Old `oswald:v1:summary/compression`
 rows are ignored, never migrated or deleted.

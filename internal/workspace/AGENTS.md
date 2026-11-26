@@ -52,7 +52,7 @@ the stdio aliases exempt.
 external modification (new files allowed; 2 MiB cap; syntax-checked). `search_files` skips
 `.git`/`node_modules`/`__pycache__` and files over 1 MiB. Never log workspace paths, contents,
 queries, or command output — native history carries 16 KiB args / 16,000 result runes per call
-within a 64 KiB aggregate trace. Spawned children never inherit the server process
+within a 256 KiB aggregate trace. Spawned children never inherit the server process
 environment: see Sandbox environment below.
 
 ## Sandbox environment (terminal, execute_code, background, cron)

@@ -90,6 +90,53 @@ func TestBridgeResultHistoryRoundTripAndReplay(t *testing.T) {
 	}
 }
 
+func TestProjectToolResultKeepsHeadAndTail(t *testing.T) {
+	for _, tc := range []string{"", "short", strings.Repeat("z", 4000)} {
+		if got := ProjectToolResult(tc); got != tc {
+			t.Fatalf("boundary result changed (len=%d)", len(tc))
+		}
+	}
+	big := strings.Repeat("x", 2000) + "MIDDLE" + strings.Repeat("y", 2000)
+	got := ProjectToolResult(big)
+	if strings.Contains(got, "MIDDLE") || !strings.Contains(got, "trimmed") {
+		t.Fatalf("projection kept the middle or lost the marker: %.120s", got)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", 1500)) || !strings.HasSuffix(got, strings.Repeat("y", 1500)) {
+		t.Fatal("projection did not keep head+tail")
+	}
+}
+
+func TestSearchProjectionTruncatesLongResults(t *testing.T) {
+	big := strings.Repeat("q", 9000) + "TAIL"
+	history := ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{Calls: []ToolHistoryCall{{
+		Name: "web_search", Status: "succeeded", Result: big, SearchResult: true,
+	}}}}}
+	text := ToolHistorySearchText(history)
+	if strings.Contains(text, strings.Repeat("q", 9000)) {
+		t.Fatal("search projection carried the full result")
+	}
+	if !strings.Contains(text, "web_search") || !strings.Contains(text, "TAIL") || !strings.Contains(text, "trimmed") {
+		t.Fatalf("search projection lost name, tail, or marker: %.200s", text)
+	}
+}
+
+func TestSessionMessagesProjectLongToolResults(t *testing.T) {
+	big := strings.Repeat("r", 9000)
+	turn := SessionTurn{ID: 3, UserText: "u", AssistantText: "a", ToolHistory: ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{Calls: []ToolHistoryCall{{
+		Name: "terminal", Status: "succeeded", Result: big, ExecutedAt: "2026-08-28T12:00:00Z",
+	}}}}}}
+	messages := SessionTurnMessages(turn)
+	if len(messages) != 4 {
+		t.Fatalf("messages=%+v", messages)
+	}
+	if strings.Contains(messages[2].Content, big) || !strings.Contains(messages[2].Content, "trimmed") {
+		t.Fatalf("tool result not projected: %.120s", messages[2].Content)
+	}
+	if messages[2].ToolCallID != messages[1].ToolCalls[0].ID {
+		t.Fatalf("projection broke correlation: %+v", messages)
+	}
+}
+
 func TestToolHistoryRejectsInvalidResultNames(t *testing.T) {
 	for _, call := range []ToolHistoryCall{
 		{Name: "memory", ResultName: "mcp__home__read", Status: "succeeded"},

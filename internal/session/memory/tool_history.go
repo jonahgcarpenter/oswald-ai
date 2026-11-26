@@ -9,10 +9,36 @@ import (
 
 const (
 	ToolHistoryVersion       = 1
-	MaxToolHistoryBytes      = 64 * 1024
+	MaxToolHistoryBytes      = 256 * 1024
 	MaxToolSearchTextRunes   = 12_000
 	toolHistoryOmittedResult = "Historical tool result omitted because the durable history limit was reached."
 )
+
+// Tool-result projection bounds for model context (prompt assembly and the
+// summarizer). Longer results keep head+tail with an explicit marker instead
+// of being hidden; the full text stays persisted and searchable.
+const (
+	// ToolResultProjectionRunes caps one projected tool result. Shorter
+	// results pass through unchanged.
+	ToolResultProjectionRunes     = 4000
+	toolResultProjectionHeadRunes = 1500
+	toolResultProjectionTailRunes = 1500
+)
+
+// ProjectToolResult bounds one tool result for model context. Results within
+// ToolResultProjectionRunes pass through unchanged; longer ones keep head and
+// tail (exit codes and error tails live at the end) with an explicit marker
+// carrying the omitted count.
+func ProjectToolResult(result string) string {
+	runes := []rune(result)
+	if len(runes) <= ToolResultProjectionRunes {
+		return result
+	}
+	omitted := len(runes) - toolResultProjectionHeadRunes - toolResultProjectionTailRunes
+	return string(runes[:toolResultProjectionHeadRunes]) +
+		fmt.Sprintf("\n...[trimmed %d chars of tool output]...\n", omitted) +
+		string(runes[len(runes)-toolResultProjectionTailRunes:])
+}
 
 // ToolHistory is the immutable native tool-call trace for one session turn.
 type ToolHistory struct {
@@ -143,6 +169,8 @@ func DecodeToolHistory(encoded string) (ToolHistory, error) {
 }
 
 // ToolHistorySearchText renders the bounded projection used by transcript FTS.
+// SearchResult call results are projected (not omitted) so trimmed content
+// stays findable; other calls contribute names only.
 func ToolHistorySearchText(history ToolHistory) string {
 	var b strings.Builder
 	for _, batch := range history.Batches {
@@ -157,7 +185,7 @@ func ToolHistorySearchText(history ToolHistory) string {
 			}
 			if call.SearchResult && strings.TrimSpace(call.Result) != "" {
 				b.WriteByte('\n')
-				b.WriteString(strings.TrimSpace(call.Result))
+				b.WriteString(strings.TrimSpace(ProjectToolResult(call.Result)))
 			}
 		}
 	}

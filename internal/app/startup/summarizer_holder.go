@@ -67,10 +67,11 @@ func (h *summarizerHolder) Summarize(ctx context.Context, turns []memory.Session
 // SummarizeWithTarget implements the session-model compaction path (issue
 // #295): the resolved turn target supplies the model and client so a pinned
 // muse-spark session compacts on muse-spark, not the profile default.
-// A missing client or model falls back to the pinned summarizer.
-func (h *summarizerHolder) SummarizeWithTarget(ctx context.Context, turns []memory.SessionTurn, target agent.Target) (string, *llm.ChatResponse, error) {
+// previous seeds the merge so compactions extend the summary. A missing
+// client or model falls back to the pinned summarizer.
+func (h *summarizerHolder) SummarizeWithTarget(ctx context.Context, turns []memory.SessionTurn, target agent.Target, previous string) (string, *llm.ChatResponse, error) {
 	if strings.TrimSpace(target.Model) != "" && target.Client != nil {
-		return compaction.SummarizeWithClient(ctx, target.Client, target.Model, turns)
+		return compaction.SummarizeWithClient(ctx, target.Client, target.Model, turns, previous)
 	}
 	return h.Summarize(ctx, turns)
 }

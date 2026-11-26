@@ -113,7 +113,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   (unknown provider/model or unavailable provider rejected); unverifiable targets are rejected.
 
 History policy in one line: every tool keeps full searchable history in context and FTS — with 16 KiB args and 16,000 result runes per call
-inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser
+inside a 256 KiB aggregate trace. `session_search` never logs query or message content; browser
 and vault tools never log URLs, page content, expressions, or secrets — only counts and chars.
 
 ## Tests

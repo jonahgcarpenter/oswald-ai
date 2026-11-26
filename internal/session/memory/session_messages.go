@@ -7,6 +7,8 @@ import (
 )
 
 // SessionTurnMessages renders a complete exchange with correlated native tools.
+// Long tool results are projected (head+tail with an explicit marker) so one
+// turn cannot consume the window; the full text stays persisted and searchable.
 func SessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
 	messages := []llm.ChatMessage{{Role: "user", Content: turn.UserText}}
 	for batchIndex, batch := range turn.ToolHistory.Batches {
@@ -18,7 +20,7 @@ func SessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
 		messages = append(messages, assistant)
 		for callIndex, call := range batch.Calls {
 			callID := fmt.Sprintf("hist_%d_%d_%d", turn.ID, batchIndex+1, callIndex+1)
-			content := call.Result
+			content := ProjectToolResult(call.Result)
 			if call.Name == "vision_analyze" {
 				content = "[Historical image tool result; image bytes are omitted and are not loaded in this turn. Visibility and delivery statements below describe the original turn. Use vision_analyze with an available image source if needed.]\n\n" + content
 			}
