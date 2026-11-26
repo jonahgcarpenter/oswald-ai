@@ -135,11 +135,11 @@ func newHandler(mediaCache mediaCacher, ws *workspace.Workspace, download downlo
 			}
 			raw = append(raw, frame)
 		}
-		images, viewed, sheets, err := assembleFrames(ctx, principal.CanonicalUserID, save, raw)
+		images, viewed, err := assembleFrames(ctx, principal.CanonicalUserID, save, raw)
 		if err != nil {
 			return governance.Result{}, err
 		}
-		content := resultText(question, stamps, duration, sheets, viewed)
+		content := resultText(question, stamps, duration, viewed)
 		return governance.Result{Content: content, Outcome: governance.OutcomeProductive, Images: images}, nil
 	}
 }
@@ -349,62 +349,58 @@ type videoFrame struct {
 }
 
 // assembleFrames normalizes raw JPEGs, saves each to the frame cache for
-// vision_analyze drill-down, and attaches sheets: a lone frame attaches
-// directly, otherwise one contact sheet per up-to-4 group so the newest-4
-// image budget never drops sampled frames.
-func assembleFrames(ctx context.Context, user string, save func(context.Context, string, []byte, string) (string, error), raw [][]byte) (images []llm.InputImage, frames []videoFrame, sheets int, err error) {
+// vision_analyze drill-down, and attaches one image: a lone frame directly,
+// otherwise a single contact sheet tiling every frame so the newest-4 image
+// budget always keeps the whole sample.
+func assembleFrames(ctx context.Context, user string, save func(context.Context, string, []byte, string) (string, error), raw [][]byte) (images []llm.InputImage, frames []videoFrame, err error) {
 	normalized := make([]videoFrame, 0, len(raw))
 	for _, data := range raw {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, 0, err
+			return nil, nil, err
 		}
 		result, err := media.NormalizeVisionImage(ctx, data, "image/jpeg", nil)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, err
 		}
 		path, err := save(ctx, user, data, "image/jpeg")
 		if err != nil {
-			return nil, nil, 0, errors.New("frame cache is unavailable")
+			return nil, nil, errors.New("frame cache is unavailable")
 		}
 		geometry := &llm.ImageGeometry{SourceWidth: result.OriginalWidth, SourceHeight: result.OriginalHeight, Width: result.Width, Height: result.Height}
 		result.Image.Geometry = geometry
 		normalized = append(normalized, videoFrame{image: result.Image, raw: data, path: path, geometry: geometryLabel(result.OriginalWidth, result.OriginalHeight)})
 	}
 	if len(normalized) == 1 {
-		return []llm.InputImage{normalized[0].image}, normalized, 1, nil
+		return []llm.InputImage{normalized[0].image}, normalized, nil
 	}
-	return assembleSheets(ctx, normalized)
+	sheet, err := assembleSheet(ctx, normalized)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []llm.InputImage{sheet}, normalized, nil
 }
 
-// assembleSheets tiles groups of up to four normalized frames into contact
-// sheets and normalizes each sheet for the model.
-func assembleSheets(ctx context.Context, normalized []videoFrame) ([]llm.InputImage, []videoFrame, int, error) {
-	var images []llm.InputImage
-	for start := 0; start < len(normalized); start += 4 {
-		end := start + 4
-		if end > len(normalized) {
-			end = len(normalized)
-		}
-		group := make([][]byte, 0, end-start)
-		for _, frame := range normalized[start:end] {
-			group = append(group, frame.raw)
-		}
-		sheet, err := ContactSheet(group)
-		if err != nil {
-			return nil, nil, 0, err
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, nil, 0, err
-		}
-		result, err := media.NormalizeVisionImage(ctx, sheet, "image/jpeg", nil)
-		if err != nil {
-			return nil, nil, 0, err
-		}
-		geometry := &llm.ImageGeometry{SourceWidth: result.OriginalWidth, SourceHeight: result.OriginalHeight, Width: result.Width, Height: result.Height}
-		result.Image.Geometry = geometry
-		images = append(images, result.Image)
+// assembleSheet tiles every normalized frame into one contact sheet and
+// normalizes the sheet for the model.
+func assembleSheet(ctx context.Context, normalized []videoFrame) (llm.InputImage, error) {
+	group := make([][]byte, 0, len(normalized))
+	for _, frame := range normalized {
+		group = append(group, frame.raw)
 	}
-	return images, normalized, (len(normalized) + 3) / 4, nil
+	sheet, err := ContactSheet(group)
+	if err != nil {
+		return llm.InputImage{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return llm.InputImage{}, err
+	}
+	result, err := media.NormalizeVisionImage(ctx, sheet, "image/jpeg", nil)
+	if err != nil {
+		return llm.InputImage{}, err
+	}
+	geometry := &llm.ImageGeometry{SourceWidth: result.OriginalWidth, SourceHeight: result.OriginalHeight, Width: result.Width, Height: result.Height}
+	result.Image.Geometry = geometry
+	return result.Image, nil
 }
 
 func geometryLabel(width, height int) string {

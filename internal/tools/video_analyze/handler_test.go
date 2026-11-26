@@ -114,7 +114,7 @@ func TestHandlerDefaultIsOneSheetWithPaths(t *testing.T) {
 	if len(gotStamps) != 4 || gotStamps[0] <= 0 || gotStamps[3] >= 13.0 {
 		t.Fatalf("stamps = %v", gotStamps)
 	}
-	for _, want := range []string{"4 still frames (t=1.6s, 4.9s, 8.1s, 11.4s of 13.0s", "Sheet 1/1:", "top-left t=1.6s", "Question: What happens?", "24 hours", "not perceived"} {
+	for _, want := range []string{"4 still frames (t=1.6s, 4.9s, 8.1s, 11.4s of 13.0s", "Sheet 1/1:", "tile 1/4 t=1.6s", "Question: What happens?", "24 hours", "not perceived"} {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("missing %q in %q", want, result.Content)
 		}
@@ -170,7 +170,7 @@ func TestHandlerSingleFrameDirect(t *testing.T) {
 	}
 }
 
-func TestHandlerSheetsAboveFour(t *testing.T) {
+func TestHandlerManyFramesOneSheet(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, _ := videoWorkspace(t)
 	download, probe, extract, save := fakeSeams(t, stdProbe)
@@ -181,11 +181,14 @@ func TestHandlerSheetsAboveFour(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Images) != 2 {
-		t.Fatalf("sheets = %d", len(result.Images))
+	if len(result.Images) != 1 {
+		t.Fatalf("sheets = %d, want 1", len(result.Images))
 	}
-	if !strings.Contains(result.Content, "Sheet 1/2:") || !strings.Contains(result.Content, "Sheet 2/2:") {
-		t.Fatalf("sheet map missing: %q", result.Content)
+	if !strings.Contains(result.Content, "Sheet 1/1:") || strings.Contains(result.Content, "Sheet 2/") {
+		t.Fatalf("expected one sheet: %q", result.Content)
+	}
+	if got := strings.Count(result.Content, "→ "); got != 6 {
+		t.Fatalf("tile paths = %d, want 6: %q", got, result.Content)
 	}
 }
 

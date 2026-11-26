@@ -6,21 +6,22 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
+	videonalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/video_analyze"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 )
 
 const maxToolResultImages = 4
 
 // isImageInputTool reports tools whose results carry request-local model
-// image inputs: vision loads and browser screenshots. Generated images ride
-// attachments instead and stay separate.
+// image inputs: vision loads, video frame sheets, and browser screenshots.
+// Generated images ride attachments instead and stay separate.
 func isImageInputTool(name string) bool {
-	return name == visionanalyze.Name || name == toolbrowser.VisionName
+	return name == visionanalyze.Name || name == videonalyze.Name || name == toolbrowser.VisionName
 }
 
 func boundImageToolResults(messages []llm.ChatMessage) []llm.ChatMessage {
 	result := append([]llm.ChatMessage(nil), messages...)
-	remaining := map[string]int{visionanalyze.Name: maxToolResultImages, toolbrowser.VisionName: maxToolResultImages, imagegenerate.Name: maxToolResultImages}
+	remaining := map[string]int{visionanalyze.Name: maxToolResultImages, videonalyze.Name: maxToolResultImages, toolbrowser.VisionName: maxToolResultImages, imagegenerate.Name: maxToolResultImages}
 	for i := len(result) - 1; i >= 0; i-- {
 		message := &result[i]
 		if message.Role != "tool" || (!isImageInputTool(message.ToolName) && message.ToolName != imagegenerate.Name) || len(message.Images) == 0 {

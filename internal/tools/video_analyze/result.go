@@ -9,7 +9,7 @@ import (
 // paths for vision_analyze drill-down, and the explicit perception limits.
 // Timestamps and paths ride the text so the answer stays searchable after
 // the image bytes leave context.
-func resultText(question string, stamps []float64, duration float64, sheets int, frames []videoFrame) string {
+func resultText(question string, stamps []float64, duration float64, frames []videoFrame) string {
 	var b strings.Builder
 	count := len(stamps)
 	frameWord := "still frames"
@@ -28,15 +28,18 @@ func resultText(question string, stamps []float64, duration float64, sheets int,
 		}
 		fmt.Fprintf(&b, "\n\nFrame 1/1 @ %.1fs%s → %s.", stamps[0], geometry, frames[0].path)
 	} else {
-		labels := []string{"top-left", "top-right", "bottom-left", "bottom-right"}
-		for s := 0; s < sheets; s++ {
-			parts := make([]string, 0, 4)
-			for i := 0; i < 4 && s*4+i < count; i++ {
-				frame := frames[s*4+i]
-				parts = append(parts, fmt.Sprintf("%s t=%.1fs → %s", labels[i], stamps[s*4+i], frame.path))
+		parts := make([]string, 0, count)
+		for i := range stamps {
+			path, geometry := "", ""
+			if i < len(frames) {
+				path = frames[i].path
+				if frames[i].geometry != "" {
+					geometry = " " + frames[i].geometry
+				}
 			}
-			fmt.Fprintf(&b, "\n\nSheet %d/%d: %s.", s+1, sheets, strings.Join(parts, ", "))
+			parts = append(parts, fmt.Sprintf("tile %d/%d t=%.1fs%s → %s", i+1, count, stamps[i], geometry, path))
 		}
+		fmt.Fprintf(&b, "\n\nSheet 1/1: %s.", strings.Join(parts, ", "))
 	}
 	b.WriteString("\n\nIndividual frames are cached for 24 hours—call vision_analyze with a path above to see one at full resolution.")
 	b.WriteString("\n\nNote: motion between frames and the audio track were not perceived—answer only from what the frames show.")

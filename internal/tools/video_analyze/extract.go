@@ -141,12 +141,13 @@ func firstLine(out []byte) string {
 	return text
 }
 
-// ContactSheet tiles up to 4 JPEG frames into one labeled-order 2x2 JPEG:
-// left-to-right, top-to-bottom matches frame order. The result text maps
-// tile positions to timestamps.
+// ContactSheet tiles up to 8 JPEG frames into one labeled-order sheet:
+// left-to-right, top-to-bottom matches frame order (2 columns up to 4
+// frames, 4 columns above that). The result text maps tile positions to
+// timestamps, and a single sheet always survives the newest-4 image budget.
 func ContactSheet(frames [][]byte) ([]byte, error) {
-	if len(frames) == 0 || len(frames) > 4 {
-		return nil, fmt.Errorf("contact sheet needs 1 to 4 frames")
+	if len(frames) == 0 || len(frames) > MaxFrames {
+		return nil, fmt.Errorf("contact sheet needs 1 to %d frames", MaxFrames)
 	}
 	decoded := make([]image.Image, 0, len(frames))
 	for _, raw := range frames {
@@ -156,10 +157,15 @@ func ContactSheet(frames [][]byte) ([]byte, error) {
 		}
 		decoded = append(decoded, img)
 	}
-	sheet := image.NewRGBA(image.Rect(0, 0, sheetCellEdge*2, sheetCellEdge*2))
+	cols := 2
+	if len(decoded) > 4 {
+		cols = 4
+	}
+	rows := (len(decoded) + cols - 1) / cols
+	sheet := image.NewRGBA(image.Rect(0, 0, cols*sheetCellEdge, rows*sheetCellEdge))
 	draw.Draw(sheet, sheet.Bounds(), image.Black, image.Point{}, draw.Src)
 	for i, img := range decoded {
-		cell := image.Rect((i%2)*sheetCellEdge, (i/2)*sheetCellEdge, (i%2+1)*sheetCellEdge, (i/2+1)*sheetCellEdge)
+		cell := image.Rect((i%cols)*sheetCellEdge, (i/cols)*sheetCellEdge, (i%cols+1)*sheetCellEdge, (i/cols+1)*sheetCellEdge)
 		xdraw.CatmullRom.Scale(sheet, fitCell(cell, img.Bounds()), img, img.Bounds(), draw.Over, nil)
 	}
 	var buf bytes.Buffer
