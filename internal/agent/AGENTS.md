@@ -34,7 +34,8 @@ tools-disabled completion:
 
 ```
 refresh catalog; set ToolChoice (first call only)
-if pressure >= 70%: Summarize(full session JSON) -> markdown cache (blocking, lane-queued)
+if pressure >= 70%: Summarize(pre-keep turns + previous summary) -> merged markdown cache (blocking, lane-queued)
+if over 100%: trim pre-keep turns to 70% first (still searchable), then compact as above
 for iteration:
     response = chatWithImageRetries() // up to 5 attempts, shrinking images
     normalize tool call IDs; record usage

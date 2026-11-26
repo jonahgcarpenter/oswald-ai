@@ -94,9 +94,9 @@ fires twice, so rapid successive writes coalesce.
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.
-- `/compact` forces markdown summarization of all but the newest 3 turns in-lane, flags
-  them `compacted=1`, and caches the summary; the result applies to the next reply
-  (no-op at ≤3 turns). Auto compaction fires at 70% input pressure the same way.
+- `/compact` forces markdown summarization of the turns older than the 15K-token keep tail in-lane, flags
+  them `compacted=1`, merges with the previous summary, and caches the result; the result applies to the next reply
+  (no-op when history fits the keep tail). Auto compaction fires at 70% input pressure the same way, on the session's resolved model.
 - Server binaries never import the `cli` tree.
 
 ## Tests

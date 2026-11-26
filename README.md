@@ -80,6 +80,7 @@ In Discord servers and iMessage groups, slash commands must start with a mention
 | `/approve` | `/approve`        | Approve the pending terminal command awaiting review.                                                  |
 | `/deny`    | `/deny`           | Deny the pending terminal command awaiting review.                                                     |
 | `/queue`   | `/queue <prompt>` | Queue a prompt for the next turn instead of steering the running turn (plain messages steer by default; unconsumed steers auto-run next). |
+| `/model`   | `/model` <br> `/model <provider>` <br> `/model <provider>/<model>` <br> `/model <provider>/<model> --global` | Show the conversation's model (with context window) and providers; list a provider's models; pin this conversation to a model (survives `/new`, applies from the next turn); set the profile default and pin. |
 | `/compact` | `/compact`        | Summarize this session to markdown; applies to the next reply (auto-fires at 70% context).            |
 
 ## CLI Commands
