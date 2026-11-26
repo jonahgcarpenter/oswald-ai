@@ -28,7 +28,7 @@ const (
 // --help` prints the same text to stdout and exits 0 without resolving scope.
 const (
 	showUsage     = "usage: oswald delegation show [--profile NAME]"
-	unsetUsage    = "usage: oswald delegation unset model|provider|base-url [--profile NAME]"
+	unsetUsage    = "usage: oswald delegation unset model|provider|base-url|max-iterations|max-children|max-depth|orchestrator [--profile NAME]"
 	setFlagsUsage = "usage: oswald delegation set [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]"
 )
 
@@ -82,7 +82,8 @@ func delegationUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald delegation [--profile NAME] <show|set|unset> [options]")
 	fmt.Fprintln(w, "  show                       delegation section (values only, never credentials)")
 	setUsage(w)
-	fmt.Fprintln(w, "  unset model|provider|base-url   clear a delegation leaf back to inherit")
+	fmt.Fprintln(w, "  unset model|provider|base-url|max-iterations|max-children|max-depth|orchestrator")
+	fmt.Fprintln(w, "                         clear a delegation leaf back to inherit (bounds reset to defaults)")
 }
 
 func setUsage(w io.Writer) {
@@ -235,6 +236,14 @@ func unsetCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		leaf = "provider"
 	case "base-url", "base_url":
 		leaf = "base_url"
+	case "max-iterations", "max_iterations":
+		leaf = "max_iterations"
+	case "max-children", "max_concurrent_children":
+		leaf = "max_concurrent_children"
+	case "max-depth", "max_spawn_depth":
+		leaf = "max_spawn_depth"
+	case "orchestrator", "orchestrator_enabled":
+		leaf = "orchestrator_enabled"
 	default:
 		fmt.Fprintln(stderr, unsetUsage)
 		return exitUsage

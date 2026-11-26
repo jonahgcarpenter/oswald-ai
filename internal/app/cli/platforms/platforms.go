@@ -59,6 +59,9 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		case "set":
 			setUsage(stdout)
 			return exitOK
+		case "channel-overrides":
+			fmt.Fprintln(stdout, channelOverridesUsage)
+			return exitOK
 		}
 	}
 	switch args[0] {
@@ -93,6 +96,11 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		default:
 			return setCmd(root, args[1:], stdout, stderr)
 		}
+	case "channel-overrides":
+		// Scoped per profile (global baseline plus profile overlays), so
+		// scope fencing lives inside the subcommand, not the global
+		// default-scope gate above.
+		return channelOverridesCmd(context.Background(), root, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		platformsUsage(stdout)
 		return exitOK
@@ -110,12 +118,14 @@ const (
 )
 
 func platformsUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald platforms <show|enable|disable|set> [options]")
+	fmt.Fprintln(w, "usage: oswald platforms <show|enable|disable|set|channel-overrides> [options]")
 	fmt.Fprintln(w, "  show [name]                platforms section, secrets redacted")
 	fmt.Fprintln(w, "  enable <name>              enable a gateway platform (applies automatically)")
 	fmt.Fprintln(w, "  disable <name>             disable a gateway platform (applies automatically)")
 	setUsage(w)
 	fmt.Fprintln(w, "    IDS are comma-separated or repeatable --allow/--ban flags")
+	fmt.Fprintln(w, "  channel-overrides <list|add|remove> [options]")
+	fmt.Fprintln(w, "    per-channel model routes (global baseline plus profile overlays via --profile)")
 }
 
 func setUsage(w io.Writer) {

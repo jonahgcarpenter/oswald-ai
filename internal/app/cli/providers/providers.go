@@ -42,6 +42,9 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		case "add":
 			fmt.Fprintln(stdout, addUsage)
 			return exitOK
+		case "edit":
+			fmt.Fprintln(stdout, editUsage)
+			return exitOK
 		case "remove":
 			fmt.Fprintln(stdout, removeUsage)
 			return exitOK
@@ -79,6 +82,8 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		return show(target, []string{"providers", rest[1]}, stdout, stderr)
 	case "add":
 		return addCmd(target, rest[1:], stdout, stderr)
+	case "edit":
+		return editCmd(target, rest[1:], stdout, stderr)
 	case "remove":
 		if len(rest) != 2 {
 			fmt.Fprintln(stderr, removeUsage)
@@ -109,6 +114,7 @@ const (
 	listUsage   = "usage: oswald providers list [--profile NAME]"
 	showUsage   = "usage: oswald providers show <name> [--profile NAME]"
 	addUsage    = "usage: oswald providers add <name> --api URL [--key REF] [--auth key|chatgpt-oauth|claude-sdk] [--profile NAME]"
+	editUsage   = "usage: oswald providers edit <name> [--api URL] [--key REF] [--auth key|chatgpt-oauth|claude-sdk] [--clear-key] [--profile NAME]"
 	removeUsage = "usage: oswald providers remove <name> [--profile NAME]"
 	authUsage   = "usage: oswald providers auth <name> [--no-browser] [--timeout DURATION] [--profile NAME]\n       oswald providers auth start <name> [--timeout DURATION] [--profile NAME]\n       oswald providers auth finish <name> <code|url> [--profile NAME]"
 	testUsage   = "usage: oswald providers test <name> [--profile NAME]"
@@ -117,11 +123,12 @@ const (
 )
 
 func providersUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald providers [--profile NAME] <list|show|add|remove|auth|test|status|logout> [options]")
+	fmt.Fprintln(w, "usage: oswald providers [--profile NAME] <list|show|add|edit|remove|auth|test|status|logout> [options]")
 	fmt.Fprintln(w, "  list                  provider names with api host, key redacted")
 	fmt.Fprintln(w, "  show <name>           one provider entry, key redacted")
 	fmt.Fprintln(w, "  add <name> --api URL [--key REF] [--auth KIND]")
 	fmt.Fprintln(w, "                        add a provider through staged validation")
+	fmt.Fprintln(w, "  edit <name> [leaves]  change api, key, or auth in place (--clear-key drops the key)")
 	fmt.Fprintln(w, "  remove <name>         remove a provider not referenced by model.provider")
 	fmt.Fprintln(w, "  auth <name>           authorize a ChatGPT subscription (browser OAuth)")
 	fmt.Fprintln(w, "  auth start <name>     start a model-led handoff, print the sign-in URL")
