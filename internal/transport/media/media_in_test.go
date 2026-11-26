@@ -129,7 +129,8 @@ func TestMediaNotes(t *testing.T) {
 	}
 
 	doc := DocumentRef{Path: "/cache/documents/x.pdf", Filename: "x.pdf", MIMEType: "application/pdf"}
-	note := DocumentsNote([]DocumentRef{doc, video})
+	audioDoc := DocumentRef{Path: "/cache/media/ef.m4a", Filename: "voice.m4a", MIMEType: "audio/mp4", Lane: LaneMedia, DurationSeconds: 7.2}
+	note := DocumentsNote([]DocumentRef{doc, audioDoc})
 	if !strings.Contains(note, "[File attached at: /cache/documents/x.pdf ('x.pdf')]") {
 		t.Fatalf("document note missing: %q", note)
 	}
@@ -138,6 +139,9 @@ func TestMediaNotes(t *testing.T) {
 	}
 	if !strings.Contains(MediaRecipeNote, "cannot listen") {
 		t.Fatalf("media recipe must state the audio limitation: %q", MediaRecipeNote)
+	}
+	if got := DocumentsNote([]DocumentRef{doc, video}); strings.Contains(got, MediaRecipeNote) {
+		t.Fatalf("recipe injected for video-only turn: %q", got)
 	}
 	if got := DocumentsNote([]DocumentRef{doc, attachment}); strings.Contains(got, MediaRecipeNote) {
 		t.Fatalf("recipe injected without AV media: %q", got)

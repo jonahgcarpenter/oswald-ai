@@ -190,29 +190,40 @@ func MediaContextNote(doc DocumentRef) string {
 	return fmt.Sprintf("[%s attached at: %s ('%s'%s)]", kind, strings.TrimSpace(doc.Path), name, detail)
 }
 
-// MediaRecipeNote tells the model how to inspect media itself: video goes
-// through video_analyze (frame sampling built in), GIFs through
-// vision_analyze (first frame), audio keeps the terminal ffmpeg recipe.
-// Audio is honest about the missing capability — there is no listening or
-// transcription tool.
-const MediaRecipeNote = "[Media is not inlined. Video: use video_analyze (it samples frames for you); GIF: vision_analyze loads the first frame. Audio: use ffprobe for metadata and ffmpeg to trim/transcode; you cannot listen to audio or transcribe it. ffprobe also gives codec and timing details.]"
+// MediaRecipeNote tells the model how to inspect non-video media itself:
+// GIFs through vision_analyze (first frame); audio keeps the terminal ffmpeg
+// recipe. Audio is honest about the missing capability — there is no listening
+// or transcription tool. Video needs no recipe: video_analyze is
+// self-describing in the tool catalog.
+const MediaRecipeNote = "[GIF: vision_analyze loads the first frame. Audio: use ffprobe for metadata and ffmpeg to trim/transcode; you cannot listen to audio or transcribe it. ffprobe also gives codec and timing details.]"
 
 // DocumentsNote joins per-file notes for the current turn, appending the
-// media recipe once when any AV media is present.
+// media recipe once when a GIF or audio item is present. Video needs no
+// recipe: the video_analyze tool describes itself in the tool catalog.
 func DocumentsNote(docs []DocumentRef) string {
 	parts := make([]string, 0, len(docs))
-	hasMedia := false
+	hasRecipe := false
 	for _, doc := range docs {
 		if strings.TrimSpace(doc.Path) == "" {
 			continue
 		}
-		if doc.IsMedia() {
-			hasMedia = true
+		if doc.IsMedia() && needsRecipe(doc) {
+			hasRecipe = true
 		}
 		parts = append(parts, DocumentContextNote(doc))
 	}
-	if hasMedia {
+	if hasRecipe {
 		parts = append(parts, MediaRecipeNote)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// needsRecipe reports whether a media item still needs the prompt recipe:
+// GIFs and audio only. Video resolves through video_analyze on its own.
+func needsRecipe(doc DocumentRef) bool {
+	mime := normalizeMIMEType(doc.MIMEType)
+	if mime == "image/gif" || strings.EqualFold(filepath.Ext(strings.TrimSpace(doc.Filename)), ".gif") {
+		return true
+	}
+	return strings.HasPrefix(mime, "audio/")
 }
