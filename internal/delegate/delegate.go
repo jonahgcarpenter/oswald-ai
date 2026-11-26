@@ -103,6 +103,7 @@ type Manager struct {
 	media    *docache.Cache
 	window   int
 	vkey     string
+	router   *agent.ModelRouter
 	cfgMu    sync.RWMutex
 	cfg      *config.Config
 
@@ -150,6 +151,7 @@ type Deps struct {
 	Window      int
 	VirtualKey  string
 	Config      *config.Config
+	Router      *agent.ModelRouter
 }
 
 // NewManager builds a per-profile delegation manager. Start launches its
@@ -171,12 +173,28 @@ func NewManager(deps Deps) *Manager {
 		window:       deps.Window,
 		vkey:         deps.VirtualKey,
 		cfg:          deps.Config,
+		router:       deps.Router,
 		parentClient: deps.Parent,
 		newClient:    deps.NewClient,
 		live:         make(map[string]*liveChild),
 		clients:      make(map[string]llm.Chatter),
 		started:      time.Now(),
 	}
+}
+
+// windowFor returns the prompt budget window for one child model (issue #295).
+// KnownWindow from live listings wins with no config change; otherwise the
+// construction-pinned fallback applies.
+func (m *Manager) windowFor(provider, model string) int {
+	if m != nil && m.router != nil && provider != "" && model != "" {
+		if window, ok := m.router.KnownWindow(provider, model); ok && window > 0 {
+			return window
+		}
+	}
+	if m == nil || m.window <= 0 {
+		return 0
+	}
+	return m.window
 }
 
 // SetSenders installs the per-gateway delivery senders used to push

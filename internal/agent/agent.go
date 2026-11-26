@@ -72,6 +72,25 @@ type MarkdownSummarizer interface {
 	Set(string, string, int, string)
 }
 
+// targetAwareSummarizer compacts on the session's resolved model (issue #295).
+// Holders implement it via SummarizeWithClient; test doubles may omit it and
+// fall back to Summarize.
+type targetAwareSummarizer interface {
+	SummarizeWithTarget(context.Context, []memory.SessionTurn, Target) (string, *llm.ChatResponse, error)
+}
+
+// summarizeForTarget runs compaction on the session's resolved model when the
+// summarizer supports it, else on its pinned model. Callers still own Get/Set.
+func summarizeForTarget(ctx context.Context, summarizer MarkdownSummarizer, candidates []memory.SessionTurn, target Target) (string, *llm.ChatResponse, error) {
+	if summarizer == nil {
+		return "", nil, context.Canceled
+	}
+	if aware, ok := summarizer.(targetAwareSummarizer); ok {
+		return aware.SummarizeWithTarget(ctx, candidates, target)
+	}
+	return summarizer.Summarize(ctx, candidates)
+}
+
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
@@ -204,6 +223,30 @@ func NewAgent(
 	}
 }
 
+// inputLimitForTarget derives the prompt budget for one turn from the resolved
+// model's context window (issue #295). KnownWindow is harvested from live
+// model listings with no config change; a miss falls back to the
+// construction-pinned budget so turns never run unbounded. On a miss the
+// router's listing is refreshed best-effort so the next turn sees the window.
+func (a *Agent) inputLimitForTarget(ctx context.Context, target Target) int {
+	if a != nil && a.router != nil && strings.TrimSpace(target.Provider) != "" && strings.TrimSpace(target.Model) != "" {
+		if window, ok := a.router.KnownWindow(target.Provider, target.Model); ok && window > 0 {
+			return tokenbudget.NewContextBudget(window).UsableInputLimit()
+		}
+		if models, err := a.router.ListModels(ctx, target.Provider); err == nil {
+			for _, entry := range models {
+				if strings.TrimSpace(entry.ID) == strings.TrimSpace(target.Model) && entry.Window > 0 {
+					return tokenbudget.NewContextBudget(entry.Window).UsableInputLimit()
+				}
+			}
+		}
+	}
+	if a == nil {
+		return tokenbudget.NewContextBudget(0).UsableInputLimit()
+	}
+	return a.budget.UsableInputLimit()
+}
+
 // Process handles the end-to-end agentic pipeline in a single loop.
 // The model receives all registered tools and may call them zero or more times
 // before generating its final response. Thinking tokens, content tokens, and
@@ -216,8 +259,8 @@ func NewAgent(
 // recordChatUsage persists one completed provider call into the session's
 // model usage ledger. Stateless requests and synthetic fallback responses are
 // skipped; recording failures are debug-logged and never fail the turn. The
-// caller supplies attribution explicitly: turn calls pass the resolved target
-// and compaction calls pass the summarizer's pinned profile default.
+// caller supplies attribution explicitly: turn and compaction calls pass the
+// resolved target for the session.
 func (a *Agent) recordChatUsage(ctx context.Context, reqLog *config.Logger, owner, sessionKey string, generation int, resp *llm.ChatResponse, fallbackModel, billingProvider, billingBaseURL string) {
 	if a == nil || a.userMemory == nil || resp == nil || generation <= 0 {
 		return
@@ -581,7 +624,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	skillOffered := catalogHas(initialCatalog, toolskill.Name)
 	skillBlocks := buildSkillBlocks(skillOffered)
 	contextBlock = joinContext(skillBlocks, fileMemoryBlock, suffixBlocks)
-	inputLimit := a.budget.UsableInputLimit()
+	inputLimit := a.inputLimitForTarget(ctx, target)
+	reqLog.Debug("agent.context.budget_selected", "selected prompt budget for resolved model",
+		config.F("model", target.Model),
+		config.F("provider", target.Provider),
+		config.F("prompt_budget", inputLimit))
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
 	userMemoryContent := sessionMemoryUserContent(userPrompt, contextImages[:len(userImages)])
@@ -590,10 +637,54 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		cachedMarkdown = a.summarizer.Get(senderID, sessionKey, sessionGeneration)
 	}
 	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+	// Trim-then-compact for large->small swaps (issue #295): over budget (only
+	// possible after a window shrink) drop oldest turns unsummarized (still
+	// searchable) to the 70% line, then run the normal single compaction on
+	// the session model. Never trims the newest ExcludedTail or the required
+	// prompt; if those alone exceed the trim line there is nothing safe to drop.
+	trimmed := false
+	if !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > tokenbudget.ExcludedTail &&
+		promptContext.EstimatedBefore*100 > inputLimit*tokenbudget.TrimThresholdPercent {
+		originalBefore := promptContext.EstimatedBefore
+		trimTarget := inputLimit * tokenbudget.CompactionTriggerPercent / 100
+		excess := originalBefore - trimTarget
+		var dropIDs []int64
+		dropCount := 0
+		freed := 0
+		for i := len(recentTurns) - 1; i >= tokenbudget.ExcludedTail && freed < excess; i-- {
+			turn := recentTurns[i]
+			if turn.ID > 0 {
+				dropIDs = append(dropIDs, turn.ID)
+			}
+			dropCount++
+			freed += tokenbudget.EstimateRequest(memory.SessionTurnMessages(turn), nil)
+		}
+		if dropCount > 0 {
+			if len(dropIDs) > 0 {
+				if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, dropIDs); markErr != nil {
+					reqLog.Warn("agent.context.trim_mark_failed", "failed to mark trimmed turns",
+						config.F("status", "degraded"), config.ErrorField(markErr))
+				}
+			}
+			recentTurns = recentTurns[:len(recentTurns)-dropCount]
+			minimumTail = preservedRecentTailCount(recentTurns, inputLimit)
+			promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+			trimmed = true
+			reqLog.Debug("agent.context.trimmed", "trimmed oldest turns before compaction",
+				config.F("trimmed_turn_count", dropCount),
+				config.F("estimated_before", originalBefore),
+				config.F("estimated_after", promptContext.EstimatedAfter),
+				config.F("prompt_budget", inputLimit))
+		}
+	}
 	// 70% trigger: blocking markdown compaction inside the lane head so the
-	// next message in the same conversation queues behind it.
+	// next message in the same conversation queues behind it. The budget and
+	// the compaction model both follow the session's resolved target (issue
+	// #295), so mid-session model switches and large->small swaps take effect
+	// on the next turn. A trim in the same turn forces the compaction below
+	// even if the estimate landed just under the line.
 	if !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > 0 &&
-		promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent {
+		(promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent || trimmed) {
 		candidates := tokenbudget.Candidates(recentTurns)
 		if len(candidates) == 0 {
 			reqLog.Debug("agent.context.compaction_skipped", "skipped session compaction: only newest turns present")
@@ -601,7 +692,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if streamCallback != nil {
 				streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
 			}
-			markdown, usage, compactErr := a.summarizer.Summarize(ctx, candidates)
+			markdown, usage, compactErr := summarizeForTarget(ctx, a.summarizer, candidates, target)
 			if compactErr != nil {
 				reqLog.Warn("agent.context.compaction_failed", "failed to compact session context",
 					config.F("status", "degraded"), config.ErrorField(compactErr))
@@ -611,7 +702,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
 						config.F("status", "degraded"), config.ErrorField(markErr))
 				}
-				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage, a.model, a.provider, a.billingBaseURL)
+				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage, target.Model, target.Provider, target.BillingBaseURL)
 				cachedMarkdown = markdown
 				promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 				reqLog.Debug("agent.context.compacted", "compacted session context to markdown",
@@ -925,13 +1016,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					if streamCallback != nil {
 						streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
 					}
-					if markdown, usage, compactErr := a.summarizer.Summarize(ctx, candidates); compactErr == nil {
+					if markdown, usage, compactErr := summarizeForTarget(ctx, a.summarizer, candidates, target); compactErr == nil {
 						a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
 						if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, turnIDs(candidates)); markErr != nil {
 							reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
 								config.F("status", "degraded"), config.ErrorField(markErr))
 						}
-						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage, a.model, a.provider, a.billingBaseURL)
+						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage, target.Model, target.Provider, target.BillingBaseURL)
 						rebuilt := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, markdown, preservedRecentTailCount(recentTurns, inputLimit), recentTurns, req.Tools, inputLimit)
 						messages = rebuilt.Messages
 						if emptyConsecutive > 0 && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
