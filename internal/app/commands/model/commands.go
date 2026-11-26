@@ -31,6 +31,7 @@ type Router interface {
 	Providers() []string
 	ListProviders(ctx context.Context) []agent.ProviderStatus
 	ListModels(ctx context.Context, provider string) ([]llm.ModelEntry, error)
+	KnownWindow(provider, model string) (int, bool)
 }
 
 // Pins reads and writes the conversation's model pin.
@@ -138,21 +139,21 @@ func globalSelectionArgs(args []string) (provider, model string, ok bool) {
 	return provider, model, true
 }
 
-// show renders the resolved target, its provenance, and every configured
-// provider's listing availability.
+// show renders the resolved target with its reported context window and
+// every configured provider's listing availability. The window is shown only
+// when the router has harvested it from a live listing.
 func (h *handler) show(ctx context.Context, req commands.Request) commands.Result {
 	owner := req.Principal.CanonicalUserID
 	target, _ := h.router.Resolve(ctx, owner, req.SessionKey, req.Principal.Gateway, req.ChatID)
-
-	provenance := "profile default"
-	if provider, model, found, err := h.pins.SessionModel(ctx, owner, req.SessionKey); err == nil && found &&
-		strings.TrimSpace(provider) == target.Provider && strings.TrimSpace(model) == target.Model {
-		provenance = "conversation pin"
-	}
+	statuses := h.router.ListProviders(ctx)
+	window, ok := h.router.KnownWindow(target.Provider, target.Model)
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "Current model: %s/%s (%s)\n", target.Provider, target.Model, provenance)
-	statuses := h.router.ListProviders(ctx)
+	if ok && window > 0 {
+		fmt.Fprintf(&text, "Current: %s/%s (context %d)\n", target.Provider, target.Model, window)
+	} else {
+		fmt.Fprintf(&text, "Current: %s/%s\n", target.Provider, target.Model)
+	}
 	if len(statuses) == 0 {
 		text.WriteString("Providers: none configured\n")
 	} else {

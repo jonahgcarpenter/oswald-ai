@@ -23,6 +23,8 @@ type fakeRouter struct {
 	statuses     []agent.ProviderStatus
 	models       map[string][]llm.ModelEntry
 	listErr      error
+	knownWindow  int
+	knownFound   bool
 
 	resolveOwner, resolveSession, resolveGateway, resolveChat string
 	listedProvider                                            string
@@ -40,6 +42,10 @@ func (f *fakeRouter) HasProvider(provider string) bool {
 		}
 	}
 	return false
+}
+
+func (f *fakeRouter) KnownWindow(_, _ string) (int, bool) {
+	return f.knownWindow, f.knownFound
 }
 
 func (f *fakeRouter) Providers() []string { return append([]string(nil), f.providers...) }
@@ -108,7 +114,7 @@ func testRequest(args ...string) commands.Request {
 	}
 }
 
-func TestShowReportsConversationPinAndProviders(t *testing.T) {
+func TestShowReportsCurrentAndProviders(t *testing.T) {
 	router := &fakeRouter{
 		target: agent.Target{Provider: "example", Model: "model-a"},
 		statuses: []agent.ProviderStatus{
@@ -122,7 +128,7 @@ func TestShowReportsConversationPinAndProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Current model: example/model-a (conversation pin)\n" +
+	want := "Current: example/model-a\n" +
 		"Providers:\n" +
 		"  example — 12 models\n" +
 		"  other — unavailable\n" +
@@ -138,11 +144,12 @@ func TestShowReportsConversationPinAndProviders(t *testing.T) {
 	}
 }
 
-func TestShowFallsBackToProfileDefaultProvenance(t *testing.T) {
+func TestShowOmitsProvenance(t *testing.T) {
 	tests := []struct {
 		name string
 		pins *fakePins
 	}{
+		{name: "pin equal to resolved target", pins: &fakePins{provider: "example", model: "model-a", found: true}},
 		{name: "pin unequal to resolved target", pins: &fakePins{provider: "example", model: "model-b", found: true}},
 		{name: "no pin", pins: &fakePins{}},
 		{name: "pin read error", pins: &fakePins{sessionErr: errors.New("state read failed")}},
@@ -154,10 +161,31 @@ func TestShowFallsBackToProfileDefaultProvenance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(result.Text, "(profile default)") || strings.Contains(result.Text, "(conversation pin)") {
+			if !strings.Contains(result.Text, "Current: example/model-a\n") {
 				t.Fatalf("text = %q", result.Text)
 			}
+			if strings.Contains(result.Text, "conversation pin") || strings.Contains(result.Text, "channel override") || strings.Contains(result.Text, "profile default") {
+				t.Fatalf("provenance leaked: %q", result.Text)
+			}
 		})
+	}
+}
+
+func TestShowReportsContextWindow(t *testing.T) {
+	router := &fakeRouter{
+		target:      agent.Target{Provider: "other", Model: "other/model"},
+		knownWindow: 262144,
+		knownFound:  true,
+	}
+	result, err := New(router, &fakePins{}, &fakeDefaults{}).Execute(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "Current: other/other/model (context 262144)\n") {
+		t.Fatalf("text = %q", result.Text)
+	}
+	if result.Outcome.Operation != "model.show" {
+		t.Fatalf("outcome = %+v", result.Outcome)
 	}
 }
 
@@ -167,7 +195,7 @@ func TestShowWithoutConfiguredProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Current model: example/model-a (profile default)\n" +
+	want := "Current: example/model-a\n" +
 		"Providers: none configured\n" +
 		"Use /model <provider> to list its models, /model <provider>/<model> to set."
 	if result.Text != want {

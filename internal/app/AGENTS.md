@@ -83,7 +83,8 @@ fires twice, so rapid successive writes coalesce.
 - `/queue <prompt>` forces FIFO queueing for the next turn. Plain messages steer into the running
   turn by default (text-only, consumed after the next tool result); unconsumed steers auto-run
   as the next turn.
-- `/model` shows the conversation's resolved model and configured providers; `/model <provider>`
+- `/model` shows `Current: <provider>/<model>` with `(context N)` when the window was
+  reported, plus configured providers; `/model <provider>`
   lists that provider's models live (capped at 40 with an ellipsis note); `/model
   <provider>/<model>` pins the conversation — live from the next turn, survives `/new`, changed
   only by setting another model. `/model <provider>/<model> --global` writes the acting profile's
