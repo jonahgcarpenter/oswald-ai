@@ -22,6 +22,7 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
+	videonalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/video_analyze"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
@@ -32,7 +33,7 @@ import (
 // registration order. Workspace-owned surfaces are listed explicitly so
 // each tool keeps its original position as surfaces move to tools/*.
 func BuiltinDefinitions() []llm.ToolDefinition {
-	defs := []llm.ToolDefinition{toolmemory.Definition(), toolskill.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), toolclarify.Definition(), tooldelegate.Definition()}
+	defs := []llm.ToolDefinition{toolmemory.Definition(), toolskill.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), videonalyze.Definition(), toolclarify.Definition(), tooldelegate.Definition()}
 	defs = append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...),
 		toolread.Definition(),
 		toolwrite.Definition(),

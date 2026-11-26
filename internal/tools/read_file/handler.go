@@ -24,6 +24,17 @@ const (
 	defaultReadMax = 2000
 )
 
+// isReadFileAudioExtension names the audio suffixes that keep the terminal
+// ffmpeg recipe instead of routing to a vision tool.
+func isReadFileAudioExtension(ext string) bool {
+	switch ext {
+	case ".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".opus", ".flac", ".caf", ".wma":
+		return true
+	default:
+		return false
+	}
+}
+
 // NewReadFileHandler returns the paginated text-file reader.
 func NewReadFileHandler(ws *workspace.Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
@@ -75,7 +86,15 @@ func readFileCall(ctx context.Context, ws *workspace.Workspace, docs *docache.Ca
 		return governance.Result{}, err
 	}
 	if media.IsMediaExtension(abs) {
-		return governance.Result{}, errors.New("cannot read media — extract frames with terminal ffmpeg into cache/scratch, then vision_analyze the frames")
+		ext := strings.ToLower(filepath.Ext(abs))
+		switch {
+		case ext == ".gif":
+			return governance.Result{}, errors.New("cannot read GIFs — vision_analyze loads the first frame")
+		case isReadFileAudioExtension(ext):
+			return governance.Result{}, errors.New("cannot read audio — use ffprobe for metadata and ffmpeg to trim or transcode; you cannot listen to audio or transcribe it")
+		default:
+			return governance.Result{}, errors.New("cannot read video — use video_analyze, which samples frames for you")
+		}
 	}
 	data, err := workspace.ReadRegularFile(abs)
 	if err != nil {

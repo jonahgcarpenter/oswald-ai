@@ -359,7 +359,7 @@ func isRepeatablePoller(name string) bool {
 
 func isIdempotent(name string) bool {
 	switch name {
-	case "session_search", "web_search", "vision_analyze":
+	case "session_search", "web_search", "vision_analyze", "video_analyze":
 		return true
 	}
 	return false

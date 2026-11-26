@@ -91,6 +91,97 @@ func DownloadPublicImage(ctx context.Context, rawURL string) ([]byte, string, er
 	return downloadImage(ctx, rawURL, true, net.DefaultResolver.LookupNetIP, nil, nil)
 }
 
+// DownloadPublicVideo reads a bounded HTTPS video without caching it. It
+// pins public-IP dialing, disables proxies, and revalidates redirects, like
+// the image downloader. The declared content type must be video/*; ffprobe
+// stays authoritative for the actual container.
+func DownloadPublicVideo(ctx context.Context, rawURL string) ([]byte, string, error) {
+	return downloadVideo(ctx, rawURL, net.DefaultResolver.LookupNetIP, nil, nil)
+}
+
+func validVideoURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.User != nil || strings.Contains(raw, "#") || u.Hostname() == "" || u.Hostname() == "." {
+		return nil, errors.New("invalid video URL")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, errors.New("invalid video URL port")
+		}
+	}
+	return u, nil
+}
+
+func downloadVideo(ctx context.Context, rawURL string, lookup func(context.Context, string, string) ([]netip.Addr, error), dial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config) ([]byte, string, error) {
+	if _, err := validVideoURL(rawURL); err != nil {
+		return nil, "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	transport := &http.Transport{
+		Proxy: nil, DisableKeepAlives: true, TLSClientConfig: tlsConfig,
+		TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 10 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := lookup(ctx, "ip", host)
+		if err != nil || len(ips) == 0 {
+			return nil, errors.New("video hostname resolution failed")
+		}
+		for _, ip := range ips {
+			if !publicIP(ip) {
+				return nil, errors.New("video destination is not public")
+			}
+		}
+		pinned := net.JoinHostPort(ips[0].String(), port)
+		if dial != nil {
+			return dial(ctx, network, pinned)
+		}
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", pinned)
+	}
+	client := &http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many video redirects")
+		}
+		// net/http otherwise forwards the previous URL as Referer, including its query.
+		req.Header.Del("Referer")
+		if req.URL.Scheme != "https" {
+			return errors.New("video redirect requires HTTPS")
+		}
+		_, err := validVideoURL(req.URL.String())
+		return err
+	}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("download video: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("download video: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.ContentLength > media.MaxOutputAttachmentBytes {
+		return nil, "", errors.New("video download rejected")
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxOutputAttachmentBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	mime := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
+	if !strings.HasPrefix(mime, "video/") {
+		return nil, "", errors.New("video download did not return a video")
+	}
+	if len(data) == 0 || len(data) > media.MaxOutputAttachmentBytes {
+		return nil, "", errors.New("video download rejected")
+	}
+	return data, mime, nil
+}
+
 func downloadImage(ctx context.Context, rawURL string, allowHTTP bool, lookup func(context.Context, string, string) ([]netip.Addr, error), dial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config) ([]byte, string, error) {
 	if _, err := validImageURL(rawURL, allowHTTP); err != nil {
 		return nil, "", err

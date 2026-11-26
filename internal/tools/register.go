@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,6 +42,7 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	toolterm "github.com/jonahgcarpenter/oswald-ai/internal/tools/terminal"
+	videonalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/video_analyze"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	toolwrite "github.com/jonahgcarpenter/oswald-ai/internal/tools/write_file"
@@ -58,6 +60,14 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 	visionPolicy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}
 	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandlerWithWorkspace(cache, ws))); err != nil {
 		return fmt.Errorf("register vision_analyze tool: %w", err)
+	}
+	if ffmpeg, ffprobe := lookupVideoBinaries(); ffmpeg == "" || ffprobe == "" {
+		if err := reg.DisableBuiltin(videonalyze.Name); err != nil {
+			return fmt.Errorf("failed to disable %s tool: %w", videonalyze.Name, err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled video analysis because ffmpeg is unavailable", config.F("tool_name", videonalyze.Name))
+	} else if err := reg.RegisterHandler(videonalyze.Name, visionPolicy, registry.Handler(videonalyze.NewHandlerWithWorkspace(docache.NewProfileMediaCache(cfg.ProfileRoot, cfg.ProfileName), cache, ws, ffmpeg, ffprobe))); err != nil {
+		return fmt.Errorf("register video_analyze tool: %w", err)
 	}
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
 	if comfyURL == "" {
@@ -267,6 +277,19 @@ func sortedEndpointNames(endpoints map[string]config.ProviderEndpoint) []string 
 	}
 	sort.Strings(names)
 	return names
+}
+
+// videoBinaryLookPath resolves the ffmpeg/ffprobe pair; tests substitute a
+// fake so registration never depends on host binaries.
+var videoBinaryLookPath = exec.LookPath
+
+// lookupVideoBinaries resolves the ffmpeg/ffprobe pair for frame sampling.
+// Empty strings mean frame extraction is unavailable and video_analyze stays
+// disabled; the agent keeps the terminal recipe instead.
+func lookupVideoBinaries() (ffmpeg, ffprobe string) {
+	ffmpeg, _ = videoBinaryLookPath("ffmpeg")
+	ffprobe, _ = videoBinaryLookPath("ffprobe")
+	return ffmpeg, ffprobe
 }
 
 // subscriptionListing resolves one provider's model listing for validation.

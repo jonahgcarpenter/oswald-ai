@@ -145,7 +145,7 @@ func TestBuildPromptImageOnlyAndReplyImageLimit(t *testing.T) {
 
 func TestBuildPromptDescribesMedia(t *testing.T) {
 	video := media.DocumentRef{Path: "/private/ab12.mp4", Filename: "clip.mp4", MIMEType: "video/mp4", DurationSeconds: 12.4, Width: 720, Height: 1280}
-	want := "what happens?\n\n[Video attached at: /private/ab12.mp4 ('clip.mp4', 0:12, 720×1280)]\n" + media.MediaRecipeNote
+	want := "what happens?\n\n[Video attached at: /private/ab12.mp4 ('clip.mp4', 0:12, 720×1280)]"
 	if got := BuildPrompt("what happens?", nil, nil, nil, []media.DocumentRef{video}); got != want {
 		t.Fatalf("prompt = %q, want %q", got, want)
 	}
