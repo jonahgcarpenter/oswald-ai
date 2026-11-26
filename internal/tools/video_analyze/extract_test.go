@@ -112,20 +112,30 @@ func TestReadFrameFileRoundTrip(t *testing.T) {
 }
 
 func TestResultTextShapes(t *testing.T) {
-	single := resultText("What?", []float64{7.0}, 13.0, 1, []string{"640×480"})
+	mkFrames := func(n int) []videoFrame {
+		out := make([]videoFrame, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, videoFrame{path: "/cache/media/f.jpg", geometry: "640×480"})
+		}
+		return out
+	}
+	single := resultText("What?", []float64{7.0}, 13.0, 1, mkFrames(1))
 	if !strings.Contains(single, "1 still frame (t=7.0s of 13.0s") || strings.Contains(single, "Sheet") {
 		t.Fatalf("single text = %q", single)
 	}
-	multi := resultText("What?", []float64{1.6, 4.9}, 13.0, 1, []string{"640×480", "640×480"})
-	if !strings.Contains(multi, "2 still frames") || !strings.Contains(multi, "Frame 2/2 @ 4.9s") {
+	if !strings.Contains(single, "Frame 1/1 @ 7.0s: 640×480 → /cache/media/f.jpg") {
+		t.Fatalf("single frame path missing: %q", single)
+	}
+	multi := resultText("What?", []float64{1.6, 4.9}, 13.0, 1, mkFrames(2))
+	if !strings.Contains(multi, "Sheet 1/1: top-left t=1.6s → /cache/media/f.jpg") {
 		t.Fatalf("multi text = %q", multi)
 	}
-	sheet := resultText("What?", []float64{1.0, 2.0, 3.0, 4.0, 5.0}, 20.0, 2, nil)
-	if !strings.Contains(sheet, "Sheet 1/2: top-left t=1.0s") || !strings.Contains(sheet, "Sheet 2/2: top-left t=5.0s") {
+	sheet := resultText("What?", []float64{1.0, 2.0, 3.0, 4.0, 5.0}, 20.0, 2, mkFrames(5))
+	if !strings.Contains(sheet, "Sheet 1/2: top-left t=1.0s → /cache/media/f.jpg, top-right t=2.0s → /cache/media/f.jpg, bottom-left t=3.0s → /cache/media/f.jpg, bottom-right t=4.0s → /cache/media/f.jpg") || !strings.Contains(sheet, "Sheet 2/2: top-left t=5.0s → /cache/media/f.jpg") {
 		t.Fatalf("sheet text = %q", sheet)
 	}
 	for _, text := range []string{single, multi, sheet} {
-		if !strings.Contains(text, "Question: What?") || !strings.Contains(text, "not perceived") {
+		if !strings.Contains(text, "Question: What?") || !strings.Contains(text, "not perceived") || !strings.Contains(text, "24 hours") {
 			t.Fatalf("missing caveat/question: %q", text)
 		}
 	}

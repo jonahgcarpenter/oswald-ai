@@ -1,11 +1,7 @@
 package video_analyze
 
 import (
-	"bytes"
 	"context"
-	"image"
-	"image/color"
-	"image/jpeg"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -22,23 +19,7 @@ func videoContext(profile, gateway string) context.Context {
 	return requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: profile, ExternalID: "synthetic", Gateway: gateway, Assurance: identity.AssuranceDiscordGateway})
 }
 
-func frameJPEG(width, height int) []byte {
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x), G: uint8(y), B: 128, A: 255})
-		}
-	}
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
-		panic(err)
-	}
-	return buf.Bytes()
-}
-
-// fakeSeams wires deterministic download/probe/extract doubles. The extractor
-// writes one valid JPEG per stamp so normalization runs for real.
-func fakeSeams(probe func(ctx context.Context, ffprobe, path string) (float64, int, int)) (downloader, func(context.Context, string, string) (float64, int, int), func(context.Context, string, string, []float64, float64, string) ([]string, error)) {
+func fakeSeams(t *testing.T, probe func(ctx context.Context, ffprobe, path string) (float64, int, int)) (downloader, func(context.Context, string, string) (float64, int, int), func(context.Context, string, string, []float64, float64, string) ([]string, error), frameSaver) {
 	download := func(ctx context.Context, raw string) ([]byte, string, error) {
 		return []byte("synthetic-video-bytes"), "video/mp4", nil
 	}
@@ -47,16 +28,23 @@ func fakeSeams(probe func(ctx context.Context, ffprobe, path string) (float64, i
 		for i := range stamps {
 			path := filepath.Join(dir, "frame.jpg")
 			if len(stamps) > 1 {
-				path = filepath.Join(dir, "frame-"+string(rune('0'+i))+".jpg")
+				path = filepath.Join(dir, "shot.jpg"+string(rune('a'+i)))
 			}
-			if err := os.WriteFile(path, frameJPEG(64, 48), 0600); err != nil {
+			if err := os.WriteFile(path, sampleJPEG(t, 64, 48, 7), 0600); err != nil {
 				return nil, err
 			}
 			paths = append(paths, path)
 		}
 		return paths, nil
 	}
-	return download, probe, extract
+	var saved []string
+	save := func(ctx context.Context, user string, data []byte, mime string) (string, error) {
+		path := filepath.Join(t.TempDir(), "frame.jpg")
+		saved = append(saved, path)
+		return path, nil
+	}
+	_ = saved
+	return download, probe, extract, save
 }
 
 func stdProbe(ctx context.Context, ffprobe, path string) (float64, int, int) {
@@ -75,8 +63,8 @@ func videoWorkspace(t *testing.T) (*workspace.Workspace, string) {
 func TestHandlerValidation(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, _ := videoWorkspace(t)
-	download, probe, extract := fakeSeams(stdProbe)
-	handler := newHandler(mediaCache, ws, download, probe, extract, "ffmpeg", "ffprobe")
+	download, probe, extract, save := fakeSeams(t, stdProbe)
+	handler := newHandler(mediaCache, ws, download, probe, extract, save, "ffmpeg", "ffprobe")
 	ctx := videoContext("alice", "discord")
 	cases := []map[string]interface{}{
 		{},
@@ -106,28 +94,27 @@ func TestHandlerValidation(t *testing.T) {
 	}
 }
 
-func TestHandlerEvenFrames(t *testing.T) {
+func TestHandlerDefaultIsOneSheetWithPaths(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, _ := videoWorkspace(t)
+	download, probe, extract, save := fakeSeams(t, stdProbe)
 	var gotStamps []float64
-	download, _, extract := fakeSeams(stdProbe)
-	probe := func(ctx context.Context, ffprobe, path string) (float64, int, int) { return 13.0, 640, 480 }
-	extractOnce := func(ctx context.Context, ffmpeg, src string, stamps []float64, duration float64, dir string) ([]string, error) {
+	extractSeen := func(ctx context.Context, ffmpeg, src string, stamps []float64, duration float64, dir string) ([]string, error) {
 		gotStamps = append([]float64(nil), stamps...)
 		return extract(ctx, ffmpeg, src, stamps, duration, dir)
 	}
-	handler := newHandler(mediaCache, ws, download, probe, extractOnce, "ffmpeg", "ffprobe")
+	handler := newHandler(mediaCache, ws, download, probe, extractSeen, save, "ffmpeg", "ffprobe")
 	result, err := handler(videoContext("alice", "discord"), map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "What happens?"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != governance.OutcomeProductive || len(result.Images) != 4 || len(result.Attachments) != 0 {
+	if result.Outcome != governance.OutcomeProductive || len(result.Images) != 1 || len(result.Attachments) != 0 {
 		t.Fatalf("images=%d attachments=%d outcome=%v", len(result.Images), len(result.Attachments), result.Outcome)
 	}
 	if len(gotStamps) != 4 || gotStamps[0] <= 0 || gotStamps[3] >= 13.0 {
 		t.Fatalf("stamps = %v", gotStamps)
 	}
-	for _, want := range []string{"4 still frames", "t=1.6s", "Question: What happens?", "not perceived", "Frame 4/4 @ 11.4s"} {
+	for _, want := range []string{"4 still frames (t=1.6s, 4.9s, 8.1s, 11.4s of 13.0s", "Sheet 1/1:", "top-left t=1.6s", "Question: What happens?", "24 hours", "not perceived"} {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("missing %q in %q", want, result.Content)
 		}
@@ -140,24 +127,13 @@ func TestHandlerEvenFrames(t *testing.T) {
 func TestHandlerTimestampsWin(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, _ := videoWorkspace(t)
+	download, probe, extract, save := fakeSeams(t, stdProbe)
 	var gotStamps []float64
-	download, probe, _ := fakeSeams(stdProbe)
-	extract := func(ctx context.Context, ffmpeg, src string, stamps []float64, duration float64, dir string) ([]string, error) {
+	extractSeen := func(ctx context.Context, ffmpeg, src string, stamps []float64, duration float64, dir string) ([]string, error) {
 		gotStamps = append([]float64(nil), stamps...)
-		var paths []string
-		for i := range stamps {
-			path := filepath.Join(dir, "shot.jpg")
-			if len(stamps) > 1 {
-				path = filepath.Join(dir, "shot.jpg"+string(rune('a'+i)))
-			}
-			if err := os.WriteFile(path, frameJPEG(32, 24), 0600); err != nil {
-				return nil, err
-			}
-			paths = append(paths, path)
-		}
-		return paths, nil
+		return extract(ctx, ffmpeg, src, stamps, duration, dir)
 	}
-	handler := newHandler(mediaCache, ws, download, probe, extract, "ffmpeg", "ffprobe")
+	handler := newHandler(mediaCache, ws, download, probe, extractSeen, save, "ffmpeg", "ffprobe")
 	result, err := handler(videoContext("alice", "discord"), map[string]interface{}{
 		"source": "https://public.example/clip.mp4", "question": "Q",
 		"frames": float64(8), "timestamps": []interface{}{float64(7.0), float64(2.5)},
@@ -168,7 +144,7 @@ func TestHandlerTimestampsWin(t *testing.T) {
 	if len(gotStamps) != 2 || gotStamps[0] != 7.0 || gotStamps[1] != 2.5 {
 		t.Fatalf("stamps = %v", gotStamps)
 	}
-	if len(result.Images) != 2 || !strings.Contains(result.Content, "t=7.0s, 2.5s") {
+	if len(result.Images) != 1 || !strings.Contains(result.Content, "t=7.0s, 2.5s") {
 		t.Fatalf("images=%d content=%q", len(result.Images), result.Content)
 	}
 	if _, err := handler(videoContext("alice", "discord"), map[string]interface{}{
@@ -178,11 +154,27 @@ func TestHandlerTimestampsWin(t *testing.T) {
 	}
 }
 
+func TestHandlerSingleFrameDirect(t *testing.T) {
+	mediaCache := docache.NewMedia(t.TempDir())
+	ws, _ := videoWorkspace(t)
+	download, probe, extract, save := fakeSeams(t, stdProbe)
+	handler := newHandler(mediaCache, ws, download, probe, extract, save, "ffmpeg", "ffprobe")
+	result, err := handler(videoContext("alice", "discord"), map[string]interface{}{
+		"source": "https://public.example/clip.mp4", "question": "Q", "timestamps": []interface{}{float64(7.0)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Images) != 1 || !strings.Contains(result.Content, "1 still frame (t=7.0s") || strings.Contains(result.Content, "Sheet") {
+		t.Fatalf("images=%d content=%q", len(result.Images), result.Content)
+	}
+}
+
 func TestHandlerSheetsAboveFour(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, _ := videoWorkspace(t)
-	download, probe, extract := fakeSeams(stdProbe)
-	handler := newHandler(mediaCache, ws, download, probe, extract, "ffmpeg", "ffprobe")
+	download, probe, extract, save := fakeSeams(t, stdProbe)
+	handler := newHandler(mediaCache, ws, download, probe, extract, save, "ffmpeg", "ffprobe")
 	result, err := handler(videoContext("alice", "discord"), map[string]interface{}{
 		"source": "https://public.example/clip.mp4", "question": "Q", "frames": float64(6),
 	})
@@ -192,7 +184,7 @@ func TestHandlerSheetsAboveFour(t *testing.T) {
 	if len(result.Images) != 2 {
 		t.Fatalf("sheets = %d", len(result.Images))
 	}
-	if !strings.Contains(result.Content, "Sheet 1/2") || !strings.Contains(result.Content, "Sheet 2/2") {
+	if !strings.Contains(result.Content, "Sheet 1/2:") || !strings.Contains(result.Content, "Sheet 2/2:") {
 		t.Fatalf("sheet map missing: %q", result.Content)
 	}
 }
@@ -209,15 +201,15 @@ func TestHandlerCachedAndWorkspaceSources(t *testing.T) {
 	if err := os.WriteFile(local, []byte("synthetic-video-bytes"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	download, probe, extract := fakeSeams(stdProbe)
-	handler := newHandler(mediaCache, ws, download, probe, extract, "ffmpeg", "ffprobe")
+	download, probe, extract, save := fakeSeams(t, stdProbe)
+	handler := newHandler(mediaCache, ws, download, probe, extract, save, "ffmpeg", "ffprobe")
 	ctx := videoContext("alice", "discord")
 	for _, source := range []string{cached, local} {
 		result, err := handler(ctx, map[string]interface{}{"source": source, "question": "Q"})
 		if err != nil {
 			t.Fatalf("source %s: %v", source, err)
 		}
-		if len(result.Images) != 4 {
+		if len(result.Images) != 1 {
 			t.Fatalf("source %s images=%d", source, len(result.Images))
 		}
 	}
@@ -229,18 +221,19 @@ func TestHandlerCachedAndWorkspaceSources(t *testing.T) {
 func TestHandlerProbeFailures(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, _ := videoWorkspace(t)
-	download, _, extract := fakeSeams(stdProbe)
+	download, _, extract, save := fakeSeams(t, stdProbe)
+	ctx := videoContext("alice", "discord")
 	badProbe := func(ctx context.Context, ffprobe, path string) (float64, int, int) { return 0, 0, 0 }
-	if _, err := newHandler(mediaCache, ws, download, badProbe, extract, "ffmpeg", "ffprobe")(videoContext("alice", "discord"), map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q"}); err == nil {
+	if _, err := newHandler(mediaCache, ws, download, badProbe, extract, save, "ffmpeg", "ffprobe")(ctx, map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q"}); err == nil {
 		t.Fatal("unreadable video accepted")
 	}
 	longProbe := func(ctx context.Context, ffprobe, path string) (float64, int, int) { return 3600, 640, 480 }
-	_, err := newHandler(mediaCache, ws, download, longProbe, extract, "ffmpeg", "ffprobe")(videoContext("alice", "discord"), map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q"})
+	_, err := newHandler(mediaCache, ws, download, longProbe, extract, save, "ffmpeg", "ffprobe")(ctx, map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q"})
 	if err == nil || !strings.Contains(err.Error(), "trim") {
 		t.Fatalf("long video err=%v", err)
 	}
 	audioProbe := func(ctx context.Context, ffprobe, path string) (float64, int, int) { return 200, 0, 0 }
-	if _, err := newHandler(mediaCache, ws, download, audioProbe, extract, "ffmpeg", "ffprobe")(videoContext("alice", "discord"), map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q"}); err == nil {
+	if _, err := newHandler(mediaCache, ws, download, audioProbe, extract, save, "ffmpeg", "ffprobe")(ctx, map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q"}); err == nil {
 		t.Fatal("audio-only stream accepted")
 	}
 }
@@ -248,15 +241,13 @@ func TestHandlerProbeFailures(t *testing.T) {
 func TestHandlerRouteMessages(t *testing.T) {
 	mediaCache := docache.NewMedia(t.TempDir())
 	ws, wsRoot := videoWorkspace(t)
-	download, probe, extract := fakeSeams(stdProbe)
-	handler := newHandler(mediaCache, ws, download, probe, extract, "ffmpeg", "ffprobe")
+	download, probe, extract, save := fakeSeams(t, stdProbe)
+	handler := newHandler(mediaCache, ws, download, probe, extract, save, "ffmpeg", "ffprobe")
 	ctx := videoContext("alice", "discord")
 	imagePath := filepath.Join(wsRoot, "photo.png")
-	if err := os.WriteFile(imagePath, frameJPEG(8, 8), 0600); err != nil {
+	if err := os.WriteFile(imagePath, sampleJPEG(t, 8, 8, 3), 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Workspace stills route to vision_analyze even though bytes are absent here;
-	// the extension gate fires first.
 	if _, err := handler(ctx, map[string]interface{}{"source": imagePath, "question": "Q"}); err == nil || !strings.Contains(err.Error(), "vision_analyze") {
 		t.Fatalf("still image err=%v", err)
 	}
@@ -274,8 +265,41 @@ func TestHandlerRouteMessages(t *testing.T) {
 	if _, err := handler(ctx, map[string]interface{}{"source": audioPath, "question": "Q"}); err == nil || !strings.Contains(err.Error(), "ffprobe") {
 		t.Fatalf("audio err=%v", err)
 	}
-	// A cached non-video payload probing as video still plays: probe is authority.
 	if _, err := handler(ctx, map[string]interface{}{"source": "https://public.example/clip.mp4", "question": "Q", "timestamps": "soon"}); err == nil {
 		t.Fatal("non-numeric timestamps accepted")
+	}
+}
+
+func TestHandlerSavedPathsResolve(t *testing.T) {
+	frames := imagecache.New(t.TempDir())
+	mediaCache := docache.NewMedia(t.TempDir())
+	ws, _ := videoWorkspace(t)
+	download, probe, extract, _ := fakeSeams(t, stdProbe)
+	var saved []string
+	save := func(ctx context.Context, user string, data []byte, mime string) (string, error) {
+		path, err := frames.Save(ctx, user, data, mime)
+		if err == nil {
+			saved = append(saved, path)
+		}
+		return path, err
+	}
+	handler := newHandler(mediaCache, ws, download, probe, extract, save, "ffmpeg", "ffprobe")
+	result, err := handler(videoContext("alice", "discord"), map[string]interface{}{
+		"source": "https://public.example/clip.mp4", "question": "Q", "frames": float64(2),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Images) != 1 || len(saved) != 2 {
+		t.Fatalf("images=%d saved=%d", len(result.Images), len(saved))
+	}
+	for _, path := range saved {
+		if !strings.Contains(result.Content, path) {
+			t.Fatalf("saved path missing from result: %s", path)
+		}
+		data, mime, err := frames.Resolve(context.Background(), "alice", path)
+		if err != nil || !strings.HasPrefix(mime, "image/") || len(data) == 0 {
+			t.Fatalf("saved frame unresolvable: mime=%s len=%d err=%v", mime, len(data), err)
+		}
 	}
 }

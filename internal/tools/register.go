@@ -66,7 +66,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 			return fmt.Errorf("failed to disable %s tool: %w", videonalyze.Name, err)
 		}
 		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled video analysis because ffmpeg is unavailable", config.F("tool_name", videonalyze.Name))
-	} else if err := reg.RegisterHandler(videonalyze.Name, visionPolicy, registry.Handler(videonalyze.NewHandlerWithWorkspace(docache.NewProfileMediaCache(cfg.ProfileRoot, cfg.ProfileName), ws, ffmpeg, ffprobe))); err != nil {
+	} else if err := reg.RegisterHandler(videonalyze.Name, visionPolicy, registry.Handler(videonalyze.NewHandlerWithWorkspace(docache.NewProfileMediaCache(cfg.ProfileRoot, cfg.ProfileName), cache, ws, ffmpeg, ffprobe))); err != nil {
 		return fmt.Errorf("register video_analyze tool: %w", err)
 	}
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)

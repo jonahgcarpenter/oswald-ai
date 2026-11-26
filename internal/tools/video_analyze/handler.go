@@ -37,18 +37,22 @@ type mediaCacher interface {
 
 type downloader func(context.Context, string) ([]byte, string, error)
 
+// frameSaver persists extracted frames where vision_analyze can resolve
+// them for drill-down. The profile image cache satisfies it.
+type frameSaver func(ctx context.Context, userID string, data []byte, mime string) (string, error)
+
 // NewHandler loads videos from the managed media cache or public HTTPS URLs.
-func NewHandler(mediaCache *docache.Cache, ffmpeg, ffprobe string) func(context.Context, map[string]interface{}) (governance.Result, error) {
-	return newHandler(mediaCache, nil, imagecache.DownloadPublicVideo, media.ProbeMedia, ExtractFrames, ffmpeg, ffprobe)
+func NewHandler(mediaCache *docache.Cache, frames *imagecache.Cache, ffmpeg, ffprobe string) func(context.Context, map[string]interface{}) (governance.Result, error) {
+	return newHandler(mediaCache, nil, imagecache.DownloadPublicVideo, media.ProbeMedia, ExtractFrames, frames.Save, ffmpeg, ffprobe)
 }
 
 // NewHandlerWithWorkspace additionally loads absolute workspace video paths
 // jailed to the caller's profile root. Relative workspace paths stay rejected.
-func NewHandlerWithWorkspace(mediaCache *docache.Cache, ws *workspace.Workspace, ffmpeg, ffprobe string) func(context.Context, map[string]interface{}) (governance.Result, error) {
-	return newHandler(mediaCache, ws, imagecache.DownloadPublicVideo, media.ProbeMedia, ExtractFrames, ffmpeg, ffprobe)
+func NewHandlerWithWorkspace(mediaCache *docache.Cache, frames *imagecache.Cache, ws *workspace.Workspace, ffmpeg, ffprobe string) func(context.Context, map[string]interface{}) (governance.Result, error) {
+	return newHandler(mediaCache, ws, imagecache.DownloadPublicVideo, media.ProbeMedia, ExtractFrames, frames.Save, ffmpeg, ffprobe)
 }
 
-func newHandler(mediaCache mediaCacher, ws *workspace.Workspace, download downloader, probe func(context.Context, string, string) (float64, int, int), extract func(context.Context, string, string, []float64, float64, string) ([]string, error), ffmpeg, ffprobe string) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func newHandler(mediaCache mediaCacher, ws *workspace.Workspace, download downloader, probe func(context.Context, string, string) (float64, int, int), extract func(context.Context, string, string, []float64, float64, string) ([]string, error), save frameSaver, ffmpeg, ffprobe string) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		principal, ok := requestctx.PrincipalFromContext(ctx)
 		if !ok || !principal.Authenticated() || principal.Gateway == "openai" {
@@ -131,11 +135,11 @@ func newHandler(mediaCache mediaCacher, ws *workspace.Workspace, download downlo
 			}
 			raw = append(raw, frame)
 		}
-		images, geometries, sheets, err := assembleFrames(ctx, raw)
+		images, viewed, sheets, err := assembleFrames(ctx, principal.CanonicalUserID, save, raw)
 		if err != nil {
 			return governance.Result{}, err
 		}
-		content := resultText(question, stamps, duration, sheets, geometries)
+		content := resultText(question, stamps, duration, sheets, viewed)
 		return governance.Result{Content: content, Outcome: governance.OutcomeProductive, Images: images}, nil
 	}
 }
@@ -333,17 +337,22 @@ func scratchDir(ws *workspace.Workspace) (string, error) {
 	return os.TempDir(), nil
 }
 
-// videoFrame is one normalized frame with its source-geometry label and the
-// raw JPEG bytes backing contact sheets (InputImage.Data is base64).
+// videoFrame is one normalized frame with its cache path and source-geometry
+// label. The path lets the model drill into full resolution with
+// vision_analyze; order matches the sampled timestamps. raw backs contact
+// sheets (InputImage.Data is base64).
 type videoFrame struct {
 	image    llm.InputImage
 	raw      []byte
+	path     string
 	geometry string
 }
 
-// assembleFrames normalizes raw JPEGs and packs more than four into labeled
-// contact sheets so the newest-4 image retention never drops sampled frames.
-func assembleFrames(ctx context.Context, raw [][]byte) (images []llm.InputImage, geometries []string, sheets int, err error) {
+// assembleFrames normalizes raw JPEGs, saves each to the frame cache for
+// vision_analyze drill-down, and attaches sheets: a lone frame attaches
+// directly, otherwise one contact sheet per up-to-4 group so the newest-4
+// image budget never drops sampled frames.
+func assembleFrames(ctx context.Context, user string, save func(context.Context, string, []byte, string) (string, error), raw [][]byte) (images []llm.InputImage, frames []videoFrame, sheets int, err error) {
 	normalized := make([]videoFrame, 0, len(raw))
 	for _, data := range raw {
 		if err := ctx.Err(); err != nil {
@@ -353,23 +362,23 @@ func assembleFrames(ctx context.Context, raw [][]byte) (images []llm.InputImage,
 		if err != nil {
 			return nil, nil, 0, err
 		}
+		path, err := save(ctx, user, data, "image/jpeg")
+		if err != nil {
+			return nil, nil, 0, errors.New("frame cache is unavailable")
+		}
 		geometry := &llm.ImageGeometry{SourceWidth: result.OriginalWidth, SourceHeight: result.OriginalHeight, Width: result.Width, Height: result.Height}
 		result.Image.Geometry = geometry
-		normalized = append(normalized, videoFrame{image: result.Image, raw: data, geometry: geometryLabel(result.OriginalWidth, result.OriginalHeight)})
+		normalized = append(normalized, videoFrame{image: result.Image, raw: data, path: path, geometry: geometryLabel(result.OriginalWidth, result.OriginalHeight)})
 	}
-	if len(normalized) <= 4 {
-		for _, frame := range normalized {
-			images = append(images, frame.image)
-			geometries = append(geometries, frame.geometry)
-		}
-		return images, geometries, 1, nil
+	if len(normalized) == 1 {
+		return []llm.InputImage{normalized[0].image}, normalized, 1, nil
 	}
 	return assembleSheets(ctx, normalized)
 }
 
 // assembleSheets tiles groups of up to four normalized frames into contact
 // sheets and normalizes each sheet for the model.
-func assembleSheets(ctx context.Context, normalized []videoFrame) ([]llm.InputImage, []string, int, error) {
+func assembleSheets(ctx context.Context, normalized []videoFrame) ([]llm.InputImage, []videoFrame, int, error) {
 	var images []llm.InputImage
 	for start := 0; start < len(normalized); start += 4 {
 		end := start + 4
@@ -395,7 +404,7 @@ func assembleSheets(ctx context.Context, normalized []videoFrame) ([]llm.InputIm
 		result.Image.Geometry = geometry
 		images = append(images, result.Image)
 	}
-	return images, nil, (len(normalized) + 3) / 4, nil
+	return images, normalized, (len(normalized) + 3) / 4, nil
 }
 
 func geometryLabel(width, height int) string {
