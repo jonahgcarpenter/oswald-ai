@@ -210,7 +210,7 @@ func TestProfileYAMLRejectsUnsafeOrUnsupportedConfiguration(t *testing.T) {
 func TestProfileCannotOverrideGatewaysOrUseLocalCredentialFiles(t *testing.T) {
 	root := profileConfigFixture(t, syntheticProfileConfig)
 	path := filepath.Join(root, "profiles", "alice", "config.yaml")
-	if err := os.WriteFile(path, []byte("platforms: {}\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("platforms:\n  discord:\n    enabled: true\n    extra:\n      token: synthetic-profile-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadProfiles(root); err == nil {

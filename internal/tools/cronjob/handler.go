@@ -20,10 +20,16 @@ import (
 // create/update time.
 const cronValidateTimeout = 30 * time.Second
 
+// modelValidateTimeout bounds model-existence listing probes at create/update
+// time.
+const modelValidateTimeout = 8 * time.Second
+
 // NewCronjobManageHandler returns the scheduler handler. Validators is the
 // per-platform deliver-target liveness check (nil skips liveness, which
-// hermetic unit tests use; production always wires it).
-func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validators map[string]cron.TargetValidator) func(context.Context, map[string]interface{}) (governance.Result, error) {
+// hermetic unit tests use; production always wires it). modelValidator checks
+// explicit model references against live provider state (nil skips the live
+// check; production always wires it); syntax is always enforced.
+func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validators map[string]cron.TargetValidator, modelValidator cron.ModelValidator) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	runner := &cron.Runner{}
 	if ws != nil {
 		runner.Root = ws.Root()
@@ -49,9 +55,6 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validat
 		if err := rejectUnknown(args, "action", "job_id", "name", "schedule", "prompt", "skills", "script", "no_agent", "deliver_platform", "deliver_chat_id", "deliver_user_id", "enabled_toolsets", "mcp_servers", "repeat_times", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
 			return governance.Result{}, err
 		}
-		if _, has := args["model"]; has {
-			return governance.Result{}, errors.New("model override is user-owned; omit unless the user explicitly asked")
-		}
 		if _, has := args["provider"]; has {
 			return governance.Result{}, errors.New("provider override is user-owned; omit unless the user explicitly asked")
 		}
@@ -74,7 +77,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validat
 				if job.NextRunAt != nil && strings.TrimSpace(*job.NextRunAt) != "" {
 					next = strings.TrimSpace(*job.NextRunAt)
 				}
-				fmt.Fprintf(&sb, "%s %s %s state=%s next=%s mcp=%s status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule.Display), job.State, outputpkg.FormatModelTimestamp(next), mcpDisplay(job.MCPServers), job.LastStatus)
+				fmt.Fprintf(&sb, "%s %s %s state=%s next=%s mcp=%s model=%s status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule.Display), job.State, outputpkg.FormatModelTimestamp(next), mcpDisplay(job.MCPServers), modelDisplay(job.Model), job.LastStatus)
 			}
 			return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
 		case "create":
@@ -83,7 +86,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validat
 					return governance.Result{}, errors.New("repeat_times must be an integer >= 0")
 				}
 			}
-			input, err := decodeCronInput(ctx, args, validators)
+			input, err := decodeCronInput(ctx, args, validators, modelValidator)
 			if err != nil {
 				return governance.Result{}, err
 			}
@@ -99,7 +102,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validat
 		case "update":
 			id, _ := stringArg(args, "job_id")
 			updated, err := store.Mutate(strings.TrimSpace(id), func(job *cron.Job) error {
-				return applyCronUpdate(ctx, runner, job, args, validators)
+				return applyCronUpdate(ctx, runner, job, args, validators, modelValidator)
 			})
 			if err != nil {
 				return governance.Result{}, err
@@ -179,7 +182,7 @@ func NewCronjobManageHandler(ws *workspace.Workspace, store *cron.Store, validat
 	}
 }
 
-func decodeCronInput(ctx context.Context, args map[string]interface{}, validators map[string]cron.TargetValidator) (cron.Job, error) {
+func decodeCronInput(ctx context.Context, args map[string]interface{}, validators map[string]cron.TargetValidator, modelValidator cron.ModelValidator) (cron.Job, error) {
 	var job cron.Job
 	rawSchedule, _ := stringArg(args, "schedule")
 	if strings.TrimSpace(rawSchedule) == "" {
@@ -227,7 +230,88 @@ func decodeCronInput(ctx context.Context, args map[string]interface{}, validator
 		}
 		job.MCPServers = servers
 	}
+	if _, present := args["model"]; present {
+		parsed, _, err := parseModelInput(args["model"])
+		if err != nil {
+			return cron.Job{}, err
+		}
+		if parsed != nil {
+			if err := validateModelLive(ctx, modelValidator, parsed.Provider, parsed.Model); err != nil {
+				return cron.Job{}, err
+			}
+		}
+		job.Model = parsed
+	}
+	if job.NoAgent && job.Model != nil {
+		return cron.Job{}, errors.New("model requires agent")
+	}
 	return job, nil
+}
+
+// modelDisplay renders the job model pin for list output: provider/model or
+// default when the job runs the profile default.
+func modelDisplay(model *cron.JobModel) string {
+	if model == nil {
+		return "default"
+	}
+	provider := strings.TrimSpace(model.Provider)
+	id := strings.TrimSpace(model.Model)
+	if provider == "" || id == "" {
+		return "default"
+	}
+	return outputpkg.Clean(provider + "/" + id)
+}
+
+// parseModelInput parses the optional model object. A nil value clears back
+// to the profile default. Unknown keys fail closed so typos cannot silently
+// pin the wrong transport.
+func parseModelInput(raw interface{}) (*cron.JobModel, bool, error) {
+	if raw == nil {
+		return nil, true, nil
+	}
+	var fields map[string]interface{}
+	switch v := raw.(type) {
+	case map[string]interface{}:
+		fields = v
+	case map[string]string:
+		fields = make(map[string]interface{}, len(v))
+		for key, val := range v {
+			fields[key] = val
+		}
+	default:
+		return nil, false, errors.New("model must be {provider, model} or null")
+	}
+	for key := range fields {
+		if key != "provider" && key != "model" {
+			return nil, false, fmt.Errorf("unknown model field %q", key)
+		}
+	}
+	providerRaw, _ := fields["provider"].(string)
+	modelRaw, _ := fields["model"].(string)
+	if _, ok := fields["provider"]; !ok {
+		providerRaw = ""
+	}
+	if _, ok := fields["model"]; !ok {
+		modelRaw = ""
+	}
+	normalized, err := cron.NormalizeJobModel(providerRaw, modelRaw)
+	if err != nil {
+		return nil, false, err
+	}
+	return &normalized, true, nil
+}
+
+// validateModelLive checks a normalized reference against live provider
+// state. A nil validator skips the check (hermetic unit tests); production
+// always wires it. The timeout bounds one listing fetch so a dead provider
+// cannot stall job creation.
+func validateModelLive(ctx context.Context, validator cron.ModelValidator, provider, model string) error {
+	if validator == nil {
+		return nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, modelValidateTimeout)
+	defer cancel()
+	return validator.ValidateModel(callCtx, provider, model)
 }
 
 // mcpDisplay renders the allowlist for list output: all, none, or names.
@@ -327,7 +411,7 @@ func deliverFromContext(ctx context.Context) (cron.Deliver, error) {
 	return cron.Deliver{}, errors.New("deliver target is required: pass deliver_platform and deliver_chat_id")
 }
 
-func applyCronUpdate(ctx context.Context, runner *cron.Runner, job *cron.Job, args map[string]interface{}, validators map[string]cron.TargetValidator) error {
+func applyCronUpdate(ctx context.Context, runner *cron.Runner, job *cron.Job, args map[string]interface{}, validators map[string]cron.TargetValidator, modelValidator cron.ModelValidator) error {
 	// Core -> schedule -> run fields; first failure wins.
 	now := time.Now().UTC()
 	if raw, ok := args["schedule"]; ok {
@@ -431,6 +515,21 @@ func applyCronUpdate(ctx context.Context, runner *cron.Runner, job *cron.Job, ar
 		if v, ok := raw.(bool); ok {
 			job.NoAgent = v
 		}
+	}
+	if _, present := args["model"]; present {
+		parsed, _, err := parseModelInput(args["model"])
+		if err != nil {
+			return err
+		}
+		if parsed != nil {
+			if err := validateModelLive(ctx, modelValidator, parsed.Provider, parsed.Model); err != nil {
+				return err
+			}
+		}
+		job.Model = parsed
+	}
+	if job.NoAgent && job.Model != nil {
+		return errors.New("model requires agent")
 	}
 	if job.NoAgent && job.Script == "" {
 		return errors.New("no_agent requires script")

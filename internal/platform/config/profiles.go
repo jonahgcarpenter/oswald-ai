@@ -122,9 +122,14 @@ type platformExtraYAML struct {
 	APIHost             string   `yaml:"api_host"`
 	APIPort             int      `yaml:"api_port"`
 }
+type modelOverrideYAML struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+}
 type platformYAML struct {
-	Enabled bool              `yaml:"enabled"`
-	Extra   platformExtraYAML `yaml:"extra"`
+	Enabled          bool                         `yaml:"enabled"`
+	Extra            platformExtraYAML            `yaml:"extra"`
+	ChannelOverrides map[string]modelOverrideYAML `yaml:"channel_overrides"`
 }
 type apiYAML struct {
 	Key *string `yaml:"key"`
@@ -272,7 +277,7 @@ func privateDirectory(path, source, profile string) error {
 // knownPlatforms bounds configured platform names before any validation.
 var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true}
 
-var platformTopKeys = map[string]bool{"enabled": true, "extra": true}
+var platformTopKeys = map[string]bool{"enabled": true, "extra": true, "channel_overrides": true}
 
 var platformExtraKeys = map[string]bool{
 	"token": true, "allowed_users": true, "banned_users": true,
@@ -336,17 +341,69 @@ func validatePlatformKeys(name string, node *yaml.Node) error {
 		if !platformTopKeys[key] {
 			return configErr("config_key_unknown", path+"."+key)
 		}
-		if key != "extra" {
-			continue
-		}
-		extra := node.Content[i+1]
-		if extra.Kind != yaml.MappingNode {
-			return configErr("config_key_invalid", path+".extra")
-		}
-		for j := 0; j+1 < len(extra.Content); j += 2 {
-			if field := extra.Content[j].Value; !platformExtraKeys[field] {
-				return configErr("config_key_unknown", path+".extra."+field)
+		switch key {
+		case "extra":
+			extra := node.Content[i+1]
+			if extra.Kind != yaml.MappingNode {
+				return configErr("config_key_invalid", path+".extra")
 			}
+			for j := 0; j+1 < len(extra.Content); j += 2 {
+				if field := extra.Content[j].Value; !platformExtraKeys[field] {
+					return configErr("config_key_unknown", path+".extra."+field)
+				}
+			}
+		case "channel_overrides":
+			if err := validateChannelOverrideKeys(path+".channel_overrides", node.Content[i+1]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// profilePlatformKeys is the complete allow-list for a named profile's
+// platforms subtree: per-channel model routes for the two transport-backed
+// gateways and nothing else. Listener, credential, admission, and enabled
+// configuration stays in the global block, so profile platforms entries are
+// narrowed by rejection rather than silently dropped.
+var profilePlatformKeys = map[string]bool{"discord": true, "bluebubbles": true}
+
+// validateProfilePlatforms enforces the profile allow-list and checks the
+// channel-override key shape without resolving values. It runs while the
+// profile document is merged, independently of whether the global platform
+// block is enabled, so a typo never hides behind a disabled listener.
+func validateProfilePlatforms(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return configErr("config_profile_override_invalid", "platforms")
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		platform := node.Content[i].Value
+		path := "platforms." + platform
+		if !profilePlatformKeys[platform] {
+			// Includes api: channel routes and any other platform content are
+			// refused at the profile layer, so the error names the profile
+			// override contract rather than the global platform schema.
+			return configErr("config_profile_override_invalid", path)
+		}
+		entry := node.Content[i+1]
+		if entry.Kind != yaml.MappingNode {
+			return configErr("config_profile_override_invalid", path)
+		}
+		hasOverrides := false
+		for j := 0; j+1 < len(entry.Content); j += 2 {
+			key := entry.Content[j].Value
+			if key != "channel_overrides" {
+				return configErr("config_profile_override_invalid", path+"."+key)
+			}
+			hasOverrides = true
+			if err := validateChannelOverrideKeys(path+".channel_overrides", entry.Content[j+1]); err != nil {
+				return err
+			}
+		}
+		if !hasOverrides {
+			// An empty platform entry is not one of the two supported
+			// channel-override maps; keep the profile surface exact.
+			return configErr("config_profile_override_invalid", path)
 		}
 	}
 	return nil
@@ -847,6 +904,9 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 			if x.RequireMention != nil {
 				cfg.DiscordGroupRequireMention = *x.RequireMention
 			}
+			if err := applyChannelOverrides(cfg, "discord", "discord", settings.ChannelOverrides, providers); err != nil {
+				return nil, err
+			}
 		case "bluebubbles":
 			cfg.BlueBubblesURL = x.ServerURL
 			endpoint, parseErr := url.Parse(x.ServerURL)
@@ -883,7 +943,13 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
+			if err := applyChannelOverrides(cfg, "bluebubbles", "imessage", settings.ChannelOverrides, providers); err != nil {
+				return nil, err
+			}
 		case "api":
+			if len(settings.ChannelOverrides) > 0 {
+				return nil, configErr("config_value_invalid", "platforms.api.channel_overrides")
+			}
 			if x.APIHost != "" && x.APIHost != "127.0.0.1" && x.APIHost != "0.0.0.0" {
 				return nil, configErr("config_platform_host_unsupported", base+"api_host")
 			}
@@ -939,6 +1005,11 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 		profileProviders := map[string]providerYAML{}
 		profileSelected := ""
 		if err := applyDocument(&profile, profileDoc, profileProviders, &profileSelected); err != nil {
+			return nil, err
+		}
+		// The profile starts from the global resolved map (struct copy) and
+		// overlays its own routes, validated against its merged providers.
+		if err := applyProfileChannelOverrides(&profile, profileDoc.Platforms, profileProviders); err != nil {
 			return nil, err
 		}
 		cfg.Profiles[name] = &profile

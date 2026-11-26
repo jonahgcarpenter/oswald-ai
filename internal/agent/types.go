@@ -148,6 +148,17 @@ type Request struct {
 	// response truncated; the closing summary call still runs so gathered
 	// results are reported instead of dropped.
 	MaxModelResponses int
+	// ModelOverride pins the turn to an explicit provider/model pair (cron
+	// jobs). Nil runs the router chain (pin > override > default). A present
+	// but unresolvable override fails the turn; it never falls back.
+	ModelOverride *ModelOverride
+}
+
+// ModelOverride is an explicit per-turn model pin. Provider is the bare name;
+// Model is matched verbatim (it may contain slashes).
+type ModelOverride struct {
+	Provider string
+	Model    string
 }
 
 // ClientToolChoice constrains the merged Oswald and caller tool catalog for

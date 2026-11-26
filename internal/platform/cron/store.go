@@ -98,6 +98,7 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 		Deliver:         deliver,
 		EnabledToolsets: append([]string(nil), input.EnabledToolsets...),
 		MCPServers:      copyStringsPreserveEmpty(input.MCPServers),
+		Model:           input.Model,
 		Enabled:         true,
 		State:           StateScheduled,
 		PausedReason:    strings.TrimSpace(input.PausedReason),
@@ -182,6 +183,16 @@ func (s *Store) validate(r *Runner, job *Job) error {
 	}
 	if err := ValidateMCPServers(job.MCPServers); err != nil {
 		return err
+	}
+	if job.Model != nil {
+		normalized, err := NormalizeJobModel(job.Model.Provider, job.Model.Model)
+		if err != nil {
+			return err
+		}
+		job.Model = &normalized
+	}
+	if job.NoAgent && job.Model != nil {
+		return errors.New("model requires agent")
 	}
 	return nil
 }

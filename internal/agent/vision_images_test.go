@@ -213,7 +213,7 @@ func TestLoadedVisionImagesSurviveImageRetries(t *testing.T) {
 	input.Geometry = &llm.ImageGeometry{SourceWidth: 100, SourceHeight: 80, Width: 100, Height: 80}
 	message := llm.ChatMessage{Role: "tool", ToolCallID: "vision", ToolName: visionanalyze.Name, Content: "Question: Inspect", Images: []llm.InputImage{input}}
 	assistant := llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "vision", Function: llm.ToolFunction{Name: visionanalyze.Name}}}}
-	_, err, exhausted := a.chatWithImageRetries(context.Background(), llm.ChatRequest{Messages: []llm.ChatMessage{assistant, message}}, nil, a.log)
+	_, err, exhausted := a.chatWithImageRetries(context.Background(), a.chatClient, llm.ChatRequest{Messages: []llm.ChatMessage{assistant, message}}, nil, a.log)
 	if err != nil || exhausted || len(chat.requests) != 2 {
 		t.Fatalf("image retry requests=%d exhausted=%v err=%v", len(chat.requests), exhausted, err)
 	}
@@ -251,7 +251,7 @@ func TestCroppedVisionRetryNotesUseActualScalesAndSourceOffsets(t *testing.T) {
 	}
 	message := llm.ChatMessage{Role: "tool", ToolCallID: "crop", ToolName: visionanalyze.Name, Content: result.Content, Images: result.Images}
 	assistant := llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "crop", Function: llm.ToolFunction{Name: visionanalyze.Name, Arguments: args}}}}
-	_, err, exhausted := a.chatWithImageRetries(ctx, llm.ChatRequest{Messages: []llm.ChatMessage{assistant, message}}, nil, a.log)
+	_, err, exhausted := a.chatWithImageRetries(ctx, a.chatClient, llm.ChatRequest{Messages: []llm.ChatMessage{assistant, message}}, nil, a.log)
 	if err != nil || exhausted || len(chat.requests) != 2 {
 		t.Fatalf("crop retry requests=%d exhausted=%v err=%v", len(chat.requests), exhausted, err)
 	}

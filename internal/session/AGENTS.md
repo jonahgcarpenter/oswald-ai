@@ -36,6 +36,9 @@ exchanges per maintenance pass, 15-minute pending timeout, passive WAL checkpoin
 - `oswald:v1:summary:<sid>` (≤64 KiB) and `oswald:v1:compression:<sid>:<from>:<through>:<contract>`
   (≤64 KiB, at most 4 submissions): durable artifacts with source ranges, retry state, exact leases,
   and provider credits. Tool history as encoded is capped at 64 KiB.
+- `oswald:v1:session_model:<source>:<session_key>` (≤1 KiB): version-1 JSON `{provider, model}`.
+  Conversation-keyed so it survives `/new`; runtime-owned, never swept (deliberately absent from
+  the `SweepProfile` prefix list), and changed only by setting another model.
 - `sessions.origin_json` (≤8 KiB): `{version:1, generation, ttl, platform/chat/user/profile}`.
 
 Search is a disposable in-memory FTS5 projection over eligible rows — no new persisted index. The

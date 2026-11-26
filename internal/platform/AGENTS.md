@@ -13,7 +13,14 @@ variable (values and error text are never logged). Disabled platforms prune befo
 so their credentials are never required, but unknown keys inside a disabled block are still
 rejected. Process env wins over dotenv and loading never mutates the process environment; named
 profiles inherit the default `.env` and override per key, and can only add providers, model, tools,
-MCP servers, and `api` — never shared listeners or routes.
+MCP servers, and `api` — never shared listeners or routes. `platforms.discord` and
+`platforms.bluebubbles` also accept `channel_overrides` mapping a channel or chat id to
+`{provider, model}`; the global map is a baseline that named profiles may overlay with their own
+`platforms.<name>.channel_overrides` entries only (profile-scoped listeners, credentials,
+admission, enable flags, and `platforms.api` stay rejected). Global entries validate against the
+global providers map, profile overlays against that profile's merged providers, a profile entry
+wins on an id collision without deleting a global one, and the effective map is consulted between
+a conversation's pin and the profile default.
 
 Files are bounded (256 KiB, no symlinks/aliases/duplicate/unknown keys, depth ≤32) and dotenv
 files must be private regular files. Profile names are bounded lowercase ASCII with `default`
@@ -28,9 +35,11 @@ values. `oswald config` itself is read-only (`show|get|validate`); each top-leve
 section has a scoped command group (`providers`, `model`, `delegation`, `api`, `gateway`, `platforms`,
 `tools`, `runtime`, `mcp_servers` via `oswald mcp`) that whitelists its own leaves, so no edit
 can address — or break — a sibling section. `ClassifyReload` diffs effective configs by section
-so each command reports `applied live` (runtime log level, admission allow/ban/mention rules)
-vs `restarting service to apply` (everything else, picked up by the server's supervised
-rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
+so each command reports `applied live` (runtime log level, admission allow/ban/mention rules,
+model defaults, channel routing overrides including per-profile overlays, and the selected
+transports/routing overrides of profiles present in both configs) vs `restarting service to apply`
+(everything else — context windows, profile additions/removals, and remaining sections — picked up
+by the server's supervised rebuild within seconds). Scope is fenced at the same layer: `ResolveReadProfile`
 keeps reads on the calling scope with contradictions failing closed,
 `ResolveProfile` keeps mutations on the calling scope with
 contradictions failing closed, and `RequireDefaultScope` gates global mutations and profile
@@ -81,13 +90,15 @@ must exist) and run `/bin/sh` with the same sandbox env as terminal (`SandboxPat
 `HOME` = profile root, passthrough), so a command tested in the terminal behaves identically
 off-schedule. Every script body is also profile-scope scanned at create/update and again
 before each run, so a job can never retarget the `oswald` CLI away from its profile.
-Validation rejects injection, script escapes, profile-scope overrides, bad deliver targets, and user-owned
-`model/provider/base_url`; unknown or legacy fields fail closed with a manual-update error (no
+Validation rejects injection, script escapes, profile-scope overrides, bad deliver targets, and flat
+user-owned `provider/base_url` (the optional `model: {provider, model}` job pin is allowed:
+syntax plus live provider/listing checks, null clears to default, no_agent with model rejected);
+unknown or legacy fields fail closed with a manual-update error (no
 migration). Deliver targets are also liveness-checked at create/update time against the live
 transport (imessage group GUIDs and guild/channel membership via BlueBubbles/Discord lookups;
 DMs validate handle shape, never existence) — unverifiable targets are rejected, never scheduled. `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe
 (skipped duplicates stay silent), restore-once for orphaned runs, and one-shot grace retire;
-unparsable schedules record `blocked_config` instead of running. A per-profile 30s ticker with
+unparsable schedules record `blocked_config` instead of running. Job turns run the explicit `model` when set (stale references fail the tick, no fallback to default or session routing) and the profile default otherwise. A per-profile 30s ticker with
 re-arm wake drives dispatch at a 30m ceiling — `[SILENT]` suppresses, and nothing mirrors into
 history.
 

@@ -104,10 +104,13 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   submit|close|handoff` (unique-prefix ids, 200-line log default); stdin writes run
   the confined-write/protected-read/profile-scope scans; `handoff` reparents to the caller's scope.
 - `cronjob_manage` — schedules end to end (`create|list|update|pause|resume|remove|run`),
-  rejects `model/provider/base_url` overrides; scripts resolve under per-profile
+  optional `model: {provider, model}` pins a job (nil/absent runs the profile default, never
+  session pins or channel overrides; stale pins fail the tick); rejects flat
+  `provider/base_url` overrides; scripts resolve under per-profile
   `scripts/`, delivery targets the concrete `deliver` object. `create`/`update` liveness-check
   explicit deliver targets against the live transport (imessage GUIDs, discord channels/DMs,
-  guild membership for mentions); unverifiable or unconfigured-platform targets are rejected.
+  guild membership for mentions) plus explicit models against the live provider listing
+  (unknown provider/model or unavailable provider rejected); unverifiable targets are rejected.
 
 History policy in one line: every tool keeps full searchable history in context and FTS — with 16 KiB args and 16,000 result runes per call
 inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser

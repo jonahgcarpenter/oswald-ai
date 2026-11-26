@@ -46,7 +46,7 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron"), requestctx.Metadata{RequestID: "req-cron", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store, nil)
+	manage := NewCronjobManageHandler(ws, store, nil, nil)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "no_agent": true})
 	if err != nil || !strings.Contains(created.Content, "job_id:") {
 		t.Fatalf("create = %+v %v", created, err)
@@ -83,7 +83,7 @@ func TestCronjobManageZonedTimestamps(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-tz"), requestctx.Metadata{RequestID: "req-cron-tz", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store, nil)
+	manage := NewCronjobManageHandler(ws, store, nil, nil)
 	// Far-future one-shot: asserts the zoned next_run_at rendering (the Nov
 	// 2026 wall-clock regression) without depending on the test clock.
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "2027-06-01T00:15:00Z", "prompt": "hi"})
@@ -110,7 +110,7 @@ func TestCronjobManageNameAndDeliver(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-name"), requestctx.Metadata{RequestID: "req-cron-name", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store, nil)
+	manage := NewCronjobManageHandler(ws, store, nil, nil)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "name": "brief", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "112233445"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
@@ -155,7 +155,7 @@ func TestCronjobManageDeliverValidation(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store, nil)
+	manage := NewCronjobManageHandler(ws, store, nil, nil)
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 	if err != nil {
 		t.Fatalf("create = %v", err)
@@ -192,7 +192,7 @@ func TestCronjobManageMCPServers(t *testing.T) {
 	ws := workspace.NewWorkspace(root, "alice")
 	store := cron.NewStore(root)
 	ctx := requestctx.WithMetadata(testContext("req-cron-mcp"), requestctx.Metadata{RequestID: "req-cron-mcp", SessionID: "discord:chan1:987654321"})
-	manage := NewCronjobManageHandler(ws, store, nil)
+	manage := NewCronjobManageHandler(ws, store, nil, nil)
 	// Omitted exposes all.
 	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 	if err != nil {
@@ -263,7 +263,7 @@ func TestCronjobManageCreateValidatesTarget(t *testing.T) {
 	t.Run("rejects unknown chat", func(t *testing.T) {
 		ws, store, ctx := newFixture(t)
 		var calls int
-		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"imessage": stubTargetValidator{calls: &calls, err: reject}})
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"imessage": stubTargetValidator{calls: &calls, err: reject}}, nil)
 		_, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "imessage", "deliver_chat_id": "iMessage;+;chat5814039491040595", "deliver_user_id": "+16626873509"})
 		if err == nil || !strings.Contains(err.Error(), "unknown") {
 			t.Fatalf("mistyped GUID accepted: %v", err)
@@ -275,7 +275,7 @@ func TestCronjobManageCreateValidatesTarget(t *testing.T) {
 
 	t.Run("rejects unconfigured platform", func(t *testing.T) {
 		ws, store, ctx := newFixture(t)
-		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{})
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{}, nil)
 		_, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "imessage", "deliver_chat_id": "iMessage;+;chat1"})
 		if err == nil || !strings.Contains(err.Error(), "not configured") {
 			t.Fatalf("unconfigured platform accepted: %v", err)
@@ -285,7 +285,7 @@ func TestCronjobManageCreateValidatesTarget(t *testing.T) {
 	t.Run("accepts verified target", func(t *testing.T) {
 		ws, store, ctx := newFixture(t)
 		var calls int
-		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{calls: &calls}})
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{calls: &calls}}, nil)
 		created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "deliver_platform": "discord", "deliver_chat_id": "chan9", "deliver_user_id": "112233445"})
 		if err != nil {
 			t.Fatalf("verified target rejected: %v", err)
@@ -297,13 +297,13 @@ func TestCronjobManageCreateValidatesTarget(t *testing.T) {
 
 	t.Run("update revalidates merged target", func(t *testing.T) {
 		ws, store, ctx := newFixture(t)
-		plain := NewCronjobManageHandler(ws, store, nil)
+		plain := NewCronjobManageHandler(ws, store, nil, nil)
 		created, err := plain(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
 		if err != nil {
 			t.Fatalf("create = %v", err)
 		}
 		jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
-		guarded := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{err: reject}})
+		guarded := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{err: reject}}, nil)
 		if _, err := guarded(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver_chat_id": "nope"}); err == nil {
 			t.Fatal("update to unknown chat accepted")
 		}
@@ -319,12 +319,121 @@ func TestCronjobManageCreateValidatesTarget(t *testing.T) {
 	t.Run("defaulted target skips validation", func(t *testing.T) {
 		ws, store, ctx := newFixture(t)
 		var calls int
-		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{calls: &calls, err: reject}})
+		manage := NewCronjobManageHandler(ws, store, map[string]cron.TargetValidator{"discord": stubTargetValidator{calls: &calls, err: reject}}, nil)
 		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"}); err != nil {
 			t.Fatalf("live-session default rejected: %v", err)
 		}
 		if calls != 0 {
 			t.Fatalf("defaulted target was liveness-checked: calls=%d", calls)
+		}
+	})
+}
+
+type stubModelValidator struct {
+	calls        *int
+	err          error
+	wantProvider string
+	wantModel    string
+}
+
+func (s stubModelValidator) ValidateModel(_ context.Context, provider, model string) error {
+	if s.calls != nil {
+		*s.calls++
+	}
+	if s.wantProvider != "" && provider != s.wantProvider {
+		return errors.New("unexpected provider")
+	}
+	if s.wantModel != "" && model != s.wantModel {
+		return errors.New("unexpected model")
+	}
+	return s.err
+}
+
+func TestCronjobManageModelObject(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := workspace.NewWorkspace(root, "alice")
+	store := cron.NewStore(root)
+	ctx := requestctx.WithMetadata(testContext("req-model"), requestctx.Metadata{RequestID: "req-model", SessionID: "discord:chan1:987654321"})
+
+	t.Run("create validates live and stores", func(t *testing.T) {
+		var calls int
+		manage := NewCronjobManageHandler(ws, store, nil, stubModelValidator{calls: &calls, wantProvider: "bifrost_opencode", wantModel: "opencode-go/muse-spark-1.3-contributor"})
+		created, err := manage(ctx, map[string]interface{}{
+			"action": "create", "schedule": "in 1h", "prompt": "hi",
+			"model": map[string]interface{}{"provider": "custom:bifrost_opencode", "model": "opencode-go/muse-spark-1.3-contributor"},
+		})
+		if err != nil {
+			t.Fatalf("create = %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("validator calls = %d, want 1", calls)
+		}
+		jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+		stored, err := store.Resolve(jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Model == nil || stored.Model.Provider != "bifrost_opencode" || stored.Model.Model != "opencode-go/muse-spark-1.3-contributor" {
+			t.Fatalf("stored model = %+v", stored.Model)
+		}
+	})
+
+	t.Run("string model rejected", func(t *testing.T) {
+		manage := NewCronjobManageHandler(ws, store, nil, nil)
+		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "model": "x"}); err == nil {
+			t.Fatal("string model accepted")
+		}
+	})
+
+	t.Run("unknown field rejected", func(t *testing.T) {
+		manage := NewCronjobManageHandler(ws, store, nil, nil)
+		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "model": map[string]interface{}{"provider": "p", "model": "m", "base_url": "x"}}); err == nil {
+			t.Fatal("unknown model field accepted")
+		}
+	})
+
+	t.Run("unknown provider rejected", func(t *testing.T) {
+		manage := NewCronjobManageHandler(ws, store, nil, stubModelValidator{err: errors.New(`unknown model provider "nope"`)})
+		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "model": map[string]interface{}{"provider": "nope", "model": "m"}}); err == nil || !strings.Contains(err.Error(), "unknown model provider") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("unknown model rejected", func(t *testing.T) {
+		manage := NewCronjobManageHandler(ws, store, nil, stubModelValidator{err: errors.New(`unknown model "ghost" for provider "p"`)})
+		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "model": map[string]interface{}{"provider": "p", "model": "ghost"}}); err == nil || !strings.Contains(err.Error(), "unknown model") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("no_agent with model rejected", func(t *testing.T) {
+		manage := NewCronjobManageHandler(ws, store, nil, nil)
+		if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "x.sh", "no_agent": true, "model": map[string]interface{}{"provider": "p", "model": "m"}}); err == nil {
+			t.Fatal("no_agent with model accepted")
+		}
+	})
+
+	t.Run("null clears to default", func(t *testing.T) {
+		manage := NewCronjobManageHandler(ws, store, nil, stubModelValidator{})
+		created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "model": map[string]interface{}{"provider": "p", "model": "m"}})
+		if err != nil {
+			t.Fatalf("create = %v", err)
+		}
+		jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+		updated, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "model": nil})
+		if err != nil {
+			t.Fatalf("update clear = %v", err)
+		}
+		_ = updated
+		stored, err := store.Resolve(jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Model != nil {
+			t.Fatalf("model not cleared: %+v", stored.Model)
 		}
 	})
 }

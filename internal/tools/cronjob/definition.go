@@ -8,9 +8,10 @@ import (
 // only the owning package moved.
 const Name = "cronjob_manage"
 
-// CronjobManageDefinition returns the scheduler contract. Model/provider
-// overrides are intentionally absent: job identity is user-owned and the
-// agent must not set it. Schedules are stored as UTC wall-clock instants;
+// CronjobManageDefinition returns the scheduler contract. The optional
+// model object pins a job to an explicit provider/model pair (nil runs the
+// profile default and never inherits session pins or channel overrides).
+// Schedules are stored as UTC wall-clock instants;
 // the model resolves event-anchored times arithmetically in UTC and verifies
 // wall-clock conversions with the terminal before scheduling.
 func Definition() llm.ToolDefinition {
@@ -34,6 +35,7 @@ func Definition() llm.ToolDefinition {
 			"repeat_times":     {Type: "integer", Description: "Run N times then auto-complete (omit = forever for recurring, once for one-shots; 0 = forever)", Minimum: float64Ptr(0)},
 			"paused":           {Type: "boolean", Description: "Create paused with a reason via paused_reason"},
 			"paused_reason":    {Type: "string", Description: "Reason when creating paused or pausing"},
+			"model":            {Type: "object", Description: "Optional explicit model {provider, model}; omit or null runs the profile default at tick time", Properties: map[string]llm.ToolParameterProperty{"provider": {Type: "string", Description: "Bare provider name (no custom: prefix)"}, "model": {Type: "string", Description: "Model id verbatim; may contain slashes"}}, Required: []string{"provider", "model"}, AdditionalProperties: boolPtr(false)},
 		}, Required: []string{"action"}, AdditionalProperties: boolPtr(false)},
 	}
 }

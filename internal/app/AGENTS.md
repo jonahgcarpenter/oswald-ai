@@ -41,8 +41,8 @@ calling scope (`OSWALD_HOME` profile): reads (`show`, `get`, `list`,
 contradiction. Global mutations (`gateway` writes, `platforms`, `runtime`) and profile
 lifecycle (`profile create|rename|delete`) additionally require the default scope.
 `commands/` holds the `Definition/Request/Result/Handler` contract and
-`/name` parsing; `builtin/` registers the seven public handlers (`/help`, `/new`, `/stop`,
-`/approve`, `/deny`, `/compact`, `/queue`).
+`/name` parsing; `builtin/` registers the eight public handlers (`/help`, `/new`, `/stop`,
+`/approve`, `/deny`, `/compact`, `/queue`, `/model`).
 
 ## Validation and reload (how edits take effect)
 
@@ -55,15 +55,22 @@ write the command diffs pre/post effective configs with `config.ClassifyReload` 
 
 The running server never restarts itself: `startup/reload.go::Reloader` fingerprints every profile's
 `config.yaml`/`.env` (plus plugin markers) on a 2s poll (500ms settle), then on change validates the candidate —
-invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps only the
-`runtime` log level and gateway admission policy (`config.reload.applied`); a validated non-hot
-diff only logs an advisory `config.reload.restart_required` (with `reason_code`). The operator
-(or model) batches edits and runs `oswald restart` once when ready: it signals the
-local oswald-server process (nearest `oswald-server` ancestor, else PID 1 when
+invalid keeps the live config with a `config.reload.rejected` warning — and hot-swaps the
+`runtime` log level, gateway admission policy, and live model routing (defaults, selected
+transports of profiles present before and after, and channel routing overrides including each
+profile's own overlays)
+(`config.reload.applied`). The attached model applier rotates router views, re-seats summarizers,
+and swaps delegate live configs after the Directory swap; an overrides-only diff rotates the views
+without re-seating (the default routing did not move), and a failed apply WARNs
+`config.reload.apply_failed` and keeps the previous runtime view. A validated non-hot diff only
+logs an advisory `config.reload.restart_required` (with
+`reason_code`). The operator (or model) batches edits and runs `oswald restart` once when ready:
+it signals the local oswald-server process (nearest `oswald-server` ancestor, else PID 1 when
 it is the server) with `SIGTERM` so the supervisor restarts the service in
-place. Non-hot changes are reloaded on entry
-after that restart; hot changes apply live with no restart. The watcher never rewrites operator
-files, and a stable fingerprint never fires twice, so rapid successive writes coalesce.
+place. Non-hot changes (context windows, profile additions/removals, listeners, MCP sessions,
+plugins, and the remaining sections) are reloaded on entry after that restart; hot changes apply
+live with no restart. The watcher never rewrites operator files, and a stable fingerprint never
+fires twice, so rapid successive writes coalesce.
 
 ## Behaviors worth knowing cold
 
@@ -76,6 +83,14 @@ files, and a stable fingerprint never fires twice, so rapid successive writes co
 - `/queue <prompt>` forces FIFO queueing for the next turn. Plain messages steer into the running
   turn by default (text-only, consumed after the next tool result); unconsumed steers auto-run
   as the next turn.
+- `/model` shows `Current: <provider>/<model>` with `(context N)` when the window was
+  reported, plus configured providers; `/model <provider>`
+  lists that provider's models live (capped at 40 with an ellipsis note); `/model
+  <provider>/<model>` pins the conversation — live from the next turn, survives `/new`, changed
+  only by setting another model. `/model <provider>/<model> --global` writes the acting profile's
+  `model.provider` + `model.default` through the mediated config path (staged validation,
+  last-known-good, one atomic commit), applies live via the reload applier on its next watcher
+  tick, and pins the acting conversation; it runs under the per-profile writer fence.
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.

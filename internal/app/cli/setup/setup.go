@@ -244,6 +244,10 @@ platforms:
       allowed_users: []   # Explicit allow list; empty admits every routed user.
       banned_users: []    # Users to silently ignore everywhere.
       require_mention: true  # Guild messages must begin with a bot mention.
+    # channel_overrides:  # Per-channel model routes; beat the profile default, lose to a /model pin.
+    #   "123456789012345678":  # Discord channel id.
+    #     provider: custom:other
+    #     model: other/model
   bluebubbles:
     enabled: false
     extra:
@@ -257,6 +261,10 @@ platforms:
       banned_users: []
       require_mention: true  # Group messages must begin with a mention.
       # mention_pattern: ['@?Oswald\b[,:\-]?']  # Go regexp, anchored at start.
+    # channel_overrides:  # Per-chat model routes; beat the profile default, lose to a /model pin.
+    #   "iMessage;-;+15550001111":  # BlueBubbles chat GUID.
+    #     provider: custom:other
+    #     model: other/model
 tools:
   web_search:
     # brave_key: ${BRAVE_API_KEY}

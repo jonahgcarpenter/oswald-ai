@@ -39,7 +39,7 @@ func TestApplyCronUpdateOneshotKeepsNextRunAt(t *testing.T) {
 
 	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": future,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestApplyCronUpdateOneshotInPhrase(t *testing.T) {
 
 	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": "in 30m",
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestApplyCronUpdateOneshotPausedStaysNull(t *testing.T) {
 
 	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": future,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestApplyCronUpdateRepeatsStillAdvance(t *testing.T) {
 
 	err := applyCronUpdate(context.Background(), nil, job, map[string]interface{}{
 		"schedule": "0 23 * * 1-5",
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("applyCronUpdate: %v", err)
 	}

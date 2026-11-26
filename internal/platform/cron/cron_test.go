@@ -1070,3 +1070,150 @@ func TestScriptRetryRecordsEachFailure(t *testing.T) {
 		t.Fatalf("failed scripts must not deliver: sender calls = %d", sender.calls)
 	}
 }
+
+func TestNormalizeJobModel(t *testing.T) {
+	got, err := NormalizeJobModel("custom:bifrost_opencode", "opencode-go/muse-spark-1.3-contributor")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if got.Provider != "bifrost_opencode" || got.Model != "opencode-go/muse-spark-1.3-contributor" {
+		t.Fatalf("normalized = %+v", got)
+	}
+	if _, err := NormalizeJobModel("", "m"); err == nil {
+		t.Fatal("empty provider accepted")
+	}
+	if _, err := NormalizeJobModel("p", ""); err == nil {
+		t.Fatal("empty model accepted")
+	}
+}
+
+func TestCreateModelRoundTrip(t *testing.T) {
+	store := NewStore(t.TempDir())
+	runner := &Runner{Root: t.TempDir(), ScriptsDir: t.TempDir()}
+	created, err := store.Create(time.Now().UTC(), runner, Job{
+		Name:     "model-job",
+		Prompt:   "hi",
+		Schedule: Schedule{Kind: ScheduleInterval, Minutes: 60, Display: "every 60m"},
+		Deliver:  Deliver{Platform: DeliverDiscord, ChatID: "123"},
+		Model:    &JobModel{Provider: "bifrost_opencode", Model: "opencode-go/muse-spark-1.3-contributor"},
+	})
+	if err != nil {
+		t.Fatalf("create with model: %v", err)
+	}
+	if created.Model == nil || created.Model.Provider != "bifrost_opencode" {
+		t.Fatalf("stored model = %+v", created.Model)
+	}
+	resolved, err := store.Resolve(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Model == nil || resolved.Model.Model != "opencode-go/muse-spark-1.3-contributor" {
+		t.Fatalf("resolved model = %+v", resolved.Model)
+	}
+}
+
+func TestCreateRejectsNoAgentModel(t *testing.T) {
+	store := NewStore(t.TempDir())
+	runner := &Runner{Root: t.TempDir(), ScriptsDir: t.TempDir()}
+	script := filepath.Join(runner.Root, "s.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner.ScriptsDir = runner.Root
+	_, err := store.Create(time.Now().UTC(), runner, Job{
+		Name:     "noagent-model",
+		NoAgent:  true,
+		Script:   "s.sh",
+		Schedule: Schedule{Kind: ScheduleInterval, Minutes: 60, Display: "every 60m"},
+		Deliver:  Deliver{Platform: DeliverDiscord, ChatID: "123"},
+		Model:    &JobModel{Provider: "p", Model: "m"},
+	})
+	if err == nil {
+		t.Fatal("no_agent with model accepted")
+	}
+}
+
+func TestLegacyModelUnknownFieldFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "cron"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `[{"id":"abc","schedule":{"kind":"interval","minutes":60},"deliver":{"platform":"discord","chat_id":"1"},"model":{"provider":"p","model":"m","base_url":"x"},"enabled":true}]`
+	if err := os.WriteFile(filepath.Join(dir, "cron", "jobs.json"), []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(dir).List(); err == nil {
+		t.Fatal("unknown model field accepted")
+	}
+}
+
+func TestDispatchPassesJobModel(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	var got *JobModel
+	d := &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Agent: func(ctx context.Context, call AgentCall) (AgentResult, error) {
+			got = call.Model
+			return AgentResult{Text: "done"}, nil
+		},
+		Senders:       map[string]Sender{"discord": stubSender{sent: make(map[string]string)}},
+		NewGeneration: func(ctx context.Context, profile, session string) error { return nil },
+	}
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "in 1s", now)
+	mustCreate(t, store, Job{
+		Schedule: sched, Prompt: "hi", Deliver: testDeliver(),
+		Model: &JobModel{Provider: "bifrost_opencode", Model: "opencode-go/muse-spark-1.3-contributor"},
+	})
+	time.Sleep(1100 * time.Millisecond)
+	due := store.ClaimDue(time.Now().UTC())
+	if len(due) != 1 {
+		t.Fatalf("due = %+v", due)
+	}
+	if due[0].Model == nil {
+		t.Fatal("claimed job lost model")
+	}
+	if _, _, err := d.RunOne(context.Background(), due[0], time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Provider != "bifrost_opencode" || got.Model != "opencode-go/muse-spark-1.3-contributor" {
+		t.Fatalf("agent call model = %+v", got)
+	}
+}
+
+func TestDispatchAgentErrorCountsTowardStreak(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	d := &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Agent: func(ctx context.Context, call AgentCall) (AgentResult, error) {
+			return AgentResult{}, errors.New(`unknown model provider "missing"`)
+		},
+		Senders:       map[string]Sender{"discord": stubSender{sent: make(map[string]string)}},
+		NewGeneration: func(ctx context.Context, profile, session string) error { return nil },
+		MaxAttempts:   1,
+	}
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "in 1s", now)
+	mustCreate(t, store, Job{
+		Schedule: sched, Prompt: "hi", Deliver: testDeliver(),
+		Model: &JobModel{Provider: "missing", Model: "ghost"},
+	})
+	time.Sleep(1100 * time.Millisecond)
+	due := store.ClaimDue(time.Now().UTC())
+	if len(due) != 1 {
+		t.Fatalf("due = %+v", due)
+	}
+	ex, _, _ := d.RunOne(context.Background(), due[0], time.Minute)
+	if ex.Status == "agent_completed" {
+		t.Fatalf("stale model run completed: %+v", ex)
+	}
+	stored, err := store.Resolve(due[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.FailureStreak != 1 {
+		t.Fatalf("streak = %d, want 1", stored.FailureStreak)
+	}
+}

@@ -57,7 +57,7 @@ func (m *Manager) runNested(ctx context.Context, spawn Spawn, principal identity
 	if len(call.Tasks) != 1 {
 		return governance.Result{}, fmt.Errorf("nested delegation takes a single task")
 	}
-	model, provider, billingURL, client, err := m.resolveTarget()
+	model, provider, billingURL, client, err := m.resolveTarget(ctx)
 	if err != nil {
 		return governance.Result{}, err
 	}
@@ -105,7 +105,7 @@ func (m *Manager) dispatchSync(ctx context.Context, principal identity.Principal
 	if err != nil {
 		return governance.Result{}, err
 	}
-	model, provider, billingURL, client, err := m.resolveTarget()
+	model, provider, billingURL, client, err := m.resolveTarget(ctx)
 	if err != nil {
 		return governance.Result{}, err
 	}
@@ -241,7 +241,7 @@ func (m *Manager) dispatchBackground(ctx context.Context, principal identity.Pri
 	if err != nil {
 		return governance.Result{}, err
 	}
-	model, provider, billingURL, client, err := m.resolveTarget()
+	model, provider, billingURL, client, err := m.resolveTarget(ctx)
 	if err != nil {
 		return governance.Result{}, err
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
@@ -13,41 +14,109 @@ import (
 // manager start/stop contract. Delivery loops live in delivery.go, the stall
 // monitor in monitor.go, and the tool entry point in manager.go.
 
+// SwapConfig replaces the live configuration the manager reads for delegation
+// bounds and model routing after a hot reload. Construction-pinned fields
+// (window, virtual key, parent client) stay pinned: they are restart-class and
+// only change on a supervised rebuild. Nil-safe: a nil manager or config is a
+// no-op, so a reload applier never needs a guard.
+func (m *Manager) SwapConfig(next *config.Config) {
+	if m == nil || next == nil {
+		return
+	}
+	m.cfgMu.Lock()
+	m.cfg = next
+	m.cfgMu.Unlock()
+}
+
+// config returns the current live configuration snapshot. The returned pointer
+// is immutable by contract (reload swaps it wholesale), so callers may read it
+// without holding the lock past the call.
+func (m *Manager) config() *config.Config {
+	if m == nil {
+		return nil
+	}
+	m.cfgMu.RLock()
+	defer m.cfgMu.RUnlock()
+	return m.cfg
+}
+
 func (m *Manager) maxIterations() int {
-	if m == nil || m.cfg == nil || m.cfg.DelegationMaxIterations <= 0 {
+	cfg := m.config()
+	if cfg == nil || cfg.DelegationMaxIterations <= 0 {
 		return 250
 	}
-	return m.cfg.DelegationMaxIterations
+	return cfg.DelegationMaxIterations
 }
 
 func (m *Manager) maxConcurrent() int {
-	if m == nil || m.cfg == nil || m.cfg.DelegationMaxConcurrentChildren <= 0 {
+	cfg := m.config()
+	if cfg == nil || cfg.DelegationMaxConcurrentChildren <= 0 {
 		return 10
 	}
-	return m.cfg.DelegationMaxConcurrentChildren
+	return cfg.DelegationMaxConcurrentChildren
 }
 
 func (m *Manager) maxDepth() int {
-	if m == nil || m.cfg == nil || m.cfg.DelegationMaxSpawnDepth <= 0 {
+	cfg := m.config()
+	if cfg == nil || cfg.DelegationMaxSpawnDepth <= 0 {
 		return 1
 	}
-	return m.cfg.DelegationMaxSpawnDepth
+	return cfg.DelegationMaxSpawnDepth
 }
 
 func (m *Manager) orchestratorOn() bool {
-	if m == nil || m.cfg == nil {
+	cfg := m.config()
+	if cfg == nil {
 		return true
 	}
-	return m.cfg.DelegationOrchestratorEnabled
+	return cfg.DelegationOrchestratorEnabled
 }
 
 // resolveTarget selects the model, provider, endpoint, and chat client for a
-// child turn. An explicit delegation model wins, otherwise the parent model
-// is mirrored; same for the provider, where base_url overrides only the
-// endpoint while keeping that provider's key — so an explicit endpoint never
-// silently inherits another profile's credentials.
-func (m *Manager) resolveTarget() (model, provider, url string, client llm.Chatter, err error) {
-	cfg := m.cfg
+// child turn. Precedence:
+//
+//  1. Explicit delegation.model / delegation.provider / delegation.base_url
+//     wins with unchanged rules: a named provider must exist and carry a
+//     credential, and an explicit endpoint never silently inherits another
+//     provider's credentials. Keyless endpoints are rejected here.
+//  2. Otherwise the calling turn's resolved routing (requestctx.ParentModel)
+//     is mirrored through this profile's provider endpoints, so pins and
+//     channel overrides reach delegated children. A parent provider missing
+//     from ProviderEndpoints is an error, never a silent fallback. Keyless
+//     endpoints are valid here exactly like the router: an empty key caches
+//     under its own cache key (path 1 rejects keyless instead).
+//  3. Otherwise the parent's LLMGateway* fields are mirrored (default path).
+func (m *Manager) resolveTarget(ctx context.Context) (model, provider, url string, client llm.Chatter, err error) {
+	cfg := m.config()
+	if cfg == nil {
+		return "", "", "", nil, fmt.Errorf("delegate: no configuration available")
+	}
+	if explicitDelegationRouting(cfg) {
+		return m.resolveExplicitTarget(cfg)
+	}
+	if parent, ok := requestctx.ParentModelFromContext(ctx); ok {
+		resolvedModel, resolvedProvider, resolvedURL, resolvedClient, found, err := m.resolveParentTarget(cfg, parent)
+		if err != nil || found {
+			return resolvedModel, resolvedProvider, resolvedURL, resolvedClient, err
+		}
+	}
+	return m.resolveDefaultTarget(cfg)
+}
+
+// explicitDelegationRouting reports whether any delegation.* routing override
+// is set. Any one of them selects the explicit path, which keeps its
+// historical provider/endpoint inheritance rules.
+func explicitDelegationRouting(cfg *config.Config) bool {
+	return strings.TrimSpace(cfg.DelegationModel) != "" ||
+		strings.TrimSpace(cfg.DelegationProvider) != "" ||
+		strings.TrimSpace(cfg.DelegationBaseURL) != ""
+}
+
+// resolveExplicitTarget applies the explicit delegation overrides: model and
+// provider fall back to the gateway fields when unset, a named provider
+// supplies its own endpoint and key, and base_url overrides only the endpoint
+// while keeping that provider's key.
+func (m *Manager) resolveExplicitTarget(cfg *config.Config) (model, provider, url string, client llm.Chatter, err error) {
 	model = strings.TrimSpace(cfg.DelegationModel)
 	if model == "" {
 		model = strings.TrimSpace(cfg.LLMGatewayModel)
@@ -81,24 +150,88 @@ func (m *Manager) resolveTarget() (model, provider, url string, client llm.Chatt
 	if strings.TrimSpace(url) == "" {
 		return "", "", "", nil, fmt.Errorf("delegate: no endpoint configured")
 	}
-	if m.parentClient != nil && url == strings.TrimSpace(cfg.LLMGatewayURL) && key == strings.TrimSpace(cfg.LLMGatewayAPIKey) {
-		return model, provider, url, m.parentClient, nil
-	}
-	if key == "" {
+	if key == "" && !m.reusesParentTransport(cfg, url, key) {
 		return "", "", "", nil, fmt.Errorf("delegate: no credential configured")
+	}
+	client, err = m.clientFor(cfg, url, key)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+	return model, provider, url, client, nil
+}
+
+// resolveParentTarget mirrors the calling turn's resolved routing through the
+// delegate's own provider map. ok=false means the parent model was empty after
+// trim, so the caller falls through to the default path; an unknown provider
+// or unusable endpoint is an error so a pinned turn never silently runs
+// somewhere else.
+func (m *Manager) resolveParentTarget(cfg *config.Config, parent requestctx.ParentModel) (model, provider, url string, client llm.Chatter, ok bool, err error) {
+	model = strings.TrimSpace(parent.Model)
+	provider = strings.TrimSpace(parent.Provider)
+	if model == "" || provider == "" {
+		return "", "", "", nil, false, nil
+	}
+	endpoint, found := cfg.ProviderEndpoints[provider]
+	if !found || strings.TrimSpace(endpoint.URL) == "" {
+		return "", "", "", nil, false, fmt.Errorf("delegate: provider %q has no usable endpoint", provider)
+	}
+	client, err = m.clientFor(cfg, endpoint.URL, strings.TrimSpace(endpoint.APIKey))
+	if err != nil {
+		return "", "", "", nil, false, err
+	}
+	return model, provider, endpoint.URL, client, true, nil
+}
+
+// resolveDefaultTarget mirrors the parent's gateway fields, the pre-router
+// behavior. Keyless endpoints are rejected unless the transport is the
+// construction-pinned parent client.
+func (m *Manager) resolveDefaultTarget(cfg *config.Config) (model, provider, url string, client llm.Chatter, err error) {
+	model = strings.TrimSpace(cfg.LLMGatewayModel)
+	provider = strings.TrimSpace(cfg.LLMGatewayProvider)
+	url = strings.TrimSpace(cfg.LLMGatewayURL)
+	key := strings.TrimSpace(cfg.LLMGatewayAPIKey)
+	if model == "" {
+		return "", "", "", nil, fmt.Errorf("delegate: no model configured")
+	}
+	if strings.TrimSpace(url) == "" {
+		return "", "", "", nil, fmt.Errorf("delegate: no endpoint configured")
+	}
+	if key == "" && !m.reusesParentTransport(cfg, url, key) {
+		return "", "", "", nil, fmt.Errorf("delegate: no credential configured")
+	}
+	client, err = m.clientFor(cfg, url, key)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+	return model, provider, url, client, nil
+}
+
+// reusesParentTransport reports whether the endpoint is the construction-pinned
+// parent transport, in which case the manager reuses that client instead of
+// constructing another one.
+func (m *Manager) reusesParentTransport(cfg *config.Config, url, key string) bool {
+	return m.parentClient != nil && cfg != nil &&
+		url == strings.TrimSpace(cfg.LLMGatewayURL) && key == strings.TrimSpace(cfg.LLMGatewayAPIKey)
+}
+
+// clientFor returns the pinned parent client for the parent transport, else a
+// client cached by URL and key. Keyless endpoints cache under their own key.
+func (m *Manager) clientFor(cfg *config.Config, url, key string) (llm.Chatter, error) {
+	if m.reusesParentTransport(cfg, url, key) {
+		return m.parentClient, nil
 	}
 	cacheKey := url + "\x00" + key
 	m.clientsMu.Lock()
 	defer m.clientsMu.Unlock()
 	if client, ok := m.clients[cacheKey]; ok {
-		return model, provider, url, client, nil
+		return client, nil
 	}
-	client = m.newClient(url, key, m.vkey, m.log)
+	client := m.newClient(url, key, m.vkey, m.log)
 	if client == nil {
-		return "", "", "", nil, fmt.Errorf("delegate: client construction failed")
+		return nil, fmt.Errorf("delegate: client construction failed")
 	}
 	m.clients[cacheKey] = client
-	return model, provider, url, client, nil
+	return client, nil
 }
 
 // enabledToolsFromContext reads the calling turn's toolset filter for child
