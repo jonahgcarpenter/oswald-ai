@@ -8,6 +8,14 @@ const (
 // CompactionTriggerPercent is the input-pressure threshold for foreground and durable compaction.
 const CompactionTriggerPercent = 70
 
+// TrimThresholdPercent is the severe-pressure threshold for large->small model
+// swaps (issue #295). Normal 70-100% pressure still summarizes (no data loss);
+// only over-budget prompts (which steady-state compaction at 70% can never
+// produce — only a window shrink can) drop oldest turns unsummarized to the
+// 70% line first, then the remainder compacts normally on the session model.
+// Dropped turns stay searchable via session_search.
+const TrimThresholdPercent = 100
+
 // ExcludedTail is the number of newest turns withheld from compaction input.
 // They stay verbatim in context; only older turns are summarized and flagged.
 const ExcludedTail = 3

@@ -70,7 +70,11 @@ load. Cache files expire after 24h and are never reconstructed from SQLite.
 
 70% of the usable input triggers one blocking markdown call inside the lane head:
 `SYSTEM=compaction prompt`, `USER=session JSON dump of all but the newest 3 turns`,
-zero tools, plain markdown out. On success the summarized message ranges are flagged
+zero tools, plain markdown out. Over budget (only possible after a model-window
+shrink — steady-state 70% compaction never lets prompts exceed 100%) the oldest
+turns are flagged `compacted=1` unsummarized to the 70% line first, then the
+remainder compacts normally on the session model; dropped turns stay
+searchable. On success the summarized message ranges are flagged
 `messages.compacted=1` (newest 3 stay verbatim) and the markdown is cached in memory
 per session generation (no DDL, no size cap; restart recomputes from the transcript).
 Context reads exclude `compacted=1` rows, so prompt assembly is

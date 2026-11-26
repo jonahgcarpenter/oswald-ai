@@ -637,13 +637,54 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		cachedMarkdown = a.summarizer.Get(senderID, sessionKey, sessionGeneration)
 	}
 	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+	// Trim-then-compact for large->small swaps (issue #295): over budget (only
+	// possible after a window shrink) drop oldest turns unsummarized (still
+	// searchable) to the 70% line, then run the normal single compaction on
+	// the session model. Never trims the newest ExcludedTail or the required
+	// prompt; if those alone exceed the trim line there is nothing safe to drop.
+	trimmed := false
+	if !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > tokenbudget.ExcludedTail &&
+		promptContext.EstimatedBefore*100 > inputLimit*tokenbudget.TrimThresholdPercent {
+		originalBefore := promptContext.EstimatedBefore
+		trimTarget := inputLimit * tokenbudget.CompactionTriggerPercent / 100
+		excess := originalBefore - trimTarget
+		var dropIDs []int64
+		dropCount := 0
+		freed := 0
+		for i := len(recentTurns) - 1; i >= tokenbudget.ExcludedTail && freed < excess; i-- {
+			turn := recentTurns[i]
+			if turn.ID > 0 {
+				dropIDs = append(dropIDs, turn.ID)
+			}
+			dropCount++
+			freed += tokenbudget.EstimateRequest(memory.SessionTurnMessages(turn), nil)
+		}
+		if dropCount > 0 {
+			if len(dropIDs) > 0 {
+				if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, dropIDs); markErr != nil {
+					reqLog.Warn("agent.context.trim_mark_failed", "failed to mark trimmed turns",
+						config.F("status", "degraded"), config.ErrorField(markErr))
+				}
+			}
+			recentTurns = recentTurns[:len(recentTurns)-dropCount]
+			minimumTail = preservedRecentTailCount(recentTurns, inputLimit)
+			promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+			trimmed = true
+			reqLog.Debug("agent.context.trimmed", "trimmed oldest turns before compaction",
+				config.F("trimmed_turn_count", dropCount),
+				config.F("estimated_before", originalBefore),
+				config.F("estimated_after", promptContext.EstimatedAfter),
+				config.F("prompt_budget", inputLimit))
+		}
+	}
 	// 70% trigger: blocking markdown compaction inside the lane head so the
 	// next message in the same conversation queues behind it. The budget and
 	// the compaction model both follow the session's resolved target (issue
 	// #295), so mid-session model switches and large->small swaps take effect
-	// on the next turn.
+	// on the next turn. A trim in the same turn forces the compaction below
+	// even if the estimate landed just under the line.
 	if !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > 0 &&
-		promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent {
+		(promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent || trimmed) {
 		candidates := tokenbudget.Candidates(recentTurns)
 		if len(candidates) == 0 {
 			reqLog.Debug("agent.context.compaction_skipped", "skipped session compaction: only newest turns present")
