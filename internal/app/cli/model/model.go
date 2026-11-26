@@ -17,6 +17,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
@@ -178,7 +180,7 @@ func listCmd(ctx context.Context, t *target, stdout, stderr io.Writer) int {
 			defer func() { <-permits }()
 			fetchCtx, cancel := context.WithTimeout(ctx, listFetchTimeout)
 			defer cancel()
-			models, err := llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, active.LLMGatewayVirtualKey, nil).ListModels(fetchCtx)
+			models, err := subscriptionModels(fetchCtx, active, name, endpoint)
 			entries[index] = providerModels{name: name, models: models, unavailable: err != nil}
 		}()
 	}
@@ -208,6 +210,27 @@ type providerModels struct {
 	name        string
 	models      []llm.ModelEntry
 	unavailable bool
+}
+
+// subscriptionModels resolves one provider's listing: unauthorized ChatGPT
+// subscriptions degrade instead of advertising models that cannot run; key
+// providers use the live gateway listing.
+func subscriptionModels(ctx context.Context, active *config.Config, name string, endpoint config.ProviderEndpoint) ([]llm.ModelEntry, error) {
+	switch endpoint.AuthKind {
+	case config.ProviderAuthChatGPT:
+		client, err := chatgpt.NewClient(endpoint.URL, active.ProfileRoot, name, active.LLMGatewayVirtualKey, nil)
+		if err != nil {
+			return nil, err
+		}
+		return client.ListModels(ctx)
+	case config.ProviderAuthClaudeSDK:
+		if _, err := claude.Check(ctx); err != nil {
+			return nil, err
+		}
+		return claude.StaticModels(), nil
+	default:
+		return llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, active.LLMGatewayVirtualKey, nil).ListModels(ctx)
+	}
 }
 
 func setCmd(t *target, args []string, stdout, stderr io.Writer) int {

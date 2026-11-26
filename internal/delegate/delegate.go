@@ -108,7 +108,7 @@ type Manager struct {
 	cfg      *config.Config
 
 	parentClient llm.Chatter
-	newClient    func(url, key, virtualKey string, log *config.Logger) llm.Chatter
+	newClient    func(provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) llm.Chatter
 	clientsMu    sync.Mutex
 	clients      map[string]llm.Chatter
 
@@ -142,7 +142,7 @@ type Deps struct {
 	Broker      BrokerSubmitter
 	Processes   processLister
 	Parent      llm.Chatter
-	NewClient   func(url, key, virtualKey string, log *config.Logger) llm.Chatter
+	NewClient   func(provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) llm.Chatter
 	Registry    *registry.Registry
 	MCP         mcp.ProviderView
 	Soul        *soul.Store

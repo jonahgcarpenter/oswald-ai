@@ -46,6 +46,7 @@ type DefaultTarget struct {
 	Provider   string
 	URL        string
 	APIKey     string
+	AuthKind   string
 	VirtualKey string
 }
 
@@ -88,13 +89,13 @@ type LinkDegradation struct {
 }
 
 // NewClientFunc constructs a chat client for a provider transport (startup
-// wires llm.NewGatewayClient).
-type NewClientFunc func(url, apiKey, virtualKey string) llm.Chatter
+// wires llm.NewGatewayClient plus the subscription transports).
+type NewClientFunc func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter
 
 // ListModelsFunc fetches one provider's model listing (startup wires the
-// llm.GatewayClient implementation). Nil makes every provider report
-// unavailable instead of panicking.
-type ListModelsFunc func(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error)
+// llm.GatewayClient implementation plus subscription catalogs). Nil makes
+// every provider report unavailable instead of panicking.
+type ListModelsFunc func(ctx context.Context, provider string, endpoint config.ProviderEndpoint, virtualKey string) ([]llm.ModelEntry, error)
 
 // ProviderStatus is one provider's listing availability for command display.
 // ModelCount is the number of reported models when Available is true and 0
@@ -239,7 +240,7 @@ func (r *ModelRouter) resolvePin(ctx context.Context, view View, owner, sessionK
 	if model == "" {
 		return Target{}, false, "empty_model"
 	}
-	client, ok := r.clientFor(view, endpoint)
+	client, ok := r.clientFor(view, provider, endpoint)
 	if !ok {
 		return Target{}, false, "client_unavailable"
 	}
@@ -267,7 +268,7 @@ func (r *ModelRouter) resolveOverride(view View, gateway, chatID string) (Target
 	if model == "" {
 		return Target{}, false, "empty_model"
 	}
-	client, ok := r.clientFor(view, endpoint)
+	client, ok := r.clientFor(view, provider, endpoint)
 	if !ok {
 		return Target{}, false, "client_unavailable"
 	}
@@ -286,7 +287,7 @@ func (r *ModelRouter) resolveOverride(view View, gateway, chatID string) (Target
 // cannot be constructed (a wiring bug, since startup guarantees a default),
 // the link falls back to the startup client so it stays always-usable.
 func (r *ModelRouter) defaultTarget(view View) Target {
-	client, ok := r.clientFor(view, config.ProviderEndpoint{URL: view.Default.URL, APIKey: view.Default.APIKey})
+	client, ok := r.clientFor(view, view.Default.Provider, config.ProviderEndpoint{URL: view.Default.URL, APIKey: view.Default.APIKey, AuthKind: view.Default.AuthKind})
 	if !ok {
 		client = r.defaultClient
 	}
@@ -299,16 +300,17 @@ func (r *ModelRouter) defaultTarget(view View) Target {
 }
 
 // clientFor returns the startup client when the endpoint matches the startup
-// default transport, otherwise a client cached by URL and key. Keyless
-// endpoints (empty APIKey) are valid and cache under their own key. A false
-// result means no client was constructed for this endpoint (nil seam or nil
-// construction result); callers must degrade the link instead of running the
-// turn on the wrong transport.
-func (r *ModelRouter) clientFor(view View, endpoint config.ProviderEndpoint) (llm.Chatter, bool) {
-	if endpoint.URL == r.defaultURL && endpoint.APIKey == r.defaultAPIKey {
+// default transport, otherwise a client cached by provider, URL, key, and
+// auth kind. Subscription providers with the same URL stay distinct by
+// provider name so per-provider token stores never mix. A false result means
+// no client was constructed for this endpoint (nil seam or nil construction
+// result); callers must degrade the link instead of running the turn on the
+// wrong transport.
+func (r *ModelRouter) clientFor(view View, provider string, endpoint config.ProviderEndpoint) (llm.Chatter, bool) {
+	if endpoint.URL == r.defaultURL && endpoint.APIKey == r.defaultAPIKey && provider == view.Default.Provider {
 		return r.defaultClient, true
 	}
-	cacheKey := endpoint.URL + "\x00" + endpoint.APIKey
+	cacheKey := provider + "\x00" + endpoint.URL + "\x00" + endpoint.APIKey + "\x00" + endpoint.AuthKind
 	r.clientsMu.Lock()
 	defer r.clientsMu.Unlock()
 	if client, ok := r.clients[cacheKey]; ok {
@@ -317,7 +319,7 @@ func (r *ModelRouter) clientFor(view View, endpoint config.ProviderEndpoint) (ll
 	if r.newClient == nil {
 		return nil, false
 	}
-	client := r.newClient(endpoint.URL, endpoint.APIKey, view.Default.VirtualKey)
+	client := r.newClient(provider, endpoint, view.Default.VirtualKey)
 	if client == nil {
 		return nil, false
 	}
@@ -423,7 +425,7 @@ func (r *ModelRouter) ResolveExplicit(provider, model string) (Target, error) {
 	if !ok {
 		return Target{}, fmt.Errorf("unknown model provider %q", provider)
 	}
-	client, ok := r.clientFor(view, endpoint)
+	client, ok := r.clientFor(view, provider, endpoint)
 	if !ok {
 		return Target{}, fmt.Errorf("model provider %q is unavailable", provider)
 	}
@@ -475,7 +477,7 @@ func (r *ModelRouter) providerModels(ctx context.Context, view View, provider st
 
 	fetchCtx, cancel := context.WithTimeout(ctx, listingFetchTimeout)
 	defer cancel()
-	models, err := r.listModels(fetchCtx, endpoint.URL, endpoint.APIKey, view.Default.VirtualKey)
+	models, err := r.listModels(fetchCtx, provider, endpoint, view.Default.VirtualKey)
 	r.storeListing(provider, models, err)
 	return models, err
 }

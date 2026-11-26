@@ -17,9 +17,9 @@ func TestWindowForUsesKnownWindow(t *testing.T) {
 			"alpha": {URL: "https://alpha.example.com/v1", APIKey: "k"},
 		},
 	}
-	router := agent.NewModelRouter(view, &fakeChatter{}, func(url, key, virtualKey string) llm.Chatter {
+	router := agent.NewModelRouter(view, &fakeChatter{}, func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter {
 		return &fakeChatter{}
-	}, func(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error) {
+	}, func(ctx context.Context, provider string, endpoint config.ProviderEndpoint, virtualKey string) ([]llm.ModelEntry, error) {
 		return []llm.ModelEntry{{ID: "big-model", Window: 1000000}}, nil
 	}, nil)
 	if _, err := router.ListModels(context.Background(), "alpha"); err != nil {

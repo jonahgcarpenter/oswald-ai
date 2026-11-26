@@ -129,7 +129,7 @@ func testManager(t *testing.T, chat *fakeChatter, br *fakeBroker) (*Manager, *me
 
 // testManagerWith builds a manager over a caller-supplied config and client
 // seam. A nil seam returns the shared fake chatter for every endpoint.
-func testManagerWith(t *testing.T, chat *fakeChatter, br *fakeBroker, cfg *config.Config, newClient func(url, key, virtualKey string, log *config.Logger) llm.Chatter) (*Manager, *memory.ProfileStore, func()) {
+func testManagerWith(t *testing.T, chat *fakeChatter, br *fakeBroker, cfg *config.Config, newClient func(provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) llm.Chatter) (*Manager, *memory.ProfileStore, func()) {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
@@ -144,7 +144,7 @@ func testManagerWith(t *testing.T, chat *fakeChatter, br *fakeBroker, cfg *confi
 	}
 	log := config.NewLogger(config.LevelError)
 	if newClient == nil {
-		newClient = func(string, string, string, *config.Logger) llm.Chatter { return chat }
+		newClient = func(string, config.ProviderEndpoint, string, *config.Logger) llm.Chatter { return chat }
 	}
 	m := NewManager(Deps{
 		Profile:     "alice",
@@ -602,11 +602,11 @@ type endpointClients struct {
 	byURL map[string]*fakeChatter
 }
 
-func (c *endpointClients) newClient(url, key, virtualKey string, log *config.Logger) llm.Chatter {
+func (c *endpointClients) newClient(provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) llm.Chatter {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.urls = append(c.urls, url)
-	return c.byURL[url]
+	c.urls = append(c.urls, endpoint.URL)
+	return c.byURL[endpoint.URL]
 }
 
 func (c *endpointClients) constructed() []string {

@@ -21,6 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
@@ -125,7 +126,7 @@ const brokerWorkerCount = 5
 
 func runProfiles(ctx context.Context, cfg *config.Config, rootLog *config.Logger) error {
 	return runProfilesWith(ctx, cfg, rootLog, profileDependencies{newClient: func(cfg *config.Config, log *config.Logger) llm.Chatter {
-		return llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, log)
+		return defaultSubscriptionClient(cfg, log)
 	}, newGateways: gateway.NewServicesFromConfig})
 }
 
@@ -302,6 +303,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			serverNames = append(serverNames, server.Name)
 		}
 		mcp.RepairTokens(profile.ProfileRoot, name, serverNames)
+		chatgpt.RepairProfile(profile.ProfileRoot)
 		vault.RepairProfile(profile.ProfileRoot, name)
 		cron.RepairProfile(profile.ProfileRoot, name)
 		imagecache.RepairProfile(profile.ProfileRoot, name)
@@ -332,11 +334,8 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		publishPluginEnvPassthrough(pluginManager, name, log)
 		client := seams.newClient(profile, rootLog)
-		modelRouter := agent.NewModelRouter(modelViewFor(profile), client, func(url, apiKey, virtualKey string) llm.Chatter {
-			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog)
-		}, func(ctx context.Context, url, apiKey, virtualKey string) ([]llm.ModelEntry, error) {
-			return llm.NewGatewayClient(url, apiKey, virtualKey, rootLog).ListModels(ctx)
-		}, store)
+		newClient, listModels := routerSeamsFor(profile, rootLog)
+		modelRouter := agent.NewModelRouter(modelViewFor(profile), client, newClient, listModels, store)
 		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
 			return &Error{Event: "app.session_summarizer.init_failed", Message: "failed to initialize profile summarizer", Cause: err}
@@ -412,8 +411,8 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 				Broker:      requestBroker,
 				Processes:   process.Shared(profile.ProfileRoot),
 				Parent:      rt.client,
-				NewClient: func(url, key, virtualKey string, log *config.Logger) llm.Chatter {
-					return llm.NewGatewayClient(url, key, virtualKey, log)
+				NewClient: func(provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) llm.Chatter {
+					return subscriptionClientFor(profile.ProfileRoot, provider, endpoint, virtualKey, log)
 				},
 				Registry:   rt.registry,
 				MCP:        rt.mcp,

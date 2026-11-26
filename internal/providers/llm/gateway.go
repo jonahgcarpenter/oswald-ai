@@ -88,6 +88,7 @@ type GatewayClient struct {
 	BaseURL      string
 	APIKey       string
 	VirtualKey   string
+	AccountID    string
 	HTTPClient   *http.Client
 	pollInterval time.Duration
 	log          *config.Logger
@@ -112,6 +113,10 @@ func (c *GatewayClient) applyHeaders(req *http.Request) {
 	}
 	if c.VirtualKey != "" {
 		req.Header.Set("x-bf-vk", c.VirtualKey)
+	}
+	if c.AccountID != "" {
+		req.Header.Set("ChatGPT-Account-Id", c.AccountID)
+		req.Header.Set("originator", "oswald")
 	}
 }
 

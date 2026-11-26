@@ -10,8 +10,17 @@ SSE streaming (`data:` lines, 1 MiB scanner buffer, index-sorted `delta.tool_cal
 terminates), wire DTOs (`gateway_wire.go`), public request/response types, and usage telemetry
 with retry classifiers (`IsPermanentChatProviderError` for 4xx minus 408/425/429,
 `IsTemporaryOllamaToolParserError`, `IsContextLengthExceededError`). Auth is bearer plus virtual
-key. Tool wire names derive from correlated invocation IDs, and `required:[]` is always emitted
+key, plus `ChatGPT-Account-Id`/`originator` when a ChatGPT subscription token is used. Tool wire names derive from correlated invocation IDs, and `required:[]` is always emitted
 explicitly — empty is not omitted.
+
+`chatgpt/` owns the ChatGPT subscription transport: profile-scoped OAuth tokens under
+`<profile>/providers/<name>/auth.json` (0700/0600, flock refresh fence, single-use rotation),
+browser PKCE on `127.0.0.1:1455` with device-flow fallback, per-request bearer resolution with
+coalesced refresh, and a static catalog fallback when the live listing is unavailable.
+
+`claude/` owns the Claude subscription transport through the official Agent SDK path: no
+token storage, `claude auth status --json` gate, request-scoped `claude -p --output-format
+stream-json` child with credential/override env stripped, static catalog for listings.
 
 `web/` holds the shared `Searcher` contract, query/result normalization, and the
 Brave-primary/SearXNG-fallback selector. `web/brave/` posts the LLM-context endpoint (8 URLs,
