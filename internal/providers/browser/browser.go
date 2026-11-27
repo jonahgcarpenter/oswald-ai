@@ -3,7 +3,11 @@
 // there are no hosted search/extract services and no cloud browser.
 package browser
 
-import "time"
+import (
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/browser/launcher"
+)
 
 // Options configures the local headless backend. Zero values resolve via
 // Effective.
@@ -78,4 +82,10 @@ func (o Options) OpenTimeout(firstNav bool) time.Duration {
 		return 60 * time.Second
 	}
 	return o.CommandTimeout
+}
+
+// SweepStaleProfiles forwards to the launcher package to preserve the
+// providerbrowser API while the implementation lives in launcher/.
+func SweepStaleProfiles(profileRoot string) int {
+	return launcher.SweepStaleProfiles(profileRoot)
 }

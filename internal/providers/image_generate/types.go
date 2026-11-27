@@ -1,5 +1,5 @@
-// Package comfy_ui implements the ComfyUI image generation provider.
-package comfy_ui
+// Package image_generate implements the ComfyUI image generation provider.
+package image_generate
 
 import "image"
 

@@ -1,11 +1,10 @@
-package browser
+package launcher
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestWithSandboxBypass(t *testing.T) {
@@ -23,8 +22,8 @@ func TestWithSandboxBypass(t *testing.T) {
 			hasBypass = true
 		}
 	}
-	if hasBypass != needsSandboxBypass() {
-		t.Fatalf("bypass = %v, need = %v", hasBypass, needsSandboxBypass())
+	if hasBypass != NeedsSandboxBypass() {
+		t.Fatalf("bypass = %v, need = %v", hasBypass, NeedsSandboxBypass())
 	}
 	if !hasBypass {
 		if len(got) != 1 || got[0] != "--headless=new" {
@@ -80,35 +79,5 @@ func TestSweepStaleProfiles(t *testing.T) {
 	}
 	if got := SweepStaleProfiles(""); got != 0 {
 		t.Fatalf("empty root sweep reaped %d", got)
-	}
-}
-
-func TestSweepReapsOrphanProfileDirs(t *testing.T) {
-	root := t.TempDir()
-	base := sessionBaseDir(root)
-	if err := os.MkdirAll(base, 0700); err != nil {
-		t.Fatal(err)
-	}
-	orphan := filepath.Join(base, "profile-deadbeef")
-	if err := os.Mkdir(orphan, 0700); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(orphan, old, old); err != nil {
-		t.Fatal(err)
-	}
-	fresh := filepath.Join(base, "profile-freshbeef")
-	if err := os.Mkdir(fresh, 0700); err != nil {
-		t.Fatal(err)
-	}
-	b := NewLocalBackend((Options{}).Effective(), root)
-	if got := b.Sweep(time.Now()); got < 1 {
-		t.Fatalf("orphan sweep reaped %d", got)
-	}
-	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
-		t.Fatal("old orphan survived")
-	}
-	if _, err := os.Stat(fresh); err != nil {
-		t.Fatal("fresh dir was reaped")
 	}
 }

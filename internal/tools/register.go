@@ -2,24 +2,13 @@ package tools
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"os/exec"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
-
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 	"github.com/jonahgcarpenter/oswald-ai/internal/plugins"
 	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/brave"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/searxng"
@@ -51,9 +40,14 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
+
 func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
@@ -76,15 +70,15 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled image generation because no server is configured", config.F("tool_name", imagegenerate.Name))
 	} else {
-		textWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.TextToImage)
+		textWorkflow, err := image_generate.NewWorkflow(image_generate.TextToImage)
 		if err != nil {
 			return err
 		}
-		imageWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.ImageToImage)
+		imageWorkflow, err := image_generate.NewWorkflow(image_generate.ImageToImage)
 		if err != nil {
 			return err
 		}
-		client, err := comfy_ui.NewClient(comfyURL, cfg.ComfyUIGenerationTimeout)
+		client, err := image_generate.NewClient(comfyURL, cfg.ComfyUIGenerationTimeout)
 		if err != nil {
 			return fmt.Errorf("initialize ComfyUI client: %w", err)
 		}
@@ -215,108 +209,7 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 // from the deployment config. A platform without a configured backend gets
 // no entry, and create/update then rejects its targets as unservable rather
 // than scheduling jobs that can never deliver.
-func cronTargetValidators(cfg *config.Config, log *config.Logger) map[string]cron.TargetValidator {
-	validators := make(map[string]cron.TargetValidator)
-	if url := strings.TrimSpace(cfg.BlueBubblesURL); url != "" && strings.TrimSpace(cfg.BlueBubblesPassword) != "" {
-		validators[cron.DeliverIMessage] = cron.NewIMessageTargetValidator(url, cfg.BlueBubblesPassword)
-	}
-	if token := strings.TrimSpace(cfg.DiscordToken); token != "" {
-		validators[cron.DeliverDiscord] = cron.NewDiscordTargetValidator("", token)
-	}
-	return validators
-}
 
-// cronModelChecker validates explicit cron model references against live
-// provider state. Errors name only the provider/model identity and the
-// configured provider set, never endpoints or credentials.
-type cronModelChecker struct {
-	endpoints   map[string]config.ProviderEndpoint
-	virtualKey  string
-	profileRoot string
-	log         *config.Logger
-}
-
-// ValidateModel implements cron.ModelValidator: the provider must be
-// configured and the model must appear in its live listing.
-func (c *cronModelChecker) ValidateModel(ctx context.Context, provider, model string) error {
-	provider = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(provider), "custom:"))
-	model = strings.TrimSpace(model)
-	if provider == "" || model == "" {
-		return fmt.Errorf("model must be {provider, model}")
-	}
-	endpoint, ok := c.endpoints[provider]
-	if !ok {
-		return fmt.Errorf("unknown model provider %q (configured: %s)", provider, strings.Join(sortedEndpointNames(c.endpoints), ", "))
-	}
-	models, err := subscriptionListing(ctx, c.profileRoot, provider, endpoint, c.virtualKey, c.log)
-	if err != nil {
-		return fmt.Errorf("model provider %q is unavailable", provider)
-	}
-	for _, entry := range models {
-		if entry.ID == model {
-			return nil
-		}
-	}
-	return fmt.Errorf("unknown model %q for provider %q", model, provider)
-}
-
-// cronModelValidatorFor builds the production cron model validator from the
-// profile's effective provider map. A nil config yields a nil validator so
-// registry construction never panics; the handler then enforces syntax only.
-func cronModelValidatorFor(cfg *config.Config, log *config.Logger) cron.ModelValidator {
-	if cfg == nil {
-		return nil
-	}
-	return &cronModelChecker{endpoints: cfg.ProviderEndpoints, virtualKey: cfg.LLMGatewayVirtualKey, profileRoot: cfg.ProfileRoot, log: log}
-}
-
-func sortedEndpointNames(endpoints map[string]config.ProviderEndpoint) []string {
-	names := make([]string, 0, len(endpoints))
-	for name := range endpoints {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// videoBinaryLookPath resolves the ffmpeg/ffprobe pair; tests substitute a
-// fake so registration never depends on host binaries.
-var videoBinaryLookPath = exec.LookPath
-
-// lookupVideoBinaries resolves the ffmpeg/ffprobe pair for frame sampling.
-// Empty strings mean frame extraction is unavailable and video_analyze stays
-// disabled; the agent keeps the terminal recipe instead.
-func lookupVideoBinaries() (ffmpeg, ffprobe string) {
-	ffmpeg, _ = videoBinaryLookPath("ffmpeg")
-	ffprobe, _ = videoBinaryLookPath("ffprobe")
-	return ffmpeg, ffprobe
-}
-
-// subscriptionListing resolves one provider's model listing for validation.
-// Unauthorized ChatGPT subscriptions degrade instead of advertising models
-// that cannot run; key providers use the live gateway listing.
-func subscriptionListing(ctx context.Context, profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) ([]llm.ModelEntry, error) {
-	switch endpoint.AuthKind {
-	case config.ProviderAuthChatGPT:
-		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil, log)
-		if err != nil {
-			return nil, err
-		}
-		return client.ListModels(ctx)
-	case config.ProviderAuthClaudeSDK:
-		if _, err := claude.Check(ctx); err != nil {
-			return nil, err
-		}
-		return claude.StaticModels(), nil
-	default:
-		return llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, virtualKey, log).ListModels(ctx)
-	}
-}
-
-// DelegatePolicy returns the registry policy for the delegate tool: full
-// history with searchable results. Startup reuses it when installing the
-// live per-profile handler over the placeholder, so both registrations share
-// one policy definition.
 func DelegatePolicy() governance.ToolPolicy {
 	return toolPolicy(normalizeDelegateArgs)
 }
@@ -432,363 +325,4 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 		return prune.Counts{RemovedDirs: backend.Sweep(now)}, nil
 	})
 	return nil
-}
-
-func normalizeBrowserNavigateArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{"url": normalizedString(args, "url", false)}
-}
-
-func normalizeBrowserSnapshotArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{"full": args["full"]}
-}
-
-func normalizeBrowserRefArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"ref", "key"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	return normalized
-}
-
-func normalizeBrowserTypeArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["ref"].(string); ok {
-		normalized["ref"] = strings.Join(strings.Fields(value), " ")
-	}
-	if text, ok := args["text"].(string); ok {
-		sum := sha256.Sum256([]byte(text))
-		normalized["text_hash"] = hex.EncodeToString(sum[:])
-	}
-	return normalized
-}
-
-func normalizeBrowserScrollArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["direction"].(string); ok {
-		normalized["direction"] = strings.Join(strings.Fields(value), " ")
-	}
-	return normalized
-}
-
-func normalizeBrowserEmptyArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{}
-}
-
-func normalizeBrowserConsoleArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{"clear": args["clear"]}
-	if expression, ok := args["expression"].(string); ok {
-		sum := sha256.Sum256([]byte(expression))
-		normalized["expression_hash"] = hex.EncodeToString(sum[:])
-	}
-	return normalized
-}
-
-func normalizeVaultHandleArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["handle"].(string); ok {
-		normalized["handle"] = strings.Join(strings.Fields(value), " ")
-	}
-	return normalized
-}
-
-func normalizeVaultSaveArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"label", "identifier", "identifier_type"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	for _, key := range []string{"password", "otp"} {
-		if value, ok := args[key].(string); ok {
-			sum := sha256.Sum256([]byte(value))
-			normalized[key+"_hash"] = hex.EncodeToString(sum[:])
-		}
-	}
-	return normalized
-}
-
-func normalizeVaultSaveAddressArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["label"].(string); ok {
-		normalized["label"] = strings.Join(strings.Fields(value), " ")
-	}
-	for _, key := range []string{"address_line1", "address_line2", "city", "state", "postal_code", "country"} {
-		if value, ok := args[key].(string); ok {
-			sum := sha256.Sum256([]byte(value))
-			normalized[key+"_hash"] = hex.EncodeToString(sum[:])
-		}
-	}
-	return normalized
-}
-
-func normalizeBrowserDialogArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["action"].(string); ok {
-		normalized["action"] = strings.Join(strings.Fields(value), " ")
-	}
-	if text, ok := args["prompt_text"].(string); ok {
-		sum := sha256.Sum256([]byte(text))
-		normalized["prompt_text_hash"] = hex.EncodeToString(sum[:])
-	}
-	if value, ok := args["dialog_id"].(string); ok {
-		normalized["dialog_id"] = strings.Join(strings.Fields(value), " ")
-	}
-	return normalized
-}
-
-func normalizeBrowserVisionArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{"annotate": args["annotate"]}
-	if question, ok := args["question"].(string); ok {
-		sum := sha256.Sum256([]byte(question))
-		normalized["question_hash"] = hex.EncodeToString(sum[:])
-	}
-	return normalized
-}
-
-func normalizeWebSearchArgs(args map[string]interface{}) interface{} {
-	limit, err := websearch.WebResultLimit(args)
-	var normalized interface{} = limit
-	if err != nil {
-		normalized = map[string]interface{}{"invalid": args["limit"]}
-	}
-	return map[string]interface{}{"query": normalizedString(args, "query", true), "limit": normalized}
-}
-
-func normalizeImageGenerateArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{"prompt": normalizedString(args, "prompt", false), "aspect_ratio": "landscape"}
-	if aspect, exists := args["aspect_ratio"]; exists {
-		normalized["aspect_ratio"] = aspect
-	}
-	if source, exists := args["image_url"]; exists {
-		normalized["image_url"] = source
-	}
-	return normalized
-}
-
-// normalizeSessionSearchArgs canonicalizes shape-defining selectors so repeated
-// identical reads collapse, while distinct queries remain distinct.
-func normalizeSessionSearchArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"query", "session_id", "sort", "detail", "after", "before", "role_filter"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	for _, key := range []string{"limit", "around_message_id", "window"} {
-		if value, ok := args[key]; ok {
-			normalized[key] = value
-		}
-	}
-	if raw, ok := args["exclude_session_ids"].([]interface{}); ok {
-		normalized["exclude_session_ids_count"] = len(raw)
-	}
-	return normalized
-}
-
-// normalizeSkillManageArgs canonicalizes skill selectors so repeated
-// identical reads collapse while distinct skills stay distinct. Bodies and
-// descriptions never survive normalization, only names and hashes.
-func normalizeSkillManageArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"action", "name", "file_path"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	for _, key := range []string{"description", "content", "old_text"} {
-		if value, ok := args[key].(string); ok {
-			sum := sha256.Sum256([]byte(value))
-			normalized[key+"_hash"] = hex.EncodeToString(sum[:])
-		}
-	}
-	return normalized
-}
-
-func normalizedString(args map[string]interface{}, key string, lower bool) string {
-	value, _ := args[key].(string)
-	value = strings.Join(strings.Fields(value), " ")
-	if lower {
-		value = strings.ToLower(value)
-	}
-	return value
-}
-
-func normalizeReadFileArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{
-		"path":   normalizedString(args, "path", false),
-		"offset": args["offset"],
-		"limit":  args["limit"],
-	}
-}
-
-func normalizeWriteFileArgs(args map[string]interface{}) interface{} {
-	content, _ := args["content"].(string)
-	sum := sha256.Sum256([]byte(content))
-	return map[string]interface{}{
-		"path":         normalizedString(args, "path", false),
-		"content_hash": hex.EncodeToString(sum[:]),
-	}
-}
-
-func normalizePatchArgs(args map[string]interface{}) interface{} {
-	oldString, _ := args["old_string"].(string)
-	newString, _ := args["new_string"].(string)
-	oldSum := sha256.Sum256([]byte(oldString))
-	newSum := sha256.Sum256([]byte(newString))
-	return map[string]interface{}{
-		"path":        normalizedString(args, "path", false),
-		"old_hash":    hex.EncodeToString(oldSum[:]),
-		"new_hash":    hex.EncodeToString(newSum[:]),
-		"replace_all": args["replace_all"],
-	}
-}
-
-func normalizeSearchFilesArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"pattern", "target", "path", "file_glob", "order", "output_mode"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	for _, key := range []string{"limit", "offset", "context"} {
-		if value, ok := args[key]; ok {
-			normalized[key] = value
-		}
-	}
-	return normalized
-}
-
-func normalizeTerminalArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{
-		"command": normalizedString(args, "command", false),
-		"workdir": normalizedString(args, "workdir", false),
-		"timeout": args["timeout"],
-	}
-}
-
-func normalizeExecuteCodeArgs(args map[string]interface{}) interface{} {
-	code, _ := args["code"].(string)
-	sum := sha256.Sum256([]byte(code))
-	return map[string]interface{}{
-		"code_hash": hex.EncodeToString(sum[:]),
-		"reset":     args["reset"],
-	}
-}
-
-func normalizeProcessManageArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["action"].(string); ok {
-		normalized["action"] = strings.Join(strings.Fields(value), " ")
-	}
-	if value, ok := args["session_id"].(string); ok {
-		normalized["session_id"] = strings.TrimSpace(value)
-	}
-	for _, key := range []string{"timeout", "offset", "limit"} {
-		if value, ok := args[key]; ok {
-			normalized[key] = value
-		}
-	}
-	if data, ok := args["data"].(string); ok {
-		sum := sha256.Sum256([]byte(data))
-		normalized["data_hash"] = hex.EncodeToString(sum[:])
-	}
-	return normalized
-}
-
-// normalizeDelegateArgs canonicalizes delegate calls to counts and labels so
-// repeated identical dispatches collapse. Prompts, contexts, messages, and
-// schemas never survive normalization — only counts and names.
-func normalizeDelegateArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	if value, ok := args["action"].(string); ok {
-		normalized["action"] = strings.Join(strings.Fields(value), " ")
-	}
-	if value, ok := args["role"].(string); ok {
-		normalized["role"] = strings.Join(strings.Fields(value), " ")
-	}
-	if value, ok := args["subagent_id"].(string); ok {
-		normalized["subagent_id"] = strings.TrimSpace(value)
-	}
-	if tasks, ok := args["tasks"].([]interface{}); ok {
-		normalized["task_count"] = len(tasks)
-		imageCount := 0
-		hasSchema := false
-		for _, raw := range tasks {
-			entry, _ := raw.(map[string]interface{})
-			if entry == nil {
-				continue
-			}
-			if images, ok := entry["images"].([]interface{}); ok {
-				imageCount += len(images)
-			}
-			if _, ok := entry["output_schema"]; ok {
-				hasSchema = true
-			}
-		}
-		normalized["image_count"] = imageCount
-		normalized["has_output_schema"] = hasSchema
-	} else {
-		if _, ok := args["goal"]; ok {
-			normalized["task_count"] = 1
-		}
-		if images, ok := args["images"].([]interface{}); ok {
-			normalized["image_count"] = len(images)
-		}
-		if _, ok := args["output_schema"]; ok {
-			normalized["has_output_schema"] = true
-		}
-	}
-	return normalized
-}
-
-func normalizeCronjobManageArgs(args map[string]interface{}) interface{} {
-	normalized := map[string]interface{}{}
-	for _, key := range []string{"action", "job_id", "schedule", "script", "deliver"} {
-		if value, ok := args[key].(string); ok {
-			normalized[key] = strings.Join(strings.Fields(value), " ")
-		}
-	}
-	if prompt, ok := args["prompt"].(string); ok {
-		sum := sha256.Sum256([]byte(prompt))
-		normalized["prompt_hash"] = hex.EncodeToString(sum[:])
-	}
-	return normalized
-}
-
-// normalizeClarifyArgs canonicalizes the question form so repeated identical
-// asks collapse while distinct forms stay distinct. Raw question text never
-// survives normalization, only counts and a hash.
-func normalizeClarifyArgs(args map[string]interface{}) interface{} {
-	questions, _ := args["questions"].([]interface{})
-	normalized := map[string]interface{}{"question_count": len(questions)}
-	choiceCount := 0
-	var sb strings.Builder
-	for _, raw := range questions {
-		entry, _ := raw.(map[string]interface{})
-		if entry == nil {
-			continue
-		}
-		if text, ok := entry["question"].(string); ok {
-			sb.WriteString(strings.Join(strings.Fields(text), " "))
-			sb.WriteString("\x00")
-		}
-		if multi, ok := entry["multi_select"].(bool); ok && multi {
-			sb.WriteString("multi\x00")
-		}
-		if rawChoices, ok := entry["choices"].([]interface{}); ok {
-			for _, rawChoice := range rawChoices {
-				if choice, ok := rawChoice.(string); ok {
-					choiceCount++
-					sb.WriteString(strings.Join(strings.Fields(choice), " "))
-					sb.WriteString("\x00")
-				}
-			}
-		}
-	}
-	normalized["choice_count"] = choiceCount
-	sum := sha256.Sum256([]byte(sb.String()))
-	normalized["form_hash"] = hex.EncodeToString(sum[:])
-	return normalized
 }

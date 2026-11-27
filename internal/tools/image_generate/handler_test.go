@@ -15,17 +15,17 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 type fakeGenerator struct {
 	called           int
-	workflow         *comfy_ui.Workflow
+	workflow         *image_generate.Workflow
 	input            []byte
 	negative, aspect string
 	strength         *float64
-	result           comfy_ui.Generation
+	result           image_generate.Generation
 }
 
 type fakeSourceCache struct {
@@ -45,7 +45,7 @@ func (f *fakeSourceCache) Resolve(_ context.Context, user, path string) ([]byte,
 	return f.data, "image/png", nil
 }
 
-func (f *fakeGenerator) Generate(_ context.Context, _ *config.Logger, w *comfy_ui.Workflow, _, negative string, strength *float64, input []byte, aspect string) (comfy_ui.Generation, error) {
+func (f *fakeGenerator) Generate(_ context.Context, _ *config.Logger, w *image_generate.Workflow, _, negative string, strength *float64, input []byte, aspect string) (image_generate.Generation, error) {
 	f.called++
 	f.workflow, f.input, f.negative, f.strength, f.aspect = w, append([]byte(nil), input...), negative, strength, aspect
 	return f.result, nil
@@ -69,7 +69,7 @@ func pngBytes(t *testing.T) []byte {
 
 func TestHandlerOutputAndSelection(t *testing.T) {
 	data := pngBytes(t)
-	text, edit := &comfy_ui.Workflow{}, &comfy_ui.Workflow{}
+	text, edit := &image_generate.Workflow{}, &image_generate.Workflow{}
 	for _, tc := range []struct {
 		name   string
 		args   map[string]interface{}
@@ -82,7 +82,7 @@ func TestHandlerOutputAndSelection(t *testing.T) {
 		{"edit HTTPS", map[string]interface{}{"prompt": "moonlit lighthouse", "image_url": "https://images.example.org/source.png"}, "image_to_image", true, "landscape"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeGenerator{result: comfy_ui.Generation{Image: comfy_ui.GeneratedImage{Data: data, MIMEType: "image/png", Size: image.Pt(2, 3)}, Seed: 42, CleanupFailed: true}}
+			fake := &fakeGenerator{result: image_generate.Generation{Image: image_generate.GeneratedImage{Data: data, MIMEType: "image/png", Size: image.Pt(2, 3)}, Seed: 42, CleanupFailed: true}}
 			cache := &fakeSourceCache{data: data}
 			handler := newHandler(text, edit, fake, cache, config.NewLogger(config.LevelError))
 			result, err := handler(imageContext(), tc.args)
@@ -158,7 +158,7 @@ func TestHandlerManagedPathOwnership(t *testing.T) {
 			if tc.name == "other user" {
 				ctx = requestctx.WithPrincipal(ctx, identity.Principal{CanonicalUserID: "user-2", Gateway: "discord", ExternalID: "external-2", Assurance: identity.AssuranceDiscordGateway})
 			}
-			fake := &fakeGenerator{result: comfy_ui.Generation{Image: comfy_ui.GeneratedImage{Data: pngBytes(t), MIMEType: "image/png", Size: image.Pt(2, 3)}}}
+			fake := &fakeGenerator{result: image_generate.Generation{Image: image_generate.GeneratedImage{Data: pngBytes(t), MIMEType: "image/png", Size: image.Pt(2, 3)}}}
 			_, err := newHandler(nil, nil, fake, cache, log)(ctx, map[string]interface{}{"prompt": "edit", "image_url": tc.path})
 			if (err == nil) != tc.valid || (fake.called == 1) != tc.valid {
 				t.Fatalf("err=%v calls=%d", err, fake.called)

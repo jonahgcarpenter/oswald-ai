@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/browser/launcher"
 )
 
 // pageTransport is the per-session CDP surface. cdpPage implements it against
@@ -43,7 +44,7 @@ type cdpPage struct {
 // openPage dials endpointURL's first page target and enables console/exception
 // events into onLog/onErr.
 func openPage(ctx context.Context, endpointURL string, onLog func(string, string, string), onErr func(string, string)) (*cdpPage, error) {
-	targets, err := listTargets(ctx, endpointURL)
+	targets, err := launcher.ListTargets(ctx, endpointURL)
 	if err != nil {
 		return nil, err
 	}
@@ -68,37 +69,6 @@ func (p *cdpPage) enable(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func listTargets(ctx context.Context, endpointURL string) ([]string, error) {
-	base := endpointURL
-	for len(base) > 0 && base[len(base)-1] == '/' {
-		base = base[:len(base)-1]
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/json/list", nil)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list browser targets: %w", err)
-	}
-	defer resp.Body.Close()
-	var targets []struct {
-		Type                 string `json:"type"`
-		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
-		return nil, fmt.Errorf("decode browser targets: %w", err)
-	}
-	out := make([]string, 0, len(targets))
-	for _, t := range targets {
-		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-			out = append(out, t.WebSocketDebuggerURL)
-		}
-	}
-	return out, nil
 }
 
 func (p *cdpPage) handleEvent(method string, params json.RawMessage) {

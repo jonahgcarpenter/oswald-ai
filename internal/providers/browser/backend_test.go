@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/browser/launcher"
 )
 
 type fakePage struct {
@@ -101,7 +103,7 @@ func (f *fakePage) Blank(_ context.Context) error { f.url = "about:blank"; retur
 func (f *fakePage) Close() error                  { return nil }
 
 func testBackend(pages map[string]*fakePage) *LocalBackend {
-	return NewLocalBackendWithDial((Options{}).Effective(), "", func(_ context.Context, sess *browserSession) (pageTransport, *launchedBrowser, error) {
+	return NewLocalBackendWithDial((Options{}).Effective(), "", func(_ context.Context, sess *browserSession) (pageTransport, *launcher.LaunchedBrowser, error) {
 		fp := &fakePage{title: "Example", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG()}
 		if pages != nil {
 			if p, ok := pages[sess.profile]; ok {
@@ -179,7 +181,7 @@ func TestNavigateRequiresOthersFirst(t *testing.T) {
 }
 
 func TestPartialNavigateDegradesInsteadOfFailing(t *testing.T) {
-	b := NewLocalBackendWithDial((Options{}).Effective(), "", func(_ context.Context, sess *browserSession) (pageTransport, *launchedBrowser, error) {
+	b := NewLocalBackendWithDial((Options{}).Effective(), "", func(_ context.Context, sess *browserSession) (pageTransport, *launcher.LaunchedBrowser, error) {
 		return &fakePage{title: "Slow", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG(), partialNav: true}, nil, nil
 	})
 	ctx := context.Background()
@@ -226,7 +228,7 @@ func TestRestrictEvaluateDenylist(t *testing.T) {
 	page := &fakePage{title: "Example", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG()}
 	newBackend := func(restrict bool) *LocalBackend {
 		opts := (Options{RestrictEvaluate: restrict}).Effective()
-		return NewLocalBackendWithDial(opts, "", func(_ context.Context, sess *browserSession) (pageTransport, *launchedBrowser, error) {
+		return NewLocalBackendWithDial(opts, "", func(_ context.Context, sess *browserSession) (pageTransport, *launcher.LaunchedBrowser, error) {
 			return page, nil, nil
 		})
 	}
@@ -379,7 +381,7 @@ func TestSnapshotTruncationPointsAtReadFile(t *testing.T) {
 	root := t.TempDir()
 	opts := Options{SnapshotThreshold: 1000}.Effective()
 	page := &fakePage{title: "Example", elements: items.String(), text: `"hello"`, images: `[]`, png: samplePNG()}
-	b := NewLocalBackendWithDial(opts, root, func(_ context.Context, sess *browserSession) (pageTransport, *launchedBrowser, error) {
+	b := NewLocalBackendWithDial(opts, root, func(_ context.Context, sess *browserSession) (pageTransport, *launcher.LaunchedBrowser, error) {
 		return page, nil, nil
 	})
 	ctx := context.Background()
@@ -402,5 +404,35 @@ func TestSnapshotTruncationPointsAtReadFile(t *testing.T) {
 	}
 	if !strings.Contains(string(stored), "@e30") {
 		t.Fatal("spill is missing tail elements")
+	}
+}
+
+func TestSweepReapsOrphanProfileDirs(t *testing.T) {
+	root := t.TempDir()
+	base := launcher.SessionBaseDir(root)
+	if err := os.MkdirAll(base, 0700); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(base, "profile-deadbeef")
+	if err := os.Mkdir(orphan, 0700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(base, "profile-freshbeef")
+	if err := os.Mkdir(fresh, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := NewLocalBackend((Options{}).Effective(), root)
+	if got := b.Sweep(time.Now()); got < 1 {
+		t.Fatalf("orphan sweep reaped %d", got)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatal("old orphan survived")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("fresh dir was reaped")
 	}
 }

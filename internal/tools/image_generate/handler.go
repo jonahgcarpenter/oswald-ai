@@ -17,14 +17,14 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	_ "golang.org/x/image/webp"
 )
 
 type generator interface {
-	Generate(context.Context, *config.Logger, *comfy_ui.Workflow, string, string, *float64, []byte, string) (comfy_ui.Generation, error)
+	Generate(context.Context, *config.Logger, *image_generate.Workflow, string, string, *float64, []byte, string) (image_generate.Generation, error)
 }
 
 type sourceCache interface {
@@ -33,11 +33,11 @@ type sourceCache interface {
 }
 
 // NewHandler creates a handler that imports HTTPS images or reads only authenticated user-owned cached images.
-func NewHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client *comfy_ui.Client, cache *imagecache.Cache, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewHandler(textWorkflow, imageWorkflow *image_generate.Workflow, client *image_generate.Client, cache *imagecache.Cache, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return newHandler(textWorkflow, imageWorkflow, client, cache, log)
 }
 
-func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator, cache sourceCache, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func newHandler(textWorkflow, imageWorkflow *image_generate.Workflow, client generator, cache sourceCache, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		principal, ok := requestctx.PrincipalFromContext(ctx)
 		if !ok || !principal.Authenticated() {
@@ -60,7 +60,7 @@ func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator
 				return governance.Result{}, errors.New("aspect_ratio must be landscape, square, or portrait")
 			}
 		}
-		mode, workflow := comfy_ui.TextToImage, textWorkflow
+		mode, workflow := image_generate.TextToImage, textWorkflow
 		var inputPNG []byte
 		if raw, exists := args["image_url"]; exists {
 			source, valid := raw.(string)
@@ -91,7 +91,7 @@ func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator
 			if err := png.Encode(&buf, decoded); err != nil || buf.Len() > media.MaxImageBytes {
 				return governance.Result{}, errors.New("source image exceeds the PNG upload size limit")
 			}
-			inputPNG, mode, workflow = buf.Bytes(), comfy_ui.ImageToImage, imageWorkflow
+			inputPNG, mode, workflow = buf.Bytes(), image_generate.ImageToImage, imageWorkflow
 		}
 		meta := requestctx.MetadataFromContext(ctx)
 		agentLog := log.Agent("agent.tool.comfyui", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
@@ -112,7 +112,7 @@ func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator
 		}
 		metadata, err := json.Marshal(struct {
 			Status          string        `json:"status"`
-			Mode            comfy_ui.Mode `json:"mode"`
+			Mode            image_generate.Mode `json:"mode"`
 			MIMEType        string        `json:"mime_type"`
 			Width           int           `json:"width"`
 			Height          int           `json:"height"`

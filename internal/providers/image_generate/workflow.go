@@ -1,4 +1,4 @@
-package comfy_ui
+package image_generate
 
 import (
 	"crypto/rand"

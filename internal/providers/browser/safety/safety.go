@@ -1,4 +1,4 @@
-package browser
+package safety
 
 import (
 	"fmt"
@@ -113,7 +113,7 @@ var jsStringLiteralRE = regexp.MustCompile(`'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|
 
 // sensitiveEvalReason returns why an expression trips the sensitive-primitive
 // denylist, or empty when it does not.
-func sensitiveEvalReason(expr string) string {
+func SensitiveEvalReason(expr string) string {
 	if expr == "" {
 		return ""
 	}
@@ -289,4 +289,16 @@ func isCGNAT(addr netip.Addr) bool {
 	}
 	b := addr.As4()
 	return b[0] == 100 && b[1] >= 64 && b[1] <= 127
+}
+
+// IsPrivateDestination reports whether host is loopback/private/link-local.
+// Exported for backend eval guards.
+func IsPrivateDestination(host string) (bool, string) {
+	return isPrivateDestination(host)
+}
+
+// IsCloudMetadataHost reports whether host is a cloud metadata endpoint.
+// Exported for backend eval guards.
+func IsCloudMetadataHost(host string) bool {
+	return cloudMetadataHosts[host]
 }
