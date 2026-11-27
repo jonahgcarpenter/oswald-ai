@@ -4,8 +4,7 @@ Applies on top of the root `AGENTS.md`.
 
 ## Shape
 
-One package. `broker.go` holds the `Broker`, the `LaneKey{CanonicalUserID, SessionID}` map, and
-the per-user fence table; `telemetry.go` emits `broker.request.execution.complete` and queue
+One package, one topic per file. `lanes.go` holds the `Broker`, the `LaneKey{CanonicalUserID, SessionID}` map, lane lifecycle (`Start`, `enqueue`, `makeReady`, `LaneBusy`, `BeginDrain/Draining/WaitIdle/Shutdown`), and worker run/complete; `fences.go` holds the per-user fence table (`userFence`, `backgroundPermit`, exclusive ops); `submit.go` builds and enqueues work (`Submit`, `submitEnqueue`, `trySteer`, `buildAgentWork`); `steer.go` owns steer inbox (`steerEntry`, `removeSteer`, `settleSteers`, `requeueSteer`); `cancel.go` owns cancellation (`CancelReport`, `CancelActive/All`, `cancelAgentWork`, `rejectPendingWork`, `safeRun`, `deliverResult`); `telemetry.go` emits `broker.request.execution.complete` and queue
 snapshots. Production runs five workers (`brokerWorkerCount=5` in `startup/profiles.go`), so
 unrelated lanes overlap while each lane stays strictly FIFO — the worker count is a RAM bound
 (workers times per-turn footprint plus the bounded queue), with model-side queuing left to vLLM.
