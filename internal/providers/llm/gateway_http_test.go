@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 const reflectedSoulCanary = "SOUL_CANARY_DO_NOT_LOG_OR_RETURN"
@@ -105,6 +106,70 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 	if resp.Model != "served-model" || resp.Message.Content != "hello" || resp.PromptTokens != 3 || resp.TotalTokens != 5 || resp.DoneReason != "stop" {
 		t.Fatalf("unexpected Chat response: %+v", resp)
 	}
+}
+
+func TestGatewayClientChatSendsSessionHeaderAndUA(t *testing.T) {
+	t.Run("streaming", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/chat/completions" {
+				t.Fatalf("unexpected path %q", r.URL.Path)
+			}
+			if got := r.Header.Get("x-opencode-session"); got != "sess-123" {
+				t.Fatalf("x-opencode-session = %q, want sess-123", got)
+			}
+			if got := r.Header.Get("User-Agent"); got == "" || strings.Contains(got, "Go-http-client") {
+				t.Fatalf("User-Agent = %q, want product UA", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+		}))
+		defer server.Close()
+
+		client := newTestGatewayClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
+		if _, err := client.Chat(context.Background(), ChatRequest{Model: "m", Stream: true, SessionID: "sess-123"}, nil); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+	})
+
+	t.Run("async", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				if got := r.Header.Get("x-opencode-session"); got != "sess-456" {
+					t.Fatalf("x-opencode-session = %q, want sess-456", got)
+				}
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"id":"job-1","status":"pending"}`))
+				return
+			}
+			if got := r.Header.Get("x-opencode-session"); got != "sess-456" {
+				t.Fatalf("poll x-opencode-session = %q, want sess-456", got)
+			}
+			_, _ = w.Write([]byte(`{"id":"job-1","status":"completed","status_code":200,"result":{"choices":[{"message":{"role":"assistant","content":"ok"}}]}}`))
+		}))
+		defer server.Close()
+
+		client := newTestGatewayClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
+		if _, err := client.Chat(context.Background(), ChatRequest{Model: "m", SessionID: "sess-456"}, nil); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+	})
+
+	t.Run("context fallback", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.Header.Get("x-opencode-session"); got != "ctx-session" {
+				t.Fatalf("x-opencode-session = %q, want ctx-session", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+		}))
+		defer server.Close()
+
+		ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{SessionID: "ctx-session"})
+		client := newTestGatewayClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
+		if _, err := client.Chat(ctx, ChatRequest{Model: "m", Stream: true}, nil); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+	})
 }
 
 func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {

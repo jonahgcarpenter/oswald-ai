@@ -126,8 +126,12 @@ const (
 
 // ChatRequest is the provider-neutral payload for a chat-style LLM request.
 type ChatRequest struct {
-	Model             string        `json:"model"`
-	User              string        `json:"user,omitempty"`
+	Model string `json:"model"`
+	User  string `json:"user,omitempty"`
+	// SessionID carries a stable per-conversation identifier for providers
+	// that require session affinity (OpenCode Go's x-opencode-session).
+	// It is sent as a header, never in the JSON body.
+	SessionID         string        `json:"-"`
 	Messages          []ChatMessage `json:"messages"`
 	Tools             []Tool        `json:"tools,omitempty"`
 	ToolChoice        ToolChoice    `json:"tool_choice,omitempty"`

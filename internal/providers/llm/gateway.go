@@ -21,6 +21,13 @@ import (
 const (
 	defaultAsyncPollInterval = time.Second
 	maxAsyncPollFailures     = 3
+	// gatewayUserAgent identifies Oswald on provider-facing chat/model
+	// requests. OpenCode Go asks harnesses to identify with a product UA
+	// instead of a generic HTTP-library name.
+	gatewayUserAgent = "oswald-ai/1.0 (+llm-gateway)"
+	// openCodeSessionHeader carries the stable per-conversation session ID
+	// OpenCode Go requires for routing and prompt-cache affinity.
+	openCodeSessionHeader = "x-opencode-session"
 )
 
 // ChatHTTPError describes a non-success response from the chat completion endpoint.
@@ -108,6 +115,9 @@ func NewGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *G
 
 func (c *GatewayClient) applyHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(req.Header.Get("User-Agent")) == "" {
+		req.Header.Set("User-Agent", gatewayUserAgent)
+	}
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
@@ -118,6 +128,29 @@ func (c *GatewayClient) applyHeaders(req *http.Request) {
 		req.Header.Set("ChatGPT-Account-Id", c.AccountID)
 		req.Header.Set("originator", "oswald")
 	}
+}
+
+// applySessionHeader attaches the stable per-conversation session ID when
+// present. Values with CR/LF are dropped so header injection fails closed.
+func applySessionHeader(req *http.Request, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || strings.ContainsAny(sessionID, "\r\n") {
+		return
+	}
+	req.Header.Set(openCodeSessionHeader, sessionID)
+}
+
+// sessionIDFromContext returns the request-scoped session identifier when the
+// caller did not set one explicitly on the chat request.
+func sessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	sessionID := strings.TrimSpace(requestctx.MetadataFromContext(ctx).SessionID)
+	if sessionID == "" || strings.ContainsAny(sessionID, "\r\n") {
+		return ""
+	}
+	return sessionID
 }
 
 func encodeToolArguments(args map[string]interface{}) string {
@@ -282,7 +315,7 @@ func (e *embedHTTPError) Error() string {
 }
 func (e *embedHTTPError) HTTPStatusCode() int { return e.StatusCode }
 
-func (c *GatewayClient) doAsyncRequest(ctx context.Context, method, endpoint string, body []byte) (*http.Response, []byte, error) {
+func (c *GatewayClient) doAsyncRequest(ctx context.Context, method, endpoint string, body []byte, sessionID string) (*http.Response, []byte, error) {
 	if m := measurementFromContext(ctx); m != nil {
 		m.phase = "submit"
 		if method == http.MethodGet {
@@ -298,6 +331,7 @@ func (c *GatewayClient) doAsyncRequest(ctx context.Context, method, endpoint str
 		return nil, nil, fmt.Errorf("create LLM gateway async request: %w", err)
 	}
 	c.applyHeaders(req)
+	applySessionHeader(req, sessionID)
 	if m := measurementFromContext(ctx); m != nil && method == http.MethodPost {
 		m.submitted = ctx.Err() == nil && req.URL.Host != "" && (req.URL.Scheme == "http" || req.URL.Scheme == "https")
 	}
@@ -333,9 +367,9 @@ func decodeAsyncJob(rawBody []byte) (gatewayAsyncJob, error) {
 	return job, nil
 }
 
-func (c *GatewayClient) runAsync(ctx context.Context, submitPath string, payload []byte) (json.RawMessage, int, error) {
+func (c *GatewayClient) runAsync(ctx context.Context, submitPath string, payload []byte, sessionID string) (json.RawMessage, int, error) {
 	submitEndpoint := c.BaseURL + submitPath
-	resp, rawBody, err := c.doAsyncRequest(ctx, http.MethodPost, submitEndpoint, payload)
+	resp, rawBody, err := c.doAsyncRequest(ctx, http.MethodPost, submitEndpoint, payload, sessionID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -364,7 +398,7 @@ func (c *GatewayClient) runAsync(ctx context.Context, submitPath string, payload
 		case <-timer.C:
 		}
 
-		pollResp, pollBody, pollErr := c.doAsyncRequest(ctx, http.MethodGet, pollEndpoint, nil)
+		pollResp, pollBody, pollErr := c.doAsyncRequest(ctx, http.MethodGet, pollEndpoint, nil, sessionID)
 		if pollErr != nil {
 			if ctx.Err() != nil {
 				return nil, 0, ctx.Err()
@@ -427,7 +461,7 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (_ *EmbedRe
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
 	}
-	rawBody, _, err := c.runAsync(ctx, "/v1/async/embeddings", payloadBytes)
+	rawBody, _, err := c.runAsync(ctx, "/v1/async/embeddings", payloadBytes, "")
 	requestLog := c.requestLog(ctx, req.Model)
 	if err != nil {
 		var httpErr *asyncHTTPError
@@ -469,6 +503,10 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 	}
 	ctx, complete := c.beginMeasurement(ctx, req.Model, "chat", transport)
 	defer func() { complete(err) }()
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = sessionIDFromContext(ctx)
+	}
 	gatewayReq := gatewayChatRequest{Model: req.Model, User: req.User, Messages: mapToGatewayMessages(req.Messages), Tools: req.Tools, ToolChoice: req.ToolChoice, ParallelToolCalls: req.ParallelToolCalls, Temperature: req.Temperature, TopP: req.TopP, FrequencyPenalty: req.FrequencyPenalty, PresencePenalty: req.PresencePenalty, Seed: req.Seed, Stop: req.Stop, MaxTokens: req.MaxTokens, ResponseFormat: responseFormat(req.Format), Stream: req.Stream}
 	payloadBytes, err := json.Marshal(gatewayReq)
 	if err != nil {
@@ -484,6 +522,7 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 			return nil, fmt.Errorf("failed to create chat stream request: %w", err)
 		}
 		c.applyHeaders(httpReq)
+		applySessionHeader(httpReq, sessionID)
 		measurementFromContext(ctx).submitted = ctx.Err() == nil && httpReq.URL.Host != "" && (httpReq.URL.Scheme == "http" || httpReq.URL.Scheme == "https")
 		resp, err := c.HTTPClient.Do(httpReq)
 		if err != nil {
@@ -499,7 +538,7 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 		}
 		return chatResp, streamErr
 	}
-	rawBody, _, err := c.runAsync(ctx, "/v1/async/chat/completions", payloadBytes)
+	rawBody, _, err := c.runAsync(ctx, "/v1/async/chat/completions", payloadBytes, sessionID)
 	if err != nil {
 		var httpErr *asyncHTTPError
 		if errors.As(err, &httpErr) {

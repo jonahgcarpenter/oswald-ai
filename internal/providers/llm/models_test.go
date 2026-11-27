@@ -75,6 +75,36 @@ func TestListModelsAcceptsNestedContextLength(t *testing.T) {
 	}
 }
 
+func TestListModelsAcceptsLimitContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"muse-spark-1.3-contributor","limit":{"context":1048576,"output":131072}},
+			{"id":"model-top-context","context":64000},
+			{"id":"model-limits","limits":{"context":32000}}
+		]}`))
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL, "", "", nil)
+	models, err := client.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []ModelEntry{
+		{ID: "muse-spark-1.3-contributor", Window: 1048576},
+		{ID: "model-top-context", Window: 64000},
+		{ID: "model-limits", Window: 32000},
+	}
+	if len(models) != len(want) {
+		t.Fatalf("models = %+v, want %+v", models, want)
+	}
+	for i := range want {
+		if models[i] != want[i] {
+			t.Fatalf("models[%d] = %+v, want %+v", i, models[i], want[i])
+		}
+	}
+}
+
 func TestListModelsHTTPStatusErrors(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {

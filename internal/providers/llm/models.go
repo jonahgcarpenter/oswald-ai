@@ -104,13 +104,17 @@ func (c *GatewayClient) ListModels(ctx context.Context) ([]ModelEntry, error) {
 }
 
 // contextLengthFromObject reads an optional positive context window. The
-// field may sit directly on the entry or inside a per-entry metadata object
-// that some OpenAI-compatible providers emit; unknown shapes yield 0.
+// field may sit directly on the entry, inside a per-entry metadata object
+// that some OpenAI-compatible providers emit, or inside OpenCode's
+// limit object ({limit:{context:N}}); unknown shapes yield 0.
 func contextLengthFromObject(object map[string]json.RawMessage) int {
 	if window := positiveInt(object["context_length"]); window > 0 {
 		return window
 	}
-	for _, key := range []string{"top_provider", "limits", "metadata"} {
+	if window := positiveInt(object["context"]); window > 0 {
+		return window
+	}
+	for _, key := range []string{"top_provider", "limit", "limits", "metadata"} {
 		raw, ok := object[key]
 		if !ok {
 			continue
@@ -122,6 +126,9 @@ func contextLengthFromObject(object map[string]json.RawMessage) int {
 		if window := positiveInt(nested["context_length"]); window > 0 {
 			return window
 		}
+		if window := positiveInt(nested["context"]); window > 0 {
+			return window
+		}
 	}
 	return 0
 }
@@ -131,11 +138,18 @@ func positiveInt(raw json.RawMessage) int {
 		return 0
 	}
 	var value int
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := json.Unmarshal(raw, &value); err == nil {
+		if value <= 0 {
+			return 0
+		}
+		return value
+	}
+	var floatValue float64
+	if err := json.Unmarshal(raw, &floatValue); err != nil {
 		return 0
 	}
-	if value <= 0 {
+	if floatValue <= 0 || floatValue > float64(1<<31-1) {
 		return 0
 	}
-	return value
+	return int(floatValue)
 }

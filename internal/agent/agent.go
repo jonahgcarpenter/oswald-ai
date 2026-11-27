@@ -94,6 +94,18 @@ func summarizeForTarget(ctx context.Context, summarizer MarkdownSummarizer, cand
 	return summarizer.Summarize(ctx, candidates)
 }
 
+// chatSessionID returns the stable per-conversation session identifier for
+// providers requiring session affinity. Header injection fails closed.
+func chatSessionID(sessionKey, requestID string) string {
+	if id := strings.TrimSpace(sessionKey); id != "" && !strings.ContainsAny(id, "\r\n") {
+		return id
+	}
+	if id := strings.TrimSpace(requestID); id != "" && !strings.ContainsAny(id, "\r\n") {
+		return id
+	}
+	return ""
+}
+
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
@@ -801,6 +813,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	req := llm.ChatRequest{
 		Model: target.Model,
 		User:  requestUser,
+		// Session affinity for providers that require it (OpenCode Go's
+		// x-opencode-session). Stable per conversation so routing and
+		// prompt-cache stay pinned; falls back to the request ID.
+		SessionID: chatSessionID(sessionKey, requestID),
 		// Model transport is independent of whether the gateway displays progress.
 		Stream: true,
 	}
