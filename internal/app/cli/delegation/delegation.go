@@ -27,9 +27,10 @@ const (
 // Leaf usage lines double as `--help` pages: `oswald delegation <command>
 // --help` prints the same text to stdout and exits 0 without resolving scope.
 const (
-	showUsage     = "usage: oswald delegation show [--profile NAME]"
-	unsetUsage    = "usage: oswald delegation unset model|provider|base-url|max-iterations|max-children|max-depth|orchestrator [--profile NAME]"
-	setFlagsUsage = "usage: oswald delegation set [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]"
+	showUsage      = "usage: oswald delegation show [--profile NAME]"
+	unsetUsage     = "usage: oswald delegation unset model|provider|base-url|max-iterations|max-children|max-depth|orchestrator [--profile NAME]"
+	setFlagsUsage  = "usage: oswald delegation set [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]"
+	editFlagsUsage = "usage: oswald delegation edit [--model M | --provider P | --base-url URL | --max-iterations N | --max-children N | --max-depth N | --orchestrator true|false] [--profile NAME]"
 )
 
 // Run dispatches the delegation command group.
@@ -46,6 +47,9 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 			return exitOK
 		case "set":
 			setUsage(stdout)
+			return exitOK
+		case "edit":
+			editUsage(stdout)
 			return exitOK
 		case "unset":
 			fmt.Fprintln(stdout, unsetUsage)
@@ -65,7 +69,9 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 		}
 		return show(target, stdout, stderr)
 	case "set":
-		return setCmd(target, rest[1:], stdout, stderr)
+		return setCmd(target, "set", rest[1:], stdout, stderr)
+	case "edit":
+		return setCmd(target, "edit", rest[1:], stdout, stderr)
 	case "unset":
 		return unsetCmd(target, rest[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -79,9 +85,10 @@ func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer
 }
 
 func delegationUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald delegation [--profile NAME] <show|set|unset> [options]")
+	fmt.Fprintln(w, "usage: oswald delegation [--profile NAME] <show|set|edit|unset> [options]")
 	fmt.Fprintln(w, "  show                       delegation section (values only, never credentials)")
 	setUsage(w)
+	fmt.Fprintln(w, "  edit                       alias of set (same flags, one field per invocation)")
 	fmt.Fprintln(w, "  unset model|provider|base-url|max-iterations|max-children|max-depth|orchestrator")
 	fmt.Fprintln(w, "                         clear a delegation leaf back to inherit (bounds reset to defaults)")
 }
@@ -95,6 +102,17 @@ func setUsage(w io.Writer) {
 	fmt.Fprintln(w, "  set --max-children N       delegation.max_concurrent_children")
 	fmt.Fprintln(w, "  set --max-depth N          delegation.max_spawn_depth")
 	fmt.Fprintln(w, "  set --orchestrator B       delegation.orchestrator_enabled (true|false)")
+}
+
+func editUsage(w io.Writer) {
+	fmt.Fprintln(w, editFlagsUsage)
+	fmt.Fprintln(w, "  edit --model M             delegation.model (empty inherits the profile model)")
+	fmt.Fprintln(w, "  edit --provider P          delegation.provider (named provider; empty inherits)")
+	fmt.Fprintln(w, "  edit --base-url URL        delegation.base_url (needs provider; empty inherits)")
+	fmt.Fprintln(w, "  edit --max-iterations N    delegation.max_iterations")
+	fmt.Fprintln(w, "  edit --max-children N      delegation.max_concurrent_children")
+	fmt.Fprintln(w, "  edit --max-depth N         delegation.max_spawn_depth")
+	fmt.Fprintln(w, "  edit --orchestrator B      delegation.orchestrator_enabled (true|false)")
 }
 
 type target struct {
@@ -141,8 +159,12 @@ func show(t *target, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
-	sub := flag.NewFlagSet("delegation set", flag.ContinueOnError)
+func setCmd(t *target, verb string, args []string, stdout, stderr io.Writer) int {
+	usage := setFlagsUsage
+	if verb == "edit" {
+		usage = editFlagsUsage
+	}
+	sub := flag.NewFlagSet("delegation "+verb, flag.ContinueOnError)
 	sub.SetOutput(stderr)
 	model := sub.String("model", "", "delegation model id")
 	provider := sub.String("provider", "", "delegation provider name")
@@ -156,7 +178,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 0 {
-		fmt.Fprintln(stderr, setFlagsUsage)
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	set := 0
@@ -166,11 +188,11 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if set == 0 {
-		fmt.Fprintln(stderr, setFlagsUsage)
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	if set > 1 {
-		fmt.Fprintln(stderr, "oswald: set one delegation field per invocation")
+		fmt.Fprintf(stderr, "oswald: %s one delegation field per invocation\n", verb)
 		return exitUsage
 	}
 	if *maxIterations != "" {
@@ -218,6 +240,10 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		reportDelegationError(stderr, err)
 		return exitError
+	}
+	if verb == "edit" {
+		fmt.Fprintf(stdout, "edited delegation (%s)\n", effectForChange(t.root, oldCfg))
+		return exitOK
 	}
 	fmt.Fprintf(stdout, "set delegation (%s)\n", effectForChange(t.root, oldCfg))
 	return exitOK

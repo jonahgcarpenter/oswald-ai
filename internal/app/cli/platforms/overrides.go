@@ -21,10 +21,12 @@ import (
 
 // Leaf usage lines double as `--help` pages.
 const (
-	channelOverridesUsage       = "usage: oswald platforms channel-overrides <list|add|remove> [options]"
+	channelOverridesUsage       = "usage: oswald platforms channel-overrides <list|add|edit|remove|unset> [options]"
 	channelOverridesListUsage   = "usage: oswald platforms channel-overrides list [--platform discord|bluebubbles] [--profile NAME]"
 	channelOverridesAddUsage    = "usage: oswald platforms channel-overrides add --platform discord|bluebubbles --channel ID --provider NAME --model MODEL [--profile NAME]"
+	channelOverridesEditUsage   = "usage: oswald platforms channel-overrides edit --platform discord|bluebubbles --channel ID [--provider NAME] [--model MODEL] [--profile NAME]"
 	channelOverridesRemoveUsage = "usage: oswald platforms channel-overrides remove --platform discord|bluebubbles --channel ID [--profile NAME]"
+	channelOverridesUnsetUsage  = "usage: oswald platforms channel-overrides unset --platform discord|bluebubbles --channel ID [--profile NAME]"
 )
 
 // overridePlatforms bounds which platforms.<name> keys carry channel routes.
@@ -89,6 +91,17 @@ func channelOverridesCmd(_ context.Context, root string, args []string, stdout, 
 			return exitError
 		}
 		return overridesAdd(target, rest[1:], stdout, stderr)
+	case "edit":
+		if help.WantsHelp(rest[1:]) {
+			fmt.Fprintln(stdout, channelOverridesEditUsage)
+			return exitOK
+		}
+		target, err := resolveOverrideTarget(root, profile, true)
+		if err != nil {
+			fmt.Fprintf(stderr, "oswald: %v\n", err)
+			return exitError
+		}
+		return overridesEdit(target, rest[1:], stdout, stderr)
 	case "remove":
 		if help.WantsHelp(rest[1:]) {
 			fmt.Fprintln(stdout, channelOverridesRemoveUsage)
@@ -99,7 +112,18 @@ func channelOverridesCmd(_ context.Context, root string, args []string, stdout, 
 			fmt.Fprintf(stderr, "oswald: %v\n", err)
 			return exitError
 		}
-		return overridesRemove(target, rest[1:], stdout, stderr)
+		return overridesDelete(target, rest[1:], stdout, stderr, channelOverridesRemoveUsage, "removed")
+	case "unset":
+		if help.WantsHelp(rest[1:]) {
+			fmt.Fprintln(stdout, channelOverridesUnsetUsage)
+			return exitOK
+		}
+		target, err := resolveOverrideTarget(root, profile, true)
+		if err != nil {
+			fmt.Fprintf(stderr, "oswald: %v\n", err)
+			return exitError
+		}
+		return overridesDelete(target, rest[1:], stdout, stderr, channelOverridesUnsetUsage, "unset")
 	case "help", "-h", "--help":
 		fmt.Fprintln(stdout, channelOverridesUsage)
 		return exitOK
@@ -203,8 +227,92 @@ func overridesAdd(t *overrideTarget, args []string, stdout, stderr io.Writer) in
 	return exitOK
 }
 
-func overridesRemove(t *overrideTarget, args []string, stdout, stderr io.Writer) int {
-	sub := flag.NewFlagSet("channel-overrides remove", flag.ContinueOnError)
+// overridesEdit changes one field of an existing per-channel route in place.
+// At least one of --provider/--model is required; omitted leaves inherit the
+// entry's current values. The write lands in the calling scope, so editing an
+// inherited global entry from a named profile creates a profile overlay.
+func overridesEdit(t *overrideTarget, args []string, stdout, stderr io.Writer) int {
+	sub := flag.NewFlagSet("channel-overrides edit", flag.ContinueOnError)
+	sub.SetOutput(stderr)
+	platform := sub.String("platform", "", "discord or bluebubbles")
+	channel := sub.String("channel", "", "channel id or chat id")
+	provider := sub.String("provider", "", "provider name (custom: prefix accepted)")
+	model := sub.String("model", "", "model id")
+	flagArgs, rest := partitionOverrideArgs(args)
+	if err := sub.Parse(flagArgs); err != nil {
+		return exitUsage
+	}
+	if len(rest) != 0 || *platform == "" || *channel == "" || (*provider == "" && *model == "") {
+		fmt.Fprintln(stderr, channelOverridesEditUsage)
+		return exitUsage
+	}
+	if !overridePlatforms[*platform] {
+		fmt.Fprintf(stderr, "oswald: unknown platform %q\n", *platform)
+		return exitUsage
+	}
+	id := strings.TrimSpace(*channel)
+	if id == "" || !utf8.ValidString(id) || len([]rune(id)) > 256 {
+		fmt.Fprintln(stderr, "oswald: invalid --channel value")
+		return exitUsage
+	}
+	gateway := *platform
+	if *platform == "bluebubbles" {
+		gateway = "imessage"
+	}
+	cfg, err := config.Validate(t.root)
+	if err != nil {
+		reportPlatformsError(stderr, err)
+		return exitError
+	}
+	active := cfg
+	if t.profile != "default" {
+		active = cfg.Profiles[t.profile]
+		if active == nil {
+			fmt.Fprintln(stderr, "oswald: unknown profile")
+			return exitError
+		}
+	}
+	var current config.ChannelOverride
+	if active.ChannelOverrides != nil {
+		var ok bool
+		current, ok = active.ChannelOverrides[gateway][id]
+		if !ok {
+			fmt.Fprintf(stderr, "oswald: unknown channel override %s/%s\n", *platform, id)
+			return exitError
+		}
+	} else {
+		fmt.Fprintf(stderr, "oswald: unknown channel override %s/%s\n", *platform, id)
+		return exitError
+	}
+	providerName := current.Provider
+	if *provider != "" {
+		providerName = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(*provider), "custom:"))
+		if providerName == "" {
+			fmt.Fprintln(stderr, "oswald: invalid --provider value")
+			return exitUsage
+		}
+	}
+	modelID := current.Model
+	if *model != "" {
+		modelID = strings.TrimSpace(*model)
+		if modelID == "" || !utf8.ValidString(modelID) || len([]rune(modelID)) > 256 {
+			fmt.Fprintln(stderr, "oswald: invalid --model value")
+			return exitUsage
+		}
+	}
+	raw := fmt.Sprintf("{provider: %q, model: %q}", "custom:"+providerName, modelID)
+	if err := config.SetConfigValue(t.root, t.profile, []string{"platforms", *platform, "channel_overrides", id}, raw); err != nil {
+		reportPlatformsError(stderr, err)
+		return exitError
+	}
+	fmt.Fprintf(stdout, "edited channel override %s/%s (%s)\n", *platform, id, effectForChange(t.root, cfg))
+	return exitOK
+}
+
+// overridesDelete removes one per-channel route from the calling scope. It
+// backs both `remove` and its `unset` alias; usage names the invoked verb.
+func overridesDelete(t *overrideTarget, args []string, stdout, stderr io.Writer, usage, verb string) int {
+	sub := flag.NewFlagSet("channel-overrides "+verb, flag.ContinueOnError)
 	sub.SetOutput(stderr)
 	platform := sub.String("platform", "", "discord or bluebubbles")
 	channel := sub.String("channel", "", "channel id or chat id")
@@ -213,7 +321,7 @@ func overridesRemove(t *overrideTarget, args []string, stdout, stderr io.Writer)
 		return exitUsage
 	}
 	if len(rest) != 0 || *platform == "" || *channel == "" {
-		fmt.Fprintln(stderr, channelOverridesRemoveUsage)
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	if !overridePlatforms[*platform] {
@@ -222,13 +330,17 @@ func overridesRemove(t *overrideTarget, args []string, stdout, stderr io.Writer)
 	}
 	id := strings.TrimSpace(*channel)
 	if id == "" {
-		fmt.Fprintln(stderr, channelOverridesRemoveUsage)
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	oldCfg, _ := config.Validate(t.root)
 	if err := config.UnsetConfigValue(t.root, t.profile, []string{"platforms", *platform, "channel_overrides", id}); err != nil {
 		reportPlatformsError(stderr, err)
 		return exitError
+	}
+	if verb == "unset" {
+		fmt.Fprintf(stdout, "unset channel override %s/%s (%s)\n", *platform, id, effectForChange(t.root, oldCfg))
+		return exitOK
 	}
 	fmt.Fprintf(stdout, "removed channel override %s/%s (%s)\n", *platform, id, effectForChange(t.root, oldCfg))
 	return exitOK

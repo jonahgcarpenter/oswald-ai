@@ -124,7 +124,7 @@ func platformsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  disable <name>             disable a gateway platform (applies automatically)")
 	setUsage(w)
 	fmt.Fprintln(w, "    IDS are comma-separated or repeatable --allow/--ban flags")
-	fmt.Fprintln(w, "  channel-overrides <list|add|remove> [options]")
+	fmt.Fprintln(w, "  channel-overrides <list|add|edit|remove|unset> [options]")
 	fmt.Fprintln(w, "    per-channel model routes (global baseline plus profile overlays via --profile)")
 }
 
