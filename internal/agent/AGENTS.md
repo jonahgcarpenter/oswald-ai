@@ -4,7 +4,7 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract in
 
 ## Shape
 
-`agent.go::Process()` is the public entry point; `types.go` holds the `Request`/`Response` contract
+`agent.go::Process()` is the public entry point; `agent_config.go` holds the `Agent` struct, `Set*`, `NewAgent`, and routing/usage helpers; `types.go` holds the `Request`/`Response` contract
 and `OswaldToolEvent` timeline. A turn is: validate principal → load soul, file/session memory,
 images, and cached markdown → build the dynamic system prompt (environment block — host,
 profile-root home, scratch, and profile-scope isolation — then soul and the trusted

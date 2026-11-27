@@ -95,9 +95,9 @@ oswald-ai/
 ├── internal/skills/       # profile skill catalog (scan/resolve/index) + on-demand reads + create/update
 ├── internal/tools/        # builtin registry/governance/exposure + tool groups (memory, skills, search, web, vision, image, browser)
 ├── internal/vault/         # profile-scoped encrypted credential store for browser autofill
-├── internal/workspace/    # workspace file/shell tools + process (tracked background processes)
+├── internal/workspace/    # file/shell tools + policy (pre-execution chain) + docextract + process (tracked background processes)
 ├── internal/transport/    # gateway (discord, imessage, openai + routing/runtime) + media (normalize/cache)
-├── internal/providers/    # llm (model contract) + web (brave/searxng) + image_generate (comfy_ui) + browser (local headless CDP)
+├── internal/providers/    # llm (contract + api/chatgpt/claude) + web (brave/searxng) + image_generate + browser (cdp/launcher/safety)
 ├── internal/mcp/          # profile-configured bridge (tool_search/describe/call), OAuth, projection
 └── internal/platform/     # config + database (state.db) + profiles/identity/approvals + cron +
                            # requestctx/lease/prune (narrow shared contracts)
@@ -110,7 +110,7 @@ entries only and never overwrites; `oswald profile create/delete` provisions/rem
 ### Responsibility-file layout
 
 Each package keeps one topic per file (`agent/context.go`, `agent/tool_history.go`,
-`session/memory/profile_search.go`, `transport/gateway/discord/inbound.go`). Find code by topic with
+`session/memory/search_query.go`, `transport/gateway/discord/inbound.go`). Find code by topic with
 `grep`, not by reading a single god file. Shared names (`platform`, `session`, `transport`, `app`)
 are directory groupings, not utility facades; behavior lives in the leaf package that owns it.
 Moving a symbol means fixing its docs in the same change.

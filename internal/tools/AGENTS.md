@@ -7,7 +7,7 @@ Applies on top of the root `AGENTS.md` (never-rename-the-outside-world and never
 `bootstrap.go` builds `BuiltinDefinitions()` and the config-driven registry
 (`NewRegistryWithImageCache`, disabling `image_generate` without ComfyUI, `web_search` without a
 backend, `browser_*`/`browser_vault_*` without an endpoint or launch command,
-`session_search` without a store). `register.go` wires handlers, policies, and argument
+`session_search` without a store). `register.go` wires handlers and browser tools, `register_models.go` owns cron validators and provider listings, `register_normalize.go` owns argument
 normalizers. `registry/` holds definitions, handlers, policies, and per-visibility catalogs;
 `governance/` owns the progress-gated stop rule (loop-guardrail ladders plus a
 12-consecutive no-progress window halt stuck requests) with a high safety-valve

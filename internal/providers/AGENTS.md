@@ -5,20 +5,30 @@ headers, credentials). Tool packages must never be imported from here.
 
 ## Shape
 
-`llm/` is the Bifrost/OpenAI-compatible model contract: `Chat`/`Embed` plus async submit/poll,
-SSE streaming (`data:` lines, 1 MiB scanner buffer, index-sorted `delta.tool_calls`, `[DONE]`
-terminates), wire DTOs (`gateway_wire.go`), public request/response types, and usage telemetry
-with retry classifiers (`IsPermanentChatProviderError` for 4xx minus 408/425/429,
-`IsTemporaryOllamaToolParserError`, `IsContextLengthExceededError`). Auth is bearer plus virtual
-key, plus `ChatGPT-Account-Id`/`originator` when a ChatGPT subscription token is used. Tool wire names derive from correlated invocation IDs, and `required:[]` is always emitted
-explicitly — empty is not omitted.
+`llm/` is the model contract only: `types.go` (`Chat`/`Embed`, `Chatter`/`Embedder`,
+public request/response types), `models.go` (`ModelEntry`), `errors.go`
+(`ChatHTTPError` plus retry classifiers `IsPermanentChatProviderError` for 4xx minus
+408/425/429, `IsTemporaryOllamaToolParserError`, `IsContextLengthExceededError`).
+Backends live underneath and all implement `llm.Chatter`:
 
-`chatgpt/` owns the ChatGPT subscription transport: profile-scoped OAuth tokens under
+* `llm/api/` is the broad OpenAI-compatible client (`Client`, formerly `GatewayClient`):
+  sync-first `POST /v1/chat/completions` and `POST /v1/embeddings` with Bifrost async
+  submit/poll fallback, SSE streaming (`data:` lines, 1 MiB scanner buffer,
+  index-sorted `delta.tool_calls` with missing-index disambiguation, `[DONE]`
+  terminates, `stream_options.include_usage`), tolerant wire (`arguments` string or
+  object, `content` string/parts/null, `finish_reason: function_call` → `tool_calls`,
+  `error` string/object plus `detail`/`message` shapes, `required:[]` always emitted
+  explicitly, usage with `completion_tokens_details`/`output_tokens_details`
+  reasoning nests), and once-only alias retries (`max_tokens` →
+  `max_completion_tokens`, drop `parallel_tool_calls`). Auth is bearer plus virtual
+  key, plus `ChatGPT-Account-Id`/`originator` when set and `x-opencode-session`
+  affinity. Tool wire names derive from correlated invocation IDs.
+* `llm/chatgpt/` owns the ChatGPT subscription transport: profile-scoped OAuth tokens under
 `<profile>/providers/<name>/auth.json` (0700/0600, flock refresh fence, single-use rotation),
 browser PKCE on `127.0.0.1:1455` with device-flow fallback, per-request bearer resolution with
 coalesced refresh, and a static catalog fallback when the live listing is unavailable.
 
-`claude/` owns the Claude subscription transport through the official Agent SDK path: no
+`llm/claude/` owns the Claude subscription transport through the official Agent SDK path: no
 token storage, `claude auth status --json` gate, request-scoped `claude -p --output-format
 stream-json` child with credential/override env stripped, static catalog for listings.
 
@@ -26,14 +36,14 @@ stream-json` child with credential/override env stripped, static catalog for lis
 Brave-primary/SearXNG-fallback selector. `web/brave/` posts the LLM-context endpoint (8 URLs,
 ~3,072-token budget, 30s attempts, 50/sec rolling limiter, retry only when the 429 burst resets
 within a second). `web/searxng/` queries first-page JSON with 8s attempts and same-origin
-redirects. `image_generate/comfy_ui/` is a dedicated serialized client (single-flight permit,
+redirects. `image_generate/` is a dedicated serialized client (single-flight permit,
 250ms history polling, `/free` model unload with 10s detached cleanup) driving a fixed SD3.5
 Large Turbo graph: pinned UNet, dual CLIP, VAE, shift 3, euler/sgm_uniform, 4 steps, CFG 1, fresh
 seed per generation.
 
 `browser/` drives one on-machine headless Chromium per profile over CDP (`cdp.go` multiplexed
-websocket, `cdp_page.go` one page target, `launcher.go` private user-data dir with scrubbed env,
-`safety.go` URL/secret policy). Profiles are islands: sessions never cross profiles. `backend.go`
+websocket, `cdp_page.go` one page target, `launcher/` private user-data dir with scrubbed env,
+`safety/` URL/secret policy). Profiles are islands: sessions never cross profiles. `backend*.go`
 owns navigation with readiness wait plus partial-load degrade, ref-addressed interaction,
 console buffers, dialog tracking, screenshots with optional box annotation, and a trusted
 `VaultEval` lane that bypasses only the `restrict_evaluate` denylist. Spills hash-name into

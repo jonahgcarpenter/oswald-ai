@@ -11,8 +11,8 @@ surfaces (`read_file` / `write_file` / `patch` / `search_files`, `terminal`, `ex
 `process_manage`, `cronjob_manage`) live in `tools/<name>/`; this package owns the sandbox
 primitives they call into — resolution, the pre-execution chain, the reviewer and approved
 replay, `process/` tracked sessions, scratch/cache mechanics — plus the guarded terminal
-execution entry `command.go::ExecuteCommand` shared with no other caller. `groups.go` owns the file-group classifier, `guard.go` / `shellscan.go` /
-`fetchscan.go` / `confinewrite.go` / `envscan.go` implement the pre-execution chain, `review.go` the LLM reviewer,
+execution entry `command.go::ExecuteCommand` shared with no other caller. `policy/groups.go` owns the file-group classifier, `policy/guard.go` / `policy/shellscan.go` /
+`policy/fetchscan.go` / `policy/confinewrite.go` / `policy/envscan.go` implement the pre-execution chain, `review.go` the LLM reviewer,
 and `approve_exec.go` the approved replay. `process/sandboxenv.go` owns the sandbox
 environment contract: `SandboxPath` (the single Ubuntu-native PATH order) plus a
 deny-by-default passthrough (skill `required_env`, config

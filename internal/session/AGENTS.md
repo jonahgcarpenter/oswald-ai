@@ -4,9 +4,7 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract in
 
 ## Shape
 
-`memory/profile_state_store.go::ProfileStore` owns one trusted profile's `state.db`: session scope,
-pending/delivered/failed delivery gating, history paging, the model-usage ledger, image-version
-high-water, and maintenance sweeps. `memory/files/store.go` owns the disk `USER.md`/`MEMORY.md`
+`memory/store.go::ProfileStore` owns one trusted profile's `state.db` (open/close, helpers); `memory/sessions.go` owns session scope and file memory; `memory/delivery.go` owns delivery gating (`markDelivery`, `MarkDelivered/Failed`, paging, compaction flags); `memory/history.go` owns turn append plus wire encoding; `memory/search_types.go` holds search contracts, `memory/search_index.go` the lineage helpers, `memory/search_query.go` discovery and listings, `memory/search_scroll.go` windows and transcripts. `memory/files/store.go` owns the disk `USER.md`/`MEMORY.md`
 pair; `soul/store.go` binds read-only policy; `compaction/` (plus `compaction/budget/`) summarizes
 delivered turns to markdown in the agent lane. Package names stay `memory` /
 `compaction` / `soul` / `budget` / `files`; `session` is only the grouping.
