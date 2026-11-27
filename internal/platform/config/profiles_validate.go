@@ -3,290 +3,18 @@ package config
 import (
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"net"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // ProfileRoute binds a transport-authenticated identity to an operator profile.
-type ProfileRoute struct {
-	Name     string `yaml:"name"`
-	Platform string `yaml:"platform"`
-	UserID   string `yaml:"user_id"`
-	Profile  string `yaml:"profile"`
-}
-
-// AdmissionPolicy controls gateway admission. Banned identities are rejected
-// everywhere and take precedence; a nonempty Allowed list admits only those
-// identities, while an empty list admits every routed identity.
-type AdmissionPolicy struct {
-	Allowed []string
-	Banned  []string
-}
-
-// Bans reports whether an already normalized external identity is banned.
-func (p AdmissionPolicy) Bans(identifier string) bool {
-	for _, banned := range p.Banned {
-		if banned == identifier {
-			return true
-		}
-	}
-	return false
-}
-
-// Allows reports whether an already normalized external identity may be admitted.
-func (p AdmissionPolicy) Allows(identifier string) bool {
-	if p.Bans(identifier) {
-		return false
-	}
-	if len(p.Allowed) == 0 {
-		return true
-	}
-	for _, allowed := range p.Allowed {
-		if allowed == identifier {
-			return true
-		}
-	}
-	return false
-}
-
-// DefaultBlueBubblesWebhookPath preserves the historical webhook route when the
-// operator configures no webhook_path.
-const DefaultBlueBubblesWebhookPath = "/bluebubbles/webhook"
-
-const (
-	maxMentionPatterns     = 4
-	maxMentionPatternRunes = 512
-)
-
-var webhookPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,127}$`)
-var webhookCallbackLabelRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
-
-type providerYAML struct {
-	API  string  `yaml:"api"`
-	Key  *string `yaml:"key"`
-	Auth string  `yaml:"auth"`
-}
-type modelYAML struct {
-	Provider      *string `yaml:"provider"`
-	Default       *string `yaml:"default"`
-	ContextLength *int    `yaml:"context_length"`
-}
-type webYAML struct {
-	BraveKey   *string `yaml:"brave_key"`
-	SearxngURL *string `yaml:"searxng_url"`
-}
-type imageYAML struct {
-	URL     *string `yaml:"url"`
-	Timeout *string `yaml:"generation_timeout"`
-}
-type browserYAML struct {
-	LaunchCommand     *string `yaml:"launch_command"`
-	EndpointURL       *string `yaml:"endpoint_url"`
-	CommandTimeout    *string `yaml:"command_timeout"`
-	SnapshotThreshold *int    `yaml:"snapshot_threshold"`
-	InactivityTimeout *string `yaml:"inactivity_timeout"`
-	RecordSessions    *bool   `yaml:"record_sessions"`
-	AllowPrivateURLs  *bool   `yaml:"allow_private_urls"`
-	AllowInsecureURLs *bool   `yaml:"allow_insecure_urls"`
-	RestrictEvaluate  *bool   `yaml:"restrict_evaluate"`
-}
-type terminalYAML struct {
-	EnvPassthrough []string `yaml:"env_passthrough"`
-}
-type toolsYAML struct {
-	WebSearch     webYAML      `yaml:"web_search"`
-	ImageGenerate imageYAML    `yaml:"image_generate"`
-	Browser       browserYAML  `yaml:"browser"`
-	Terminal      terminalYAML `yaml:"terminal"`
-}
-type platformExtraYAML struct {
-	Token               *string  `yaml:"token"`
-	AllowedUsers        []string `yaml:"allowed_users"`
-	BannedUsers         []string `yaml:"banned_users"`
-	RequireMention      *bool    `yaml:"require_mention"`
-	ServerURL           string   `yaml:"server_url"`
-	ServerPassword      *string  `yaml:"server_password"`
-	WebhookHost         string   `yaml:"webhook_host"`
-	WebhookCallbackHost string   `yaml:"webhook_callback_host"`
-	WebhookPort         int      `yaml:"webhook_port"`
-	WebhookPath         string   `yaml:"webhook_path"`
-	MentionPatterns     []string `yaml:"mention_pattern"`
-	APIHost             string   `yaml:"api_host"`
-	APIPort             int      `yaml:"api_port"`
-}
-type modelOverrideYAML struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-}
-type platformYAML struct {
-	Enabled          bool                         `yaml:"enabled"`
-	Extra            platformExtraYAML            `yaml:"extra"`
-	ChannelOverrides map[string]modelOverrideYAML `yaml:"channel_overrides"`
-}
-type apiYAML struct {
-	Key *string `yaml:"key"`
-}
-type documentYAML struct {
-	Providers map[string]providerYAML `yaml:"providers"`
-	Model     modelYAML               `yaml:"model"`
-	API       apiYAML                 `yaml:"api"`
-	Gateway   *struct {
-		MultiplexProfiles bool           `yaml:"multiplex_profiles"`
-		Routes            []ProfileRoute `yaml:"profile_routes"`
-	} `yaml:"gateway"`
-	Platforms map[string]platformYAML `yaml:"platforms"`
-	Tools     toolsYAML               `yaml:"tools"`
-	Runtime   *struct {
-		LogLevel string `yaml:"log_level"`
-	} `yaml:"runtime"`
-	MCPServers map[string]mcpServerYAML `yaml:"mcp_servers"`
-	Plugins    *pluginsYAML             `yaml:"plugins"`
-	Delegation *delegationYAML          `yaml:"delegation"`
-}
-
-type mcpToolsYAML struct {
-	Include []string `yaml:"include"`
-	Exclude []string `yaml:"exclude"`
-}
-
-type mcpOAuthYAML struct {
-	ClientID     string   `yaml:"client_id"`
-	ClientSecret string   `yaml:"client_secret"`
-	Flow         string   `yaml:"flow"`
-	Scopes       []string `yaml:"scopes"`
-	Timeout      string   `yaml:"timeout"`
-}
-
-type mcpServerYAML struct {
-	URL       string            `yaml:"url"`
-	Command   string            `yaml:"command"`
-	Args      []string          `yaml:"args"`
-	Cwd       string            `yaml:"cwd"`
-	Env       map[string]string `yaml:"env"`
-	Transport string            `yaml:"transport"`
-	Headers   map[string]string `yaml:"headers"`
-	Tools     mcpToolsYAML      `yaml:"tools"`
-	Auth      string            `yaml:"auth"`
-	OAuth     mcpOAuthYAML      `yaml:"oauth"`
-	Enabled   *bool             `yaml:"enabled"`
-}
-
-// MCPOAuth holds resolved per-server OAuth parameters. Secrets must not be logged.
-type MCPOAuth struct {
-	ClientID     string
-	ClientSecret string
-	Flow         string
-	Scopes       []string
-	Timeout      time.Duration
-}
-
-// MCPServer holds one resolved operator-owned profile connection. It is never
-// persisted in SQLite, and its URL/command/headers/environment/secrets must not be logged.
-type MCPServer struct {
-	Name, URL, Command, Cwd, Transport string
-	Args                               []string
-	Headers, Env                       map[string]string
-	Include, Exclude                   []string
-	Auth                               string
-	OAuth                              MCPOAuth
-	Enabled                            bool
-}
-
-var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
-
-// ValidProfileName excludes traversal, hidden entries, and the reserved default name.
-func ValidProfileName(name string) bool { return name != "default" && profileNameRE.MatchString(name) }
-
-func logPermRepair(source string, before os.FileMode, profile string) {
-	fields := []Field{F("config_source", source), F("old_mode", int(before.Perm()))}
-	if profile != "" {
-		fields = append(fields, F("profile", profile))
-	}
-	NewLogger(LevelWarn).Server("config").Warn("config.perms.repaired", "repaired private permissions", fields...)
-}
-
-func repairPrivateDir(abs, source, profile string) {
-	info, err := os.Lstat(abs)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return
-	}
-	if info.Mode().Perm()&0077 == 0 {
-		return
-	}
-	before := info.Mode()
-	if err := os.Chmod(abs, 0700); err != nil {
-		return
-	}
-	logPermRepair(source, before, profile)
-}
-
-func strictPrivateDirectory(path, source, profile string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return withConfigSource(configErr("config_dir_unavailable", ""), source)
-	}
-	_ = profile
-	current := string(os.PathSeparator)
-	for _, part := range strings.Split(strings.TrimPrefix(abs, current), current) {
-		if part == "" {
-			continue
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return withConfigSource(configErr("config_dir_unavailable", ""), source)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (current == abs && info.Mode().Perm()&0077 != 0) {
-			return withConfigSource(configErr("config_dir_unsafe", ""), source)
-		}
-	}
-	return nil
-}
-
-func privateDirectory(path, source, profile string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return withConfigSource(configErr("config_dir_unavailable", ""), source)
-	}
-	repairPrivateDir(abs, source, profile)
-	current := string(os.PathSeparator)
-	for _, part := range strings.Split(strings.TrimPrefix(abs, current), current) {
-		if part == "" {
-			continue
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return withConfigSource(configErr("config_dir_unavailable", ""), source)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (current == abs && info.Mode().Perm()&0077 != 0) {
-			return withConfigSource(configErr("config_dir_unsafe", ""), source)
-		}
-	}
-	return nil
-}
-
-// knownPlatforms bounds configured platform names before any validation.
-var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true}
-
-var platformTopKeys = map[string]bool{"enabled": true, "extra": true, "channel_overrides": true}
-
-var platformExtraKeys = map[string]bool{
-	"token": true, "allowed_users": true, "banned_users": true,
-	"require_mention": true,
-	"server_url":      true, "server_password": true,
-	"webhook_host": true, "webhook_callback_host": true, "webhook_port": true, "webhook_path": true, "mention_pattern": true,
-	"api_host": true, "api_port": true,
-}
 
 func mappingValueIndex(node *yaml.Node, key string) int {
 	if node == nil || node.Kind != yaml.MappingNode {
@@ -302,6 +30,7 @@ func mappingValueIndex(node *yaml.Node, key string) int {
 
 // platformEnabled resolves only a platform's enabled flag. An unset variable
 // gating the flag leaves the platform disabled rather than failing the load.
+
 func platformEnabled(name string, node *yaml.Node, env profileEnvironment) (bool, error) {
 	index := mappingValueIndex(node, "enabled")
 	if index < 0 {
@@ -332,6 +61,7 @@ func platformEnabled(name string, node *yaml.Node, env profileEnvironment) (bool
 
 // validatePlatformKeys rejects unknown or duplicate keys without resolving any
 // values, so a disabled platform can still report a typo.
+
 func validatePlatformKeys(name string, node *yaml.Node) error {
 	path := "platforms." + name
 	if node.Kind != yaml.MappingNode {
@@ -373,6 +103,7 @@ var profilePlatformKeys = map[string]bool{"discord": true, "bluebubbles": true}
 // channel-override key shape without resolving values. It runs while the
 // profile document is merged, independently of whether the global platform
 // block is enabled, so a typo never hides behind a disabled listener.
+
 func validateProfilePlatforms(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
 		return configErr("config_profile_override_invalid", "platforms")
@@ -413,6 +144,7 @@ func validateProfilePlatforms(node *yaml.Node) error {
 // pruneDisabledPlatforms drops disabled platform subtrees before strict
 // interpolation. Operators do not need credentials for platforms turned off,
 // while unknown keys and unsupported platform names are still rejected.
+
 func pruneDisabledPlatforms(raw *yaml.Node, env profileEnvironment) (*yaml.Node, error) {
 	pruned := cloneYAML(raw)
 	platforms := mappingValueIndex(pruned, "platforms")
@@ -451,6 +183,7 @@ var mcpToolFilterRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
 // checkHeaderMap validates a bounded string map for MCP headers or stdio
 // environment entries: at most 32 entries, token names, values bounded to
 // 8,192 bytes with no newline or NUL content.
+
 func checkHeaderMap(values map[string]string, path string) error {
 	if len(values) > 32 {
 		return configErr("config_mcp_invalid", path)
@@ -465,6 +198,7 @@ func checkHeaderMap(values map[string]string, path string) error {
 
 // checkToolFilter validates an MCP tool include/exclude list against the
 // remote tool identifier contract and returns deduplicated names.
+
 func checkToolFilter(names []string, path string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
@@ -488,6 +222,7 @@ func checkToolFilter(names []string, path string) ([]string, error) {
 // transports, and a static Authorization header alongside OAuth is rejected so
 // exactly one credential owns the header. Secrets are bounded like other
 // credentials and never logged.
+
 func checkMCPOAuth(server mcpServerYAML, base string, hasURL bool, transport string, entry *MCPServer) error {
 	auth := strings.TrimSpace(server.Auth)
 	oauthEmpty := strings.TrimSpace(server.OAuth.ClientID) == "" && strings.TrimSpace(server.OAuth.ClientSecret) == "" &&
@@ -829,6 +564,7 @@ func port(value int) (string, error) {
 // LoadProfiles merges raw YAML before resolving each profile's private .env and
 // process environment. Named profiles inherit the default .env and override it
 // with their own. It never mutates os.Environ; errors omit private content.
+
 func LoadProfiles(root string) (*Config, error) { return loadProfiles(root, true) }
 
 func loadProfiles(root string, repair bool) (*Config, error) {
@@ -1057,6 +793,7 @@ func loadProfiles(root string, repair bool) (*Config, error) {
 
 // admissionPolicy normalizes allow/ban identities for one platform. An empty
 // allowed list admits every routed identity; banned identities always win.
+
 func admissionPolicy(platform, base string, allowed, banned []string) (AdmissionPolicy, error) {
 	allowedIDs, err := normalizeIdentities(platform, allowed)
 	if err != nil {
@@ -1070,6 +807,7 @@ func admissionPolicy(platform, base string, allowed, banned []string) (Admission
 }
 
 // normalizeIdentities canonicalizes and deduplicates configured identities.
+
 func normalizeIdentities(platform string, values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil
@@ -1095,6 +833,7 @@ func normalizeIdentities(platform string, values []string) ([]string, error) {
 // Empty means unset (auto-detect via the outbound interface). Otherwise a
 // bare IP literal or DNS hostname — no scheme, port, path, userinfo, or
 // whitespace — bounded to 253 bytes.
+
 func parseWebhookCallbackHost(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1118,6 +857,7 @@ func parseWebhookCallbackHost(value string) (string, error) {
 }
 
 // parseWebhookPath validates an operator-supplied BlueBubbles webhook route.
+
 func parseWebhookPath(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1132,6 +872,7 @@ func parseWebhookPath(value string) (string, error) {
 // compileMentionPatterns validates and anchors configured mention patterns. A
 // mention must begin the message, so every pattern is compiled with a leading
 // anchor; patterns that would match the empty string are rejected.
+
 func compileMentionPatterns(patterns []string, path string) ([]*regexp.Regexp, error) {
 	if len(patterns) == 0 {
 		return nil, nil
@@ -1154,6 +895,7 @@ func compileMentionPatterns(patterns []string, path string) ([]*regexp.Regexp, e
 }
 
 // NormalizeGatewayIdentifier canonicalizes configured and authenticated identities.
+
 func NormalizeGatewayIdentifier(platform, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	switch platform {
