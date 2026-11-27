@@ -298,7 +298,7 @@ func lookupVideoBinaries() (ffmpeg, ffprobe string) {
 func subscriptionListing(ctx context.Context, profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) ([]llm.ModelEntry, error) {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
-		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil)
+		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil, log)
 		if err != nil {
 			return nil, err
 		}

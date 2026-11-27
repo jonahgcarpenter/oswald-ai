@@ -114,7 +114,7 @@ const (
 	listUsage   = "usage: oswald providers list [--profile NAME]"
 	showUsage   = "usage: oswald providers show <name> [--profile NAME]"
 	addUsage    = "usage: oswald providers add <name> --api URL [--key REF] [--auth key|chatgpt-oauth|claude-sdk] [--profile NAME]"
-	editUsage   = "usage: oswald providers edit <name> [--api URL] [--key REF] [--auth key|chatgpt-oauth|claude-sdk] [--clear-key] [--profile NAME]"
+	editUsage   = "usage: oswald providers edit <name> [--api URL] [--key REF] [--auth key|chatgpt-oauth|claude-sdk] [--clear-key] [--clear-api] [--profile NAME]"
 	removeUsage = "usage: oswald providers remove <name> [--profile NAME]"
 	authUsage   = "usage: oswald providers auth <name> [--no-browser] [--timeout DURATION] [--profile NAME]\n       oswald providers auth start <name> [--timeout DURATION] [--profile NAME]\n       oswald providers auth finish <name> <code|url> [--profile NAME]"
 	testUsage   = "usage: oswald providers test <name> [--profile NAME]"
@@ -214,14 +214,15 @@ func addCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "oswald: subscription providers do not take --key")
 		return exitUsage
 	}
+	if kind == config.ProviderAuthChatGPT && *api != "" {
+		fmt.Fprintln(stderr, "oswald: chatgpt-oauth providers do not take --api")
+		return exitUsage
+	}
 	if _, err := config.ShowConfigFile(t.path, t.profile, []string{"providers", name}); err == nil {
 		fmt.Fprintf(stderr, "oswald: provider %q already exists\n", name)
 		return exitError
 	}
 	apiValue := *api
-	if apiValue == "" && kind == config.ProviderAuthChatGPT {
-		apiValue = config.DefaultChatGPTAPI
-	}
 	if apiValue != "" {
 		if err := validateProviderAPI(apiValue); err != nil {
 			fmt.Fprintf(stderr, "oswald: %v\n", err)

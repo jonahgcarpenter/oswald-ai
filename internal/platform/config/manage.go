@@ -180,6 +180,53 @@ func UnsetConfigValue(root, profile string, segments []string) error {
 	return CommitConfigCandidate(root, configPath, candidate, orig)
 }
 
+// SetConfigLeaves applies multiple leaf writes and removals in one atomic
+// commit: a single staged validation of the final candidate, a single
+// last-known-good snapshot, a single atomic replace. Dotted paths address
+// leaves ("providers.chatgpt.auth"); writes apply after removals so a set
+// wins a collision. It shares the mediated write semantics of the single-leaf
+// APIs, and unlike sequential single-leaf commits it can cross intermediate
+// states that would never validate on their own (for example converting a
+// key provider to a subscription auth kind).
+func SetConfigLeaves(root, profile string, sets map[string]string, unsets []string) error {
+	configPath, err := ConfigPathForProfile(root, profile)
+	if err != nil {
+		return err
+	}
+	orig, node, err := readManagedDocRaw(configPath, profile)
+	if err != nil {
+		return err
+	}
+	for _, path := range unsets {
+		segments, err := SplitConfigPath(path)
+		if err != nil {
+			return err
+		}
+		if err := removeManaged(node, segments); err != nil {
+			return err
+		}
+	}
+	paths := make([]string, 0, len(sets))
+	for path := range sets {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		segments, err := SplitConfigPath(path)
+		if err != nil {
+			return err
+		}
+		if err := assignManaged(node, segments, parseManagedValue(sets[path])); err != nil {
+			return err
+		}
+	}
+	candidate, err := marshalManaged(node)
+	if err != nil {
+		return err
+	}
+	return CommitConfigCandidate(root, configPath, candidate, orig)
+}
+
 // ListEnvNames returns sorted dotenv variable names, never values.
 func ListEnvNames(envPath string) ([]string, error) {
 	values, err := readManagedEnv(envPath)

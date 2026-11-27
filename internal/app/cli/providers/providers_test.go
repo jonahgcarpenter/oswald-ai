@@ -91,6 +91,24 @@ func TestAddRejectsInvalidURL(t *testing.T) {
 	}
 }
 
+func TestAddChatGPTNeedsNoAPI(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, _, stderr := run(t, root, "add", "sub", "--auth", "chatgpt-oauth")
+	if code != 0 {
+		t.Fatalf("add chatgpt = %d stderr=%s", code, stderr)
+	}
+	code, out, _ := run(t, root, "show", "sub")
+	if code != 0 || !strings.Contains(out, "chatgpt-oauth") {
+		t.Fatalf("show = %d %q", code, out)
+	}
+	if strings.Contains(out, "api:") {
+		t.Fatalf("chatgpt provider carries an api leaf: %q", out)
+	}
+	if code, _, _ := run(t, root, "add", "sub2", "--auth", "chatgpt-oauth", "--api", "https://api.openai.com/v1"); code == 0 {
+		t.Fatal("api override accepted on chatgpt-oauth provider")
+	}
+}
+
 func TestRemoveRefusesReferencedProvider(t *testing.T) {
 	root := writeConfig(t, testConfig)
 	code, _, _ := run(t, root, "remove", "fake")

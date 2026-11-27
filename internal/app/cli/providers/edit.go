@@ -20,11 +20,12 @@ func editCmd(t *target, args []string, stdout, stderr io.Writer) int {
 	key := sub.String("key", "", "credential literal or ${VAR} reference")
 	auth := sub.String("auth", "", "auth kind: key|chatgpt-oauth|claude-sdk")
 	clearKey := sub.Bool("clear-key", false, "remove the static key")
+	clearAPI := sub.Bool("clear-api", false, "remove the api base URL")
 	flagArgs, rest := partitionEditArgs(args)
 	if err := sub.Parse(flagArgs); err != nil {
 		return exitUsage
 	}
-	if len(rest) != 1 || (*api == "" && *key == "" && *auth == "" && !*clearKey) {
+	if len(rest) != 1 || (*api == "" && *key == "" && *auth == "" && !*clearKey && !*clearAPI) {
 		fmt.Fprintln(stderr, editUsage)
 		return exitUsage
 	}
@@ -49,29 +50,26 @@ func editCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	oldCfg, _ := config.Validate(t.root)
-	if *clearKey {
-		if err := config.UnsetConfigValue(t.root, t.profile, []string{"providers", name, "key"}); err != nil {
-			reportProvidersError(stderr, err)
-			return exitError
-		}
-	}
+	sets := map[string]string{}
+	var unsets []string
 	if *key != "" {
-		if err := config.SetConfigValue(t.root, t.profile, []string{"providers", name, "key"}, *key); err != nil {
-			reportProvidersError(stderr, err)
-			return exitError
-		}
+		sets["providers."+name+".key"] = *key
 	}
 	if *api != "" {
-		if err := config.SetConfigValue(t.root, t.profile, []string{"providers", name, "api"}, *api); err != nil {
-			reportProvidersError(stderr, err)
-			return exitError
-		}
+		sets["providers."+name+".api"] = *api
 	}
 	if kind != "" {
-		if err := config.SetConfigValue(t.root, t.profile, []string{"providers", name, "auth"}, kind); err != nil {
-			reportProvidersError(stderr, err)
-			return exitError
-		}
+		sets["providers."+name+".auth"] = kind
+	}
+	if *clearKey {
+		unsets = append(unsets, "providers."+name+".key")
+	}
+	if *clearAPI {
+		unsets = append(unsets, "providers."+name+".api")
+	}
+	if err := config.SetConfigLeaves(t.root, t.profile, sets, unsets); err != nil {
+		reportProvidersError(stderr, err)
+		return exitError
 	}
 	fmt.Fprintf(stdout, "provider %s updated (%s)\n", name, effectForChange(t.root, oldCfg))
 	return exitOK
