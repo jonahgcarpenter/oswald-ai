@@ -188,19 +188,12 @@ func resolveProviderEndpoints(providers map[string]providerYAML) map[string]Prov
 			continue
 		}
 		if kind == ProviderAuthChatGPT {
-			if provider.Key != nil {
+			// Subscription-only: api and key leaves are rejected at
+			// validation, so the transport is always the Codex backend.
+			if provider.Key != nil || strings.TrimSpace(provider.API) != "" {
 				continue
 			}
-			api := strings.TrimSpace(provider.API)
-			if api == "" {
-				api = DefaultChatGPTAPI
-			}
-			endpoint, err := url.Parse(api)
-			if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-				continue
-			}
-			endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
-			out[name] = ProviderEndpoint{URL: endpoint.String(), AuthKind: kind}
+			out[name] = ProviderEndpoint{URL: DefaultChatGPTAPI, AuthKind: kind}
 			continue
 		}
 		endpoint, err := url.Parse(strings.TrimSpace(provider.API))

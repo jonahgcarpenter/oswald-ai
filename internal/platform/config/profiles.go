@@ -591,16 +591,17 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		}
 		cfg.LLMGatewayAPIKey = ""
 	} else if kind == ProviderAuthChatGPT {
-		api := strings.TrimSpace(provider.API)
-		if api == "" {
-			api = DefaultChatGPTAPI
+		// The ChatGPT subscription is transport-pinned to the Codex
+		// backend: an api override is not an option (it produced
+		// platform-billing 429s against api.openai.com and 404s
+		// elsewhere). auth: chatgpt-oauth is the only valid leaf.
+		if strings.TrimSpace(provider.API) != "" {
+			return configErr("config_value_invalid", "providers."+providerName+".api")
 		}
-		endpoint, err := url.Parse(api)
-		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-			return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")
+		if provider.Key != nil {
+			return configErr("config_value_invalid", "providers."+providerName+".key")
 		}
-		endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
-		cfg.LLMGatewayURL = endpoint.String()
+		cfg.LLMGatewayURL = DefaultChatGPTAPI
 		cfg.LLMGatewayAPIKey = ""
 	} else {
 		endpoint, err := url.Parse(provider.API)

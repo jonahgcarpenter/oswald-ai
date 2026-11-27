@@ -1,5 +1,6 @@
 // Package chatgpt owns the ChatGPT subscription transport: a profile-scoped
-// OAuth token store plus a Chat client that authenticates with the user's own
+// OAuth token store plus a Chat client that speaks the Codex backend
+// (chatgpt.com/backend-api/codex Responses API) with the user's own
 // subscription instead of an API key. Tokens are operator state under
 // <profileRoot>/providers/<name>/ and are never logged.
 package chatgpt

@@ -133,7 +133,19 @@ func (l *Logger) Level() Level {
 }
 
 // With returns a logger that always includes the supplied fields.
+// A nil parent yields a discard logger so chained scopes never panic;
+// production code always threads a real logger instead.
 func (l *Logger) With(fields ...Field) *Logger {
+	if l == nil {
+		kept := make([]Field, 0, len(fields))
+		for _, field := range fields {
+			if field.Key == "" || isReservedLogField(field.Key) {
+				continue
+			}
+			kept = append(kept, field)
+		}
+		return &Logger{logger: log.New(io.Discard, "", 0), fields: kept}
+	}
 	merged := make([]Field, 0, len(l.fields)+len(fields))
 	merged = append(merged, l.fields...)
 	for _, field := range fields {
@@ -147,6 +159,9 @@ func (l *Logger) With(fields ...Field) *Logger {
 
 // SetOutput changes the destination used by this logger and its scoped children.
 func (l *Logger) SetOutput(w io.Writer) {
+	if l == nil || l.logger == nil {
+		return
+	}
 	l.logger.SetOutput(w)
 }
 
@@ -175,7 +190,7 @@ func (l *Logger) Agent(component, requestID, profile, gateway, model string, fie
 }
 
 func (l *Logger) log(level Level, event, msg string, fields ...Field) {
-	if l == nil || level < l.Level() {
+	if l == nil || l.logger == nil || level < l.Level() {
 		return
 	}
 

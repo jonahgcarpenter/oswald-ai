@@ -27,7 +27,7 @@ func TestEditAuthKindNeedsClearKey(t *testing.T) {
 	if code, _, _ := run(t, root, "edit", "fake", "--auth", "chatgpt-oauth"); code == 0 {
 		t.Fatal("subscription auth with lingering key accepted")
 	}
-	if code, _, stderr := run(t, root, "edit", "fake", "--auth", "chatgpt-oauth", "--clear-key", "--api", "https://chatgpt.example.com/backend-api/codex"); code != 0 {
+	if code, _, stderr := run(t, root, "edit", "fake", "--auth", "chatgpt-oauth", "--clear-key", "--clear-api"); code != 0 {
 		t.Fatalf("edit to subscription = %d %s", code, stderr)
 	}
 	if code, _, _ := run(t, root, "edit", "fake", "--auth", "bogus"); code == 0 {

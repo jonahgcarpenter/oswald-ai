@@ -218,7 +218,7 @@ type providerModels struct {
 func subscriptionModels(ctx context.Context, active *config.Config, name string, endpoint config.ProviderEndpoint) ([]llm.ModelEntry, error) {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
-		client, err := chatgpt.NewClient(endpoint.URL, active.ProfileRoot, name, active.LLMGatewayVirtualKey, nil)
+		client, err := chatgpt.NewClient(endpoint.URL, active.ProfileRoot, name, active.LLMGatewayVirtualKey, nil, nil)
 		if err != nil {
 			return nil, err
 		}

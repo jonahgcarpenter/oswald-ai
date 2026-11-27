@@ -18,7 +18,7 @@ import (
 func subscriptionClientFor(profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) llm.Chatter {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
-		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil)
+		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil, log)
 		if err != nil {
 			return nil
 		}
@@ -41,7 +41,7 @@ func subscriptionClientFor(profileRoot, provider string, endpoint config.Provide
 func subscriptionListModels(ctx context.Context, profileRoot, provider string, endpoint config.ProviderEndpoint, virtualKey string, log *config.Logger) ([]llm.ModelEntry, error) {
 	switch endpoint.AuthKind {
 	case config.ProviderAuthChatGPT:
-		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil)
+		client, err := chatgpt.NewClient(endpoint.URL, profileRoot, provider, virtualKey, nil, log)
 		if err != nil {
 			return nil, err
 		}
