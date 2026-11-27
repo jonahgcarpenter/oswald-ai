@@ -1,4 +1,4 @@
-package workspace
+package policy
 
 import (
 	"path/filepath"
@@ -51,7 +51,7 @@ var devNullAliases = map[string]bool{
 func ScanConfinedWrite(command, workdir, root string, shell bool) (string, bool) {
 	text := command
 	if shell {
-		text = proseBlanked(normalizeCommand(command))
+		text = ProseBlanked(NormalizeCommand(command))
 	}
 	root = filepath.Clean(root)
 	if strings.TrimSpace(text) == "" || root == "" || root == "." || root == "/" {
@@ -186,7 +186,7 @@ func checkToken(resolved, root string) (string, bool) {
 func ScanProtectedRead(command, workdir, root string, shell bool) (string, bool) {
 	text := command
 	if shell {
-		text = proseBlanked(normalizeCommand(command))
+		text = ProseBlanked(NormalizeCommand(command))
 	}
 	root = filepath.Clean(root)
 	if strings.TrimSpace(text) == "" || root == "" || root == "." || root == "/" {

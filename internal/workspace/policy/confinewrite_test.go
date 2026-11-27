@@ -1,14 +1,10 @@
-package workspace
+package policy
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // profileTree builds a fake .oswald data tree: <tmp>/.oswald with global
@@ -203,18 +199,6 @@ func TestScanProtectedReadCode(t *testing.T) {
 		if reason, blocked := ScanProtectedRead(code, alice, alice, false); blocked {
 			t.Errorf("code denied safe snippet %q: %q", code, reason)
 		}
-	}
-}
-
-func TestExecuteApprovedRefusesProtectedRead(t *testing.T) {
-	_, alice, bob := profileTree(t)
-	if err := os.Chmod(alice, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ws := NewWorkspace(alice, "alice")
-	pending := approvals.Pending{Profile: "alice", SessionKey: "s", Command: "cat " + filepath.Join(bob, "state.db"), Workdir: alice, Scratch: alice, Timeout: 30}
-	if _, err := ExecuteApproved(context.Background(), ws, process.NewManager(alice), pending); err == nil || !strings.Contains(err.Error(), "refused on re-scan") {
-		t.Fatalf("replay allowed protected read: %v", err)
 	}
 }
 

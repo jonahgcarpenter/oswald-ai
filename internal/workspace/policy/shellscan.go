@@ -1,4 +1,4 @@
-package workspace
+package policy
 
 import (
 	"path/filepath"
@@ -15,11 +15,11 @@ const (
 	shellEscalate = "escalate"
 )
 
-// normalizeCommand folds evasion spellings into canonical form before
+// NormalizeCommand folds evasion spellings into canonical form before
 // matching: line continuations, $IFS and $'\n' splits, fullwidth unicode,
 // and $HOME spelled either way. Newlines are preserved so heredoc structure
 // survives for the position tagger.
-func normalizeCommand(command string) string {
+func NormalizeCommand(command string) string {
 	s := strings.ReplaceAll(command, "\\\r\n", " ")
 	s = strings.ReplaceAll(s, "\\\n", " ")
 	lines := strings.Split(s, "\n")
@@ -51,9 +51,9 @@ func foldFullwidth(s string) string {
 	}, s)
 }
 
-// detectHiddenUnicode reports bidi overrides, zero-width characters, and
+// DetectHiddenUnicode reports bidi overrides, zero-width characters, and
 // other invisible smuggling codepoints in the original command text.
-func detectHiddenUnicode(original string) bool {
+func DetectHiddenUnicode(original string) bool {
 	for _, r := range original {
 		switch {
 		case r >= 0x202A && r <= 0x202E:
@@ -283,9 +283,9 @@ func ScanStoreAccess(live string) bool {
 	return strings.Contains(live, "<") || strings.Contains(live, ">")
 }
 
-// deniedResult renders a hard shell denial. The envelope is returned as a
+// DeniedResult renders a hard shell denial. The envelope is returned as a
 // successful unproductive result so the model sees the exact contract.
-func deniedResult(reason string) governance.Result {
+func DeniedResult(reason string) governance.Result {
 	return governance.Result{Content: BlockEnvelope(reason), Outcome: governance.OutcomeUnproductive}
 }
 
@@ -329,11 +329,11 @@ func splitSegments(live string) []string {
 	return segments
 }
 
-// proseBlanked blanks quoted spans that are operands of echo/printf only,
+// ProseBlanked blanks quoted spans that are operands of echo/printf only,
 // leaving every other quote (flag operands, paths, URLs, live sinks)
 // visible for path- and data-sensitive scans. `echo "cat .env"` stays
 // prose; `cat ".env"` and `curl -o "/tmp/x"` stay visible.
-func proseBlanked(normalized string) string {
+func ProseBlanked(normalized string) string {
 	var sb strings.Builder
 	inSingle, inDouble := false, false
 	var word strings.Builder

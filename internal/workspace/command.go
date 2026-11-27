@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/policy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
@@ -49,47 +50,47 @@ func (ws *Workspace) ExecuteCommand(ctx context.Context, pm *process.Manager, re
 	// fetch policy, store/config scans, recoverable escalations), then
 	// destructive-pattern review.
 	// The LLM reviewer from step 5 runs only on escalated ambiguity.
-	if err := ScanLifecycle(command, workdir); err != nil {
+	if err := policy.ScanLifecycle(command, workdir); err != nil {
 		return governance.Result{}, err
 	}
-	if err := BlockSelfRepo(command, workdir); err != nil {
+	if err := policy.BlockSelfRepo(command, workdir); err != nil {
 		return governance.Result{}, err
 	}
-	if reason, blocked := ScanConfinedWrite(command, workdir, ws.Root(), true); blocked {
-		return deniedResult(reason), nil
+	if reason, blocked := policy.ScanConfinedWrite(command, workdir, ws.Root(), true); blocked {
+		return policy.DeniedResult(reason), nil
 	}
-	if reason, blocked := ScanProtectedRead(command, workdir, ws.Root(), true); blocked {
-		return deniedResult(reason), nil
+	if reason, blocked := policy.ScanProtectedRead(command, workdir, ws.Root(), true); blocked {
+		return policy.DeniedResult(reason), nil
 	}
-	if reason, blocked := ScanEnvRetarget(command, true); blocked {
-		return deniedResult(reason), nil
+	if reason, blocked := policy.ScanEnvRetarget(command, true); blocked {
+		return policy.DeniedResult(reason), nil
 	}
 	if !req.Background {
-		if err := RefuseDetachableForeground(command); err != nil {
+		if err := policy.RefuseDetachableForeground(command); err != nil {
 			return governance.Result{}, err
 		}
 	}
-	live := stripInert(command)
-	quoted := proseBlanked(normalizeCommand(command))
-	if reason, blocked := ScanUnrecoverable(live); blocked {
-		return deniedResult(reason), nil
+	live := policy.StripInert(command)
+	quoted := policy.ProseBlanked(policy.NormalizeCommand(command))
+	if reason, blocked := policy.ScanUnrecoverable(live); blocked {
+		return policy.DeniedResult(reason), nil
 	}
-	if verdict, reason := classifyFetch(command, live, workdir); verdict == fetchDeny {
-		return deniedResult(reason), nil
+	if verdict, reason := policy.ClassifyFetch(command, live, workdir); verdict == policy.FetchDeny {
+		return policy.DeniedResult(reason), nil
 	}
-	if ScanStoreAccess(quoted) {
+	if policy.ScanStoreAccess(quoted) {
 		return reviewDangerous(ctx, ws, pm, req.Principal, command, workdir, req.Scratch, req.Timeout, req.Background, req.Persist, req.Heartbeat, req.NotifyNote, "direct store access")
 	}
-	if ScanSecretRead(quoted) {
+	if policy.ScanSecretRead(quoted) {
 		return reviewDangerous(ctx, ws, pm, req.Principal, command, workdir, req.Scratch, req.Timeout, req.Background, req.Persist, req.Heartbeat, req.NotifyNote, "read secrets")
 	}
-	if detectHiddenUnicode(command) {
+	if policy.DetectHiddenUnicode(command) {
 		return reviewDangerous(ctx, ws, pm, req.Principal, command, workdir, req.Scratch, req.Timeout, req.Background, req.Persist, req.Heartbeat, req.NotifyNote, "hidden unicode content")
 	}
-	if reason, hit := ScanRecoverable(live); hit {
+	if reason, hit := policy.ScanRecoverable(live); hit {
 		return reviewDangerous(ctx, ws, pm, req.Principal, command, workdir, req.Scratch, req.Timeout, req.Background, req.Persist, req.Heartbeat, req.NotifyNote, reason)
 	}
-	if dangerous, reason := DetectDangerous(command); dangerous {
+	if dangerous, reason := policy.DetectDangerous(command); dangerous {
 		return reviewDangerous(ctx, ws, pm, req.Principal, command, workdir, req.Scratch, req.Timeout, req.Background, req.Persist, req.Heartbeat, req.NotifyNote, reason)
 	}
 	return executeTerminalCommand(ctx, pm, requestID(ctx), command, workdir, req.Scratch, ws.Root(), req.Timeout, req.Background, req.Persist, req.Heartbeat, req.NotifyNote)

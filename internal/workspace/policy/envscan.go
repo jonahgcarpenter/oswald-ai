@@ -1,4 +1,4 @@
-package workspace
+package policy
 
 import (
 	"regexp"
@@ -42,7 +42,7 @@ var (
 func ScanEnvRetarget(text string, shell bool) (string, bool) {
 	scan := text
 	if shell {
-		scan = proseBlanked(normalizeCommand(text))
+		scan = ProseBlanked(NormalizeCommand(text))
 	}
 	if strings.TrimSpace(scan) == "" {
 		return "", false

@@ -1,4 +1,4 @@
-package workspace
+package policy
 
 import (
 	"path/filepath"
@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// classifyFetch verdicts for curl/wget invocations.
+// ClassifyFetch verdicts for curl/wget invocations.
 const (
-	fetchAllow = "allow"
-	fetchDeny  = "deny"
-	fetchSkip  = "skip" // not a fetch invocation
+	FetchAllow = "allow"
+	FetchDeny  = "deny"
+	FetchSkip  = "skip" // not a fetch invocation
 )
 
 var (
@@ -34,53 +34,53 @@ var textPipeAllow = map[string]bool{
 	"sort": true, "uniq": true, "cut": true, "tr": true, "less": true, "more": true,
 }
 
-// classifyFetch judges curl/wget invocations. Path- and data-sensitive
+// ClassifyFetch judges curl/wget invocations. Path- and data-sensitive
 // checks run on prose-blanked text (echo/printf prose removed, real flag
 // operands and quoted URLs visible); structural checks run on live text.
-func classifyFetch(command, live, workdir string) (string, string) {
+func ClassifyFetch(command, live, workdir string) (string, string) {
 	if !fetchMentions(live) {
-		return fetchSkip, ""
+		return FetchSkip, ""
 	}
-	quoted := proseBlanked(normalizeCommand(command))
+	quoted := ProseBlanked(NormalizeCommand(command))
 	urls := reFetchURL.FindAllString(quoted, -1)
 	if len(urls) == 0 {
-		return fetchAllow, ""
+		return FetchAllow, ""
 	}
 	for _, url := range urls {
-		if verdict, reason := judgeURL(url); verdict == fetchDeny {
+		if verdict, reason := judgeURL(url); verdict == FetchDeny {
 			return verdict, reason
 		}
 	}
 	if reUserinfo.MatchString(quoted) || reURLSecret.MatchString(quoted) {
-		return fetchDeny, "credentials in fetch URL"
+		return FetchDeny, "credentials in fetch URL"
 	}
 	if reInsecure.MatchString(live) {
-		return fetchDeny, "disabled TLS verification"
+		return FetchDeny, "disabled TLS verification"
 	}
 	if reSecretBody.MatchString(live) {
-		return fetchDeny, "secret-bearing request body"
+		return FetchDeny, "secret-bearing request body"
 	}
 	if reason, hit := dataOperandSecrets(quoted); hit {
-		return fetchDeny, reason
+		return FetchDeny, reason
 	}
 	if reUploadFile.MatchString(live) {
-		return fetchDeny, "outbound file upload"
+		return FetchDeny, "outbound file upload"
 	}
 	if reRecursiveGet.MatchString(live) {
-		return fetchDeny, "recursive download"
+		return FetchDeny, "recursive download"
 	}
 	if reEvalFetch.MatchString(live) || reExecPipe.MatchString(live) {
-		return fetchDeny, "execution of fetched content"
+		return FetchDeny, "execution of fetched content"
 	}
-	if verdict, reason := judgePipes(live); verdict == fetchDeny {
+	if verdict, reason := judgePipes(live); verdict == FetchDeny {
 		return verdict, reason
 	}
 	for _, dest := range fetchDestinations(quoted) {
-		if verdict, reason := judgeDestination(dest, workdir); verdict == fetchDeny {
+		if verdict, reason := judgeDestination(dest, workdir); verdict == FetchDeny {
 			return verdict, reason
 		}
 	}
-	return fetchAllow, ""
+	return FetchAllow, ""
 }
 
 // dataOperandSecrets extracts -d/--data operands quote-aware and reports
@@ -131,11 +131,11 @@ func judgeURL(url string) (string, string) {
 			host = rest[:i]
 		}
 		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-			return fetchAllow, ""
+			return FetchAllow, ""
 		}
-		return fetchDeny, "plain-HTTP fetch"
+		return FetchDeny, "plain-HTTP fetch"
 	}
-	return fetchAllow, ""
+	return FetchAllow, ""
 }
 
 // judgePipes allows stdout and text-processor/pager pipes only.
@@ -156,13 +156,13 @@ func judgePipes(live string) (string, string) {
 				if strings.HasPrefix(token, "-") || token == "" {
 					continue
 				}
-				return fetchDeny, "fetch piped to tee outside the workspace"
+				return FetchDeny, "fetch piped to tee outside the workspace"
 			}
 			continue
 		}
-		return fetchDeny, "fetch piped to " + prog
+		return FetchDeny, "fetch piped to " + prog
 	}
-	return fetchAllow, ""
+	return FetchAllow, ""
 }
 
 func fetchDestinations(live string) []string {
@@ -198,7 +198,7 @@ func judgeDestination(dest, workdir string) (string, string) {
 	}
 	rel, err := filepath.Rel(workdir, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fetchDeny, "fetch destination outside the working directory"
+		return FetchDeny, "fetch destination outside the working directory"
 	}
-	return fetchAllow, ""
+	return FetchAllow, ""
 }

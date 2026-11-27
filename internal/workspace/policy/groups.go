@@ -1,4 +1,4 @@
-package workspace
+package policy
 
 import (
 	"errors"
@@ -237,4 +237,11 @@ func isTopLevelDir(rel, name string) bool {
 		return true
 	}
 	return strings.HasPrefix(rel, name+string(filepath.Separator)) || strings.HasPrefix(rel, name+"/")
+}
+
+func displayPath(abs, root string) string {
+	if rel, err := filepath.Rel(root, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+		return rel
+	}
+	return abs
 }

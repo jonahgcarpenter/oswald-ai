@@ -3,7 +3,7 @@
 // gateway-lifecycle protection, self-repo mutation blocks, and dangerous
 // command detection. All checks fail closed with rule names only; commands,
 // paths, and script contents are never logged.
-package workspace
+package policy
 
 import (
 	"errors"
@@ -50,15 +50,15 @@ var gatewayLifecycle = []struct {
 	{regexp.MustCompile(`(?i)\boswald(-server)?\b.*\b(bootstrap|submit)\b`), "gateway bootstrap"},
 }
 
-// stripInert is the single choke point for shell matching: it normalizes
+// StripInert is the single choke point for shell matching: it normalizes
 // evasion spellings (line continuations, $IFS splits, fullwidth unicode,
 // home-as-absolute-path) and blanks prose (notably echo/printf operands and
 // inert quotes) while keeping executed payloads — command substitutions,
 // backticks, live-sink quoted operands, and shell-fed heredoc bodies — so
 // detachment/lifecycle/destructive regexes match live shell structure.
 // `echo "rm -rf /"` stays prose; `sh -c "rm -rf /"` stays live.
-func stripInert(command string) string {
-	return liveShellText(normalizeCommand(command))
+func StripInert(command string) string {
+	return liveShellText(NormalizeCommand(command))
 }
 
 // RefuseDetachableForeground rejects long-lived server patterns on the
@@ -67,7 +67,7 @@ func RefuseDetachableForeground(command string) error {
 	if helpFlag.MatchString(command) {
 		return nil
 	}
-	live := stripInert(command)
+	live := StripInert(command)
 	if detachLeader.MatchString(live) {
 		return errors.New("background detachment is not allowed on foreground calls; rerun with background=true and poll with process_manage")
 	}
@@ -101,7 +101,7 @@ func ValidateWorkdirString(raw string) error {
 
 // DetectDangerous reports whether a command matches a destructive pattern.
 func DetectDangerous(command string) (bool, string) {
-	live := stripInert(command)
+	live := StripInert(command)
 	for _, p := range dangerousPatterns {
 		if p.re.MatchString(live) {
 			return true, p.reason
@@ -114,7 +114,7 @@ func DetectDangerous(command string) (bool, string) {
 // local scripts (first .sh token) are read up to 1MiB with NUL rejection;
 // unscannable references fail closed.
 func ScanLifecycle(command, cwd string) error {
-	live := stripInert(command)
+	live := StripInert(command)
 	for _, p := range gatewayLifecycle {
 		if p.re.MatchString(live) {
 			return errors.New("blocked: service lifecycle targeting the agent gateway (" + p.reason + ")")
@@ -173,7 +173,7 @@ func readScriptHead(abs string) (string, error) {
 
 // BlockSelfRepo rejects git mutations against the live checkout.
 func BlockSelfRepo(command, cwd string) error {
-	live := stripInert(command)
+	live := StripInert(command)
 	if !strings.Contains(live, "git ") {
 		return nil
 	}
