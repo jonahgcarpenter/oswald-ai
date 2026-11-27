@@ -370,3 +370,100 @@ func TestOutboundAgentErrorIgnoresStreamedAttachmentInventory(t *testing.T) {
 		})
 	}
 }
+
+func TestWaitOutboundIdleWhenEmpty(t *testing.T) {
+	dg := &Gateway{Log: config.NewLogger(config.LevelError)}
+	defer dg.StopOutbound()
+	start := time.Now()
+	if !dg.WaitOutboundIdle(time.Minute) {
+		t.Fatal("empty outbound reported busy")
+	}
+	if elapsed := time.Since(start); elapsed < outboundIdleSettle {
+		t.Fatalf("empty outbound skipped the settle window: %s", elapsed)
+	}
+}
+
+func TestWaitOutboundIdleDrainsActiveDelivery(t *testing.T) {
+	dg := &Gateway{Log: config.NewLogger(config.LevelError)}
+	defer dg.StopOutbound()
+	release := make(chan struct{})
+	dg.HTTPClient = &http.Client{Transport: outboundTransport(func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"sent"}`)), Header: make(http.Header)}, nil
+	})}
+	result := make(chan error, 1)
+	go func() {
+		result <- newRuntimeResponder(dg, "request", "channel", "", "session", "user").SendAgentResponse(&agent.Response{Response: "answer"})
+	}()
+	// Let the delivery admit before the waiter observes it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		dg.outboundMu.Lock()
+		admitted := len(dg.outbound) > 0
+		dg.outboundMu.Unlock()
+		if admitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("delivery never admitted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	waited := make(chan bool, 1)
+	go func() { waited <- dg.WaitOutboundIdle(time.Minute) }()
+	select {
+	case <-waited:
+		t.Fatal("outbound wait returned while delivery was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case idle := <-waited:
+		if !idle {
+			t.Fatal("outbound wait reported busy after delivery completed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("outbound wait did not return after delivery completed")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("delivery: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("delivery never completed")
+	}
+}
+
+func TestWaitOutboundIdleTimesOut(t *testing.T) {
+	dg := &Gateway{Log: config.NewLogger(config.LevelError)}
+	defer dg.StopOutbound()
+	dg.HTTPClient = &http.Client{Transport: outboundTransport(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	result := make(chan error, 1)
+	go func() {
+		result <- newRuntimeResponder(dg, "request", "channel", "", "session", "user").SendAgentResponse(&agent.Response{Response: "answer"})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		dg.outboundMu.Lock()
+		admitted := len(dg.outbound) > 0
+		dg.outboundMu.Unlock()
+		if admitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("delivery never admitted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if dg.WaitOutboundIdle(300 * time.Millisecond) {
+		t.Fatal("stuck outbound reported idle")
+	}
+}

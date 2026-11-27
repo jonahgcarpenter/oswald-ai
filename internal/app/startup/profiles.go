@@ -487,6 +487,6 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}(service)
 	}
 	log.Info("app.started", "profile application started", config.F("profile_count", len(stores)), config.F("gateway_count", len(gateways)))
-	awaitShutdown(ctx, log, requestBroker, cronTickers, sigCh)
+	awaitShutdown(ctx, log, requestBroker, gateways, cronTickers, sigCh)
 	return nil
 }
