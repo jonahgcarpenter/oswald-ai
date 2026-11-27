@@ -192,6 +192,54 @@ func (dg *Gateway) runOutbound(ctx context.Context, done chan struct{}) {
 	}
 }
 
+// outboundIdleSettle requires the queue to stay empty across this window so
+// an executor that just received its broker result still admits its delivery
+// before shutdown proceeds to StopOutbound.
+const outboundIdleSettle = 500 * time.Millisecond
+
+// WaitOutboundIdle blocks until queued final deliveries complete or timeout,
+// reporting whether the outbound worker went idle. Late admissions from
+// in-flight request handlers are drained; it never cancels work itself.
+// StopOutbound remains the hard stop that cancels leftovers.
+func (dg *Gateway) WaitOutboundIdle(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		dg.outboundMu.Lock()
+		empty := len(dg.outbound) == 0
+		done := dg.outboundDone
+		dg.outboundMu.Unlock()
+		if !empty {
+			if done == nil {
+				// Admitted but the worker has not started yet; re-check.
+				continue
+			}
+			if remaining := time.Until(deadline); remaining <= 0 {
+				return false
+			} else {
+				select {
+				case <-done:
+				case <-time.After(remaining):
+					return false
+				}
+			}
+			continue
+		}
+		if time.Until(deadline) <= outboundIdleSettle {
+			dg.outboundMu.Lock()
+			stillEmpty := len(dg.outbound) == 0
+			dg.outboundMu.Unlock()
+			return stillEmpty
+		}
+		time.Sleep(outboundIdleSettle)
+		dg.outboundMu.Lock()
+		stillEmpty := len(dg.outbound) == 0
+		dg.outboundMu.Unlock()
+		if stillEmpty {
+			return true
+		}
+	}
+}
+
 // StopOutbound cancels queued delivery and joins its worker; it does not stop the websocket.
 func (dg *Gateway) StopOutbound() {
 	dg.outboundMu.Lock()

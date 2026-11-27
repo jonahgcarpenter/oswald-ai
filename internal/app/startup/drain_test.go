@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
 	"os"
 )
 
@@ -47,7 +48,7 @@ func TestAwaitShutdownParentCancelSkipsDrain(t *testing.T) {
 	sigCh := make(chan os.Signal, 4)
 	done := make(chan struct{})
 	go func() {
-		awaitShutdown(ctx, log, b, nil, sigCh)
+		awaitShutdown(ctx, log, b, nil, nil, sigCh)
 		close(done)
 	}()
 	select {
@@ -80,7 +81,7 @@ func TestAwaitShutdownDrainsOnSIGTERM(t *testing.T) {
 	sigCh := make(chan os.Signal, 4)
 	done := make(chan struct{})
 	go func() {
-		awaitShutdown(context.Background(), log, b, []*cron.Ticker{ticker}, sigCh)
+		awaitShutdown(context.Background(), log, b, nil, []*cron.Ticker{ticker}, sigCh)
 		close(done)
 	}()
 	sigCh <- syscall.SIGTERM
@@ -134,7 +135,7 @@ func TestAwaitShutdownSecondSignalAbortsDrain(t *testing.T) {
 	sigCh := make(chan os.Signal, 4)
 	done := make(chan struct{})
 	go func() {
-		awaitShutdown(context.Background(), log, b, nil, sigCh)
+		awaitShutdown(context.Background(), log, b, nil, nil, sigCh)
 		close(done)
 	}()
 	sigCh <- syscall.SIGTERM
@@ -155,4 +156,82 @@ func TestAwaitShutdownSecondSignalAbortsDrain(t *testing.T) {
 		t.Fatal("broker went idle: the stuck turn should still be running")
 	}
 	close(agent.release)
+}
+
+// drainBlockGateway is a gateway.Service with a blocking outbound drain.
+type drainBlockGateway struct {
+	waited  chan struct{}
+	release chan struct{}
+}
+
+func (g *drainBlockGateway) Start(_ *broker.Broker) error { return nil }
+func (g *drainBlockGateway) Name() string                 { return "drain-block" }
+func (g *drainBlockGateway) WaitOutboundIdle(timeout time.Duration) bool {
+	select {
+	case g.waited <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func TestAwaitShutdownWaitsForOutboundAfterBrokerIdle(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(nil, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	outbound := &drainBlockGateway{waited: make(chan struct{}, 1), release: make(chan struct{})}
+	sigCh := make(chan os.Signal, 4)
+	done := make(chan struct{})
+	go func() {
+		awaitShutdown(context.Background(), log, b, []gateway.Service{outbound}, nil, sigCh)
+		close(done)
+	}()
+	sigCh <- syscall.SIGTERM
+	select {
+	case <-outbound.waited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("outbound drain never started after broker idle")
+	}
+	select {
+	case <-done:
+		t.Fatal("awaitShutdown returned while outbound delivery was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(outbound.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitShutdown did not return after outbound drained")
+	}
+}
+
+func TestAwaitShutdownSecondSignalAbortsOutboundWait(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(nil, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	outbound := &drainBlockGateway{waited: make(chan struct{}, 1), release: make(chan struct{})}
+	sigCh := make(chan os.Signal, 4)
+	done := make(chan struct{})
+	go func() {
+		awaitShutdown(context.Background(), log, b, []gateway.Service{outbound}, nil, sigCh)
+		close(done)
+	}()
+	sigCh <- syscall.SIGTERM
+	select {
+	case <-outbound.waited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("outbound drain never started")
+	}
+	sigCh <- syscall.SIGTERM
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second signal did not abort the outbound wait")
+	}
 }
