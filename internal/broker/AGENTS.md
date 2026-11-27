@@ -33,11 +33,13 @@ survive as queued next turns;
 `CancelAllAgentWork` cancels agent turns and pending steers, leaving out-of-band commands untouched.
 `TryAcquireLowPriority` succeeds solely on a fully idle broker and any enqueue revokes it, which
 is how foreground work always preempts background compression. Shutdown drains admitted lane
-followers before closing.
+followers before closing. For restarts, `BeginDrain` stops admission first — new submits get the
+retry notice — while admitted turns run to `WaitIdle`; `Shutdown` stays the hard stop that cancels
+leftovers.
 
 ## Tests
 
-`broker_test.go`, `fence_cancellation_test.go`, `telemetry_test.go`. Cover hot-lane fairness,
+`broker_test.go`, `drain_test.go`, `fence_cancellation_test.go`, `telemetry_test.go`. Cover hot-lane fairness,
 per-user fence exclusion, the capacity assertion (queue plus workers plus pending steers),
 five-lane overlap with same-lane FIFO preserved for `/queue`, steer fan-out without an extra
 model call, unconsumed-steer-becomes-next-turn, stateless never-steer, media overflow defers to next turn, cancel-active

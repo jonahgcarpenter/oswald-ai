@@ -386,6 +386,9 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		if !deliveryAttempted {
 			if commandErr != nil {
 				response = commands.Result{Text: config.SafeErrorText(commandErr)}
+				if errors.Is(commandErr, broker.ErrShuttingDown) {
+					response.Text = broker.DrainNoticeText
+				}
 			}
 			sendErr = responder.SendCommandResponse(response)
 		}
@@ -479,11 +482,20 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		executionStatus, responseKind = "rejected", "fallback"
 		reasonCode = "queue_full"
 	}
+	if errors.Is(submitErr, broker.ErrShuttingDown) {
+		// Restart drain: the broker is closed to new work but the gateway
+		// is still up, so tell the user to retry instead of attributing a
+		// cancellation. The broker also delivered its own notice result;
+		// the explicit send keeps every transport on the error path.
+		reasonCode = "restarting"
+		sendErr := responder.SendAgentError(broker.DrainNoticeText)
+		if sendErr != nil {
+			log.Debug("gateway.send.failed", "failed to send restart notice", config.F("request_id", req.RequestID), config.ErrorField(sendErr))
+		}
+		return Outcome{Action: decision.Action, Reason: "restarting", Err: sendErr}
+	}
 	result := <-brokerReq.ResponseChan
 	isExecutionComplete = result.ExecutionComplete
-	if errors.Is(submitErr, broker.ErrShuttingDown) {
-		result.Err = submitErr
-	}
 	queueWaitMS, agentDurationMS = result.QueueWaitMS, result.AgentDurationMS
 	if result.Principal.Valid() {
 		userID = result.Principal.CanonicalUserID

@@ -32,9 +32,11 @@ const (
 // Leaf usage lines double as `--help` pages: `oswald model <command> --help`
 // prints the same text to stdout and exits 0 without resolving scope.
 const (
-	showUsage = "usage: oswald model show [--profile NAME]"
-	listUsage = "usage: oswald model list [--profile NAME]"
-	setUsage  = "usage: oswald model set [--provider P] [--default M] [--context-length N] [--profile NAME]"
+	showUsage  = "usage: oswald model show [--profile NAME]"
+	listUsage  = "usage: oswald model list [--profile NAME]"
+	setUsage   = "usage: oswald model set [--provider P] [--default M] [--context-length N] [--profile NAME]"
+	editUsage  = "usage: oswald model edit [--provider P] [--default M] [--context-length N] [--profile NAME]"
+	unsetUsage = "usage: oswald model unset context-length [--profile NAME]"
 )
 
 // listFetchTimeout and listFetchConcurrency bound one `model list` run: at
@@ -63,6 +65,12 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 		case "set":
 			fmt.Fprintln(stdout, setUsage)
 			return exitOK
+		case "edit":
+			fmt.Fprintln(stdout, editUsage)
+			return exitOK
+		case "unset":
+			fmt.Fprintln(stdout, unsetUsage)
+			return exitOK
 		}
 	}
 	target, err := resolveTarget(root, profile, !(rest[0] == "show" || rest[0] == "list"))
@@ -84,7 +92,11 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 		}
 		return listCmd(ctx, target, stdout, stderr)
 	case "set":
-		return setCmd(target, rest[1:], stdout, stderr)
+		return setCmd(target, "set", rest[1:], stdout, stderr)
+	case "edit":
+		return setCmd(target, "edit", rest[1:], stdout, stderr)
+	case "unset":
+		return unsetCmd(target, rest[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		modelUsage(stdout)
 		return exitOK
@@ -96,12 +108,14 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 }
 
 func modelUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: oswald model [--profile NAME] <show|list|set> [options]")
+	fmt.Fprintln(w, "usage: oswald model [--profile NAME] <show|list|set|edit|unset> [options]")
 	fmt.Fprintln(w, "  show                       model section")
 	fmt.Fprintln(w, "  list                       live models per provider")
 	fmt.Fprintln(w, "  set --provider P           set model.provider (custom:<name>)")
 	fmt.Fprintln(w, "  set --default M            set model.default")
 	fmt.Fprintln(w, "  set --context-length N     set model.context_length")
+	fmt.Fprintln(w, "  edit                       alias of set (same flags, one field per invocation)")
+	fmt.Fprintln(w, "  unset context-length       clear model.context_length")
 }
 
 type target struct {
@@ -233,8 +247,12 @@ func subscriptionModels(ctx context.Context, active *config.Config, name string,
 	}
 }
 
-func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
-	sub := flag.NewFlagSet("model set", flag.ContinueOnError)
+func setCmd(t *target, verb string, args []string, stdout, stderr io.Writer) int {
+	usage := setUsage
+	if verb == "edit" {
+		usage = editUsage
+	}
+	sub := flag.NewFlagSet("model "+verb, flag.ContinueOnError)
 	sub.SetOutput(stderr)
 	provider := sub.String("provider", "", "model provider (custom:<name>)")
 	def := sub.String("default", "", "default model id")
@@ -244,7 +262,7 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) != 0 {
-		fmt.Fprintln(stderr, setUsage)
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	set := 0
@@ -258,11 +276,11 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		set++
 	}
 	if set == 0 {
-		fmt.Fprintln(stderr, setUsage)
+		fmt.Fprintln(stderr, usage)
 		return exitUsage
 	}
 	if set > 1 {
-		fmt.Fprintln(stderr, "oswald: set one model field per invocation")
+		fmt.Fprintf(stderr, "oswald: %s one model field per invocation\n", verb)
 		return exitUsage
 	}
 	oldCfg, _ := config.Validate(t.root)
@@ -279,7 +297,46 @@ func setCmd(t *target, args []string, stdout, stderr io.Writer) int {
 		reportModelError(stderr, err)
 		return exitError
 	}
+	if verb == "edit" {
+		fmt.Fprintf(stdout, "edited model (%s)\n", effectForChange(t.root, oldCfg))
+		return exitOK
+	}
 	fmt.Fprintf(stdout, "set model (%s)\n", effectForChange(t.root, oldCfg))
+	return exitOK
+}
+
+// unsetCmd clears the optional model.context_length leaf. model.provider and
+// model.default are required by startup validation, so unsetting them is
+// rejected with guidance toward `set` instead of attempting an invalid write.
+func unsetCmd(t *target, args []string, stdout, stderr io.Writer) int {
+	var positional []string
+	for _, token := range args {
+		if strings.HasPrefix(token, "-") {
+			fmt.Fprintln(stderr, unsetUsage)
+			return exitUsage
+		}
+		positional = append(positional, token)
+	}
+	if len(positional) != 1 {
+		fmt.Fprintln(stderr, unsetUsage)
+		return exitUsage
+	}
+	switch positional[0] {
+	case "context-length", "context_length":
+		// Valid: cleared below.
+	case "provider", "default":
+		fmt.Fprintf(stderr, "oswald: model.%s is required, use 'oswald model set --%s ...' to change it\n", positional[0], positional[0])
+		return exitUsage
+	default:
+		fmt.Fprintln(stderr, unsetUsage)
+		return exitUsage
+	}
+	oldCfg, _ := config.Validate(t.root)
+	if err := config.UnsetConfigValue(t.root, t.profile, []string{"model", "context_length"}); err != nil {
+		reportModelError(stderr, err)
+		return exitError
+	}
+	fmt.Fprintf(stdout, "unset model.context_length (%s)\n", effectForChange(t.root, oldCfg))
 	return exitOK
 }
 

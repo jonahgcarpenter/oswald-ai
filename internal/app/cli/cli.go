@@ -118,10 +118,11 @@ commands:
   platforms show|enable|disable|set
                          manage gateway platforms
   runtime show|set         read and safely modify runtime configuration
-  providers list|show|add|remove
+  providers list|show|add|edit|unset|remove
                          manage LLM providers
-  model show|list|set    manage model selection
-  delegation show|set|unset
+  model show|list|set|edit|unset
+                          manage model selection
+  delegation show|set|edit|unset
                           manage subagent model routing
   tools show|set|unset      manage tool backends
   plugins list|info           manage profile plugins (presence means enabled)

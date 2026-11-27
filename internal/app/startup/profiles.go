@@ -3,6 +3,7 @@ package startup
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -54,6 +55,9 @@ func (p *profileProcessor) Process(ctx context.Context, request agent.Request) (
 type profileDependencies struct {
 	newClient   func(*config.Config, *config.Logger) llm.Chatter
 	newGateways func(*config.Config, identity.Resolver, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
+	// drainSignals injects shutdown signals for the restart-drain
+	// controller in tests. Nil subscribes to the real process signals.
+	drainSignals <-chan os.Signal
 }
 
 // profileRuntime retains the per-profile pieces the delegation manager needs
@@ -175,6 +179,11 @@ func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cron
 			ResponseChan: resp,
 		})
 		if err != nil {
+			// Restart drain: the turn never ran. Map to the cron
+			// sentinel so the dispatcher skips retries and streaks.
+			if errors.Is(err, broker.ErrShuttingDown) {
+				return cron.AgentResult{}, cron.ErrShuttingDown
+			}
 			return cron.AgentResult{}, err
 		}
 		select {
@@ -221,6 +230,10 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	if ctx.Err() != nil {
 		return nil
 	}
+	// Subscribe before any work starts so a restart signal during startup is
+	// honored at ready time instead of killing the process mid-repair.
+	sigCh, stopSignals := drainSignalChannel(seams)
+	defer stopSignals()
 	log := rootLog.Server("app")
 	processor := &profileProcessor{agents: map[string]*agent.Agent{}}
 	stores := map[string]*memory.ProfileStore{}
@@ -474,6 +487,6 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}(service)
 	}
 	log.Info("app.started", "profile application started", config.F("profile_count", len(stores)), config.F("gateway_count", len(gateways)))
-	<-ctx.Done()
+	awaitShutdown(ctx, log, requestBroker, cronTickers, sigCh)
 	return nil
 }

@@ -141,7 +141,7 @@ func TestHelpPages(t *testing.T) {
 			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "model", args, code, out)
 		}
 	}
-	for _, leaf := range []string{"show", "list", "set"} {
+	for _, leaf := range []string{"show", "list", "set", "edit", "unset"} {
 		code, out, _ := run(t, root, leaf, "--help")
 		if code != exitOK || !strings.Contains(out, "usage: oswald model "+leaf) {
 			t.Fatalf("model %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
@@ -352,5 +352,70 @@ func TestListUnknownProfile(t *testing.T) {
 	code, _, stderr := run(t, root, "list", "--profile", "ghost")
 	if code != exitError || !strings.HasPrefix(stderr, "oswald: ") {
 		t.Fatalf("list unknown profile = %d stderr=%q, want exit 1 with a classified error", code, stderr)
+	}
+}
+
+func TestEditAliasRoundTrip(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, out, stderr := run(t, root, "edit", "--default", "fake/edited")
+	if code != 0 {
+		t.Fatalf("edit = %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "edited model") {
+		t.Fatalf("edit missing confirmation = %q", out)
+	}
+	code, out, _ = run(t, root, "show")
+	if code != 0 || !strings.Contains(out, "fake/edited") {
+		t.Fatalf("show after edit = %d %q", code, out)
+	}
+}
+
+func TestEditRejectsMultipleFields(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "edit", "--default", "a", "--provider", "custom:fake"); code != exitUsage {
+		t.Fatalf("multi-field edit did not return usage")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("file mutated on rejected multi-field edit")
+	}
+}
+
+func TestUnsetContextLengthRoundTrip(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, out, stderr := run(t, root, "unset", "context-length")
+	if code != 0 {
+		t.Fatalf("unset = %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "unset model.context_length") {
+		t.Fatalf("unset missing confirmation = %q", out)
+	}
+	code, out, _ = run(t, root, "show")
+	if code != 0 || strings.Contains(out, "32768") {
+		t.Fatalf("show after unset = %d %q, want context length cleared", code, out)
+	}
+	if code, _, _ := run(t, root, "unset", "context-length"); code == 0 {
+		t.Fatal("second unset of absent leaf accepted")
+	}
+}
+
+func TestUnsetRejectsRequiredLeaves(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	for _, args := range [][]string{
+		{"unset", "provider"},
+		{"unset", "default"},
+		{"unset", "bogus"},
+		{"unset"},
+		{"unset", "context-length", "extra"},
+	} {
+		if code, _, _ := run(t, root, args...); code == 0 {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("file mutated on rejected unset")
 	}
 }

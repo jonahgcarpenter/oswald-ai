@@ -147,10 +147,37 @@ func TestHelpPages(t *testing.T) {
 			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "delegation", args, code, out)
 		}
 	}
-	for _, leaf := range []string{"show", "set", "unset"} {
+	for _, leaf := range []string{"show", "set", "edit", "unset"} {
 		code, out, _ := run(t, root, leaf, "--help")
 		if code != exitOK || !strings.Contains(out, "usage: oswald delegation "+leaf) {
 			t.Fatalf("delegation %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
 		}
+	}
+}
+
+func TestEditAliasRoundTrip(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, out, stderr := run(t, root, "edit", "--model", "other/worker")
+	if code != 0 {
+		t.Fatalf("edit = %d %s", code, stderr)
+	}
+	if !strings.Contains(out, "edited delegation") {
+		t.Fatalf("edit missing confirmation = %q", out)
+	}
+	code, out, _ = run(t, root, "show")
+	if code != 0 || !strings.Contains(out, "other/worker") {
+		t.Fatalf("show after edit = %d %q", code, out)
+	}
+}
+
+func TestEditRejectsMultipleFields(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if code, _, _ := run(t, root, "edit", "--model", "a", "--provider", "other"); code == 0 {
+		t.Fatal("multi-field edit accepted")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("file mutated on rejected multi-field edit")
 	}
 }

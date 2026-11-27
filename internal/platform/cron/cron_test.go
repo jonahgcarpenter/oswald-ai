@@ -939,6 +939,40 @@ func ledgerLines(t *testing.T, root string) int {
 	return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
 }
 
+func TestAgentShutdownSkipsRetriesAndStreak(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	sender := &flakySender{}
+	agentCalls := 0
+	d := retryTestDispatcher(store, root, func(ctx context.Context, call AgentCall) (AgentResult, error) {
+		agentCalls++
+		return AgentResult{}, ErrShuttingDown
+	}, sender)
+	now := time.Now().UTC()
+	sched, _ := mustParse(t, "30m", now)
+	job := mustCreate(t, store, Job{Schedule: sched, Prompt: "x", Deliver: testDeliver()})
+	ex, _, err := d.RunOne(context.Background(), job, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Status != "agent_queued" || ex.Delivered {
+		t.Fatalf("shutdown tick = %+v, want one uncounted agent_queued row", ex)
+	}
+	if agentCalls != 1 {
+		t.Fatalf("agent attempts = %d, want exactly 1 with no retries", agentCalls)
+	}
+	updated, err := store.Resolve(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FailureStreak != 0 || updated.State != StateScheduled {
+		t.Fatalf("shutdown tick counted toward auto-pause: %+v", updated)
+	}
+	if got := ledgerLines(t, root); got != 1 {
+		t.Fatalf("ledger rows = %d, want 1", got)
+	}
+}
+
 func TestDeliveryFailuresIncrementStreakAndPauseInOneTick(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)

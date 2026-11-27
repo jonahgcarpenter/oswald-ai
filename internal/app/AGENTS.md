@@ -66,8 +66,11 @@ without re-seating (the default routing did not move), and a failed apply WARNs
 logs an advisory `config.reload.restart_required` (with
 `reason_code`). The operator (or model) batches edits and runs `oswald restart` once when ready:
 it signals the local oswald-server process (nearest `oswald-server` ancestor, else PID 1 when
-it is the server) with `SIGTERM` so the supervisor restarts the service in
-place. Non-hot changes (context windows, profile additions/removals, listeners, MCP sessions,
+it is the server) with `SIGTERM`. The first SIGTERM drains instead of exiting: cron tickers stop,
+the broker stops admission (new prompts get the `DrainNoticeText` retry notice, drain rejections
+never count toward cron `failure_streak`), and in-flight turns run to the `restartDrainTimeout`
+grace before the supervisor restarts the service in place; SIGINT, a second signal, or
+`oswald restart --force` (SIGKILL) skips the drain. Non-hot changes (context windows, profile additions/removals, listeners, MCP sessions,
 plugins, and the remaining sections) are reloaded on entry after that restart; hot changes apply
 live with no restart. The watcher never rewrites operator files, and a stable fingerprint never
 fires twice, so rapid successive writes coalesce.

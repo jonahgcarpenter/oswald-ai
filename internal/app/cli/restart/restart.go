@@ -1,9 +1,11 @@
 // Package restart implements `oswald restart`: signal the local
-// oswald-server process to exit gracefully so the supervisor (container
-// runtime or service manager) restarts it in place. Load-bearing config and
-// plugin changes print "run `oswald restart` to apply" — the model batches
-// edits, tells the user, then runs this as the final step so its own turn is
-// never killed by an automatic rebuild.
+// oswald-server process to drain in-flight turns and exit so the supervisor
+// (container runtime or service manager) restarts it in place. The first
+// SIGTERM drains (new prompts get a retry notice while running turns
+// finish); `--force` sends SIGKILL and skips the drain for a wedged server.
+// Load-bearing config and plugin changes print "run `oswald restart` to
+// apply" — the model batches edits, tells the user, then runs this as the
+// final step so its own turn finishes before the reboot.
 package restart
 
 import (
@@ -49,8 +51,9 @@ func Run(_ context.Context, _ string, rest []string, stdout, stderr io.Writer) i
 	const usage = "usage: oswald restart [--delay SECS|--now] [--force]"
 	if help.WantsHelp(rest) {
 		fmt.Fprintln(stdout, usage)
-		fmt.Fprintln(stdout, "  Signal the local oswald-server to exit gracefully so the")
-		fmt.Fprintln(stdout, "  supervisor restarts it in place (batch edits first).")
+		fmt.Fprintln(stdout, "  Signal the local oswald-server to drain in-flight turns and")
+		fmt.Fprintln(stdout, "  exit so the supervisor restarts it in place (batch edits first).")
+		fmt.Fprintln(stdout, "  New prompts during the drain get a retry notice; --force kills immediately.")
 		return 0
 	}
 	delay := time.Duration(0)
@@ -101,7 +104,7 @@ func Run(_ context.Context, _ string, rest []string, stdout, stderr io.Writer) i
 		fmt.Fprintln(stderr, "oswald: server is not running")
 		return 1
 	}
-	fmt.Fprintf(stdout, "restarting server (pid %d)\n", pid)
+	fmt.Fprintf(stdout, "The server will restart after all responses have been sent (pid %d)\n", pid)
 	return 0
 }
 

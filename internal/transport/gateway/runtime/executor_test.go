@@ -626,6 +626,37 @@ func (r *fakeResponder) CancelAgentResponse() error {
 	return nil
 }
 
+func TestExecuteDrainSendsRetryNotice(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(responseRuntimeProcessor{response: &agent.Response{Response: "answer"}}, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	b.BeginDrain()
+	responder := &fakeResponder{}
+	outcome := Execute(Request{RequestID: "drain", Principal: testPrincipal("user"), Text: "hello"}, Dependencies{Broker: b, Log: log}, responder)
+	if outcome.Reason != "restarting" || outcome.Err != nil {
+		t.Fatalf("drain outcome=%+v", outcome)
+	}
+	if responder.agentErr != broker.DrainNoticeText || responder.canceled || responder.agent != nil {
+		t.Fatalf("drain responder=%+v", responder)
+	}
+}
+
+func TestExecuteCommandDrainSendsRetryNotice(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	deps.Broker.BeginDrain()
+	responder := &fakeResponder{}
+	outcome := Execute(Request{RequestID: "drain-cmd", Principal: testPrincipal("user"), Text: "/ping"}, deps, responder)
+	if outcome.Err != nil {
+		t.Fatalf("drain command outcome=%+v", outcome)
+	}
+	if responder.command.Text != broker.DrainNoticeText {
+		t.Fatalf("drain command response=%+v", responder.command)
+	}
+}
+
 func TestExecuteCompactStreamsAckWhenSupported(t *testing.T) {
 	recorder := &compactStreamAckRecorder{}
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{

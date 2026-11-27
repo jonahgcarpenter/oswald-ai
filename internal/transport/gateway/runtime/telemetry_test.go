@@ -13,13 +13,13 @@ import (
 	"github.com/mattn/go-sqlite3"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 )
 
 func telemetryLogger(t *testing.T) (*config.Logger, func() []map[string]any) {
@@ -215,19 +215,15 @@ func TestRequestTelemetryQueueFullAndShutdown(t *testing.T) {
 				continue
 			}
 			count++
-			want := "rejected"
-			if shutdown {
-				want = "canceled"
-			}
-			if logDetails(t, record)["execution_status"] != want {
+			if logDetails(t, record)["execution_status"] != "rejected" {
 				t.Fatalf("shutdown=%v terminal=%v", shutdown, record)
 			}
 		}
 		if count != 1 {
 			t.Fatalf("terminal count = %d", count)
 		}
-		if shutdown && (!r.canceled || r.agentErr != "" || r.agent != nil) {
-			t.Fatalf("shutdown sent generic failure: %+v", r)
+		if shutdown && (r.canceled || r.agentErr != broker.DrainNoticeText || r.agent != nil) {
+			t.Fatalf("shutdown did not send the retry notice: %+v", r)
 		}
 	}
 }

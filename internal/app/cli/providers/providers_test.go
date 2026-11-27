@@ -162,10 +162,63 @@ func TestHelpPages(t *testing.T) {
 			t.Fatalf("%s %v = %d %q, want exit 0 with group usage", "providers", args, code, out)
 		}
 	}
-	for _, leaf := range []string{"list", "show", "add", "remove"} {
+	for _, leaf := range []string{"list", "show", "add", "edit", "unset", "remove"} {
 		code, out, _ := run(t, root, leaf, "--help")
 		if code != exitOK || !strings.Contains(out, "usage: oswald providers "+leaf) {
 			t.Fatalf("providers %s --help = %d %q, want exit 0 with leaf usage", leaf, code, out)
 		}
+	}
+}
+
+func TestUnsetKeyRoundTrip(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	code, _, stderr := run(t, root, "add", "extra", "--api", "http://127.0.0.1:9998/v1", "--key", "synthetic-extra-key")
+	if code != 0 {
+		t.Fatalf("add = %d stderr=%s", code, stderr)
+	}
+	code, out, stderr := run(t, root, "unset", "extra", "key")
+	if code != 0 {
+		t.Fatalf("unset key = %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(out, "unset provider extra key") {
+		t.Fatalf("unset missing confirmation = %q", out)
+	}
+	if code, _, _ := run(t, root, "unset", "extra", "key"); code == 0 {
+		t.Fatal("second unset of absent key accepted")
+	}
+	if code, _, stderr := run(t, root, "remove", "extra"); code != 0 {
+		t.Fatalf("remove after unset = %d stderr=%s", code, stderr)
+	}
+}
+
+func TestUnsetRejects(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	for _, args := range [][]string{
+		{"unset", "extra"},
+		{"unset", "fake", "bogus"},
+		{"unset", "ghost", "key"},
+		{"unset", "fake", "key", "extra"},
+	} {
+		if code, _, _ := run(t, root, args...); code == 0 {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("file mutated on rejected unset")
+	}
+}
+
+func TestUnsetApiRefusedOnKeyProvider(t *testing.T) {
+	root := writeConfig(t, testConfig)
+	before, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	// fake is a key provider: dropping its endpoint cannot validate.
+	if code, _, _ := run(t, root, "unset", "fake", "api"); code == 0 {
+		t.Fatal("unset api accepted on key provider")
+	}
+	after, _ := os.ReadFile(filepath.Join(root, "config.yaml"))
+	if !bytes.Equal(before, after) {
+		t.Fatal("file mutated on rejected unset")
 	}
 }
