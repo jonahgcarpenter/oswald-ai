@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/chatgpt"
 )
 
 // authCmd dispatches the ChatGPT authorization flows:

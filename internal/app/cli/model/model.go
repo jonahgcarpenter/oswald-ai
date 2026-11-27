@@ -17,9 +17,10 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/help"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/api"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/claude"
 )
 
 // Exit codes mirror the parent cli convention without importing it.
@@ -243,7 +244,7 @@ func subscriptionModels(ctx context.Context, active *config.Config, name string,
 		}
 		return claude.StaticModels(), nil
 	default:
-		return llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, active.LLMGatewayVirtualKey, nil).ListModels(ctx)
+		return api.NewClient(endpoint.URL, endpoint.APIKey, active.LLMGatewayVirtualKey, nil).ListModels(ctx)
 	}
 }
 

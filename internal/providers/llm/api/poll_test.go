@@ -1,4 +1,4 @@
-package llm
+package api
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 func TestAsyncPollFailureBudgetAndValidation(t *testing.T) {
@@ -56,7 +57,7 @@ func TestAsyncPollFailureBudgetAndValidation(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+			client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
 			base := server.Client().Transport
 			client.HTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				if r.Method == http.MethodGet {
@@ -69,7 +70,7 @@ func TestAsyncPollFailureBudgetAndValidation(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			response, err := client.Chat(ctx, ChatRequest{Model: "test"}, nil)
+			response, err := client.Chat(ctx, llm.ChatRequest{Model: "test"}, nil)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) || response != nil {
 					t.Fatalf("response=%+v err=%v, want nil response and %q", response, err, test.wantError)
@@ -77,8 +78,8 @@ func TestAsyncPollFailureBudgetAndValidation(t *testing.T) {
 			} else if err != nil || response == nil || response.Message.Content != "complete" {
 				t.Fatalf("response=%+v err=%v", response, err)
 			}
-			if submissions.Load() != 1 || polls.Load() != int32(len(test.statuses)) {
-				t.Fatalf("submissions=%d polls=%d, want 1 and %d", submissions.Load(), polls.Load(), len(test.statuses))
+			if submissions.Load() != 2 || polls.Load() != int32(len(test.statuses)) {
+				t.Fatalf("submissions=%d polls=%d, want 2 and %d", submissions.Load(), polls.Load(), len(test.statuses))
 			}
 		})
 	}

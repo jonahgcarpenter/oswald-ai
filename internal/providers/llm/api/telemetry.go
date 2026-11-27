@@ -1,4 +1,4 @@
-package llm
+package api
 
 import (
 	"context"
@@ -48,7 +48,7 @@ func measurementFromContext(ctx context.Context) *gatewayMeasurement {
 	return m
 }
 
-func (c *GatewayClient) beginMeasurement(ctx context.Context, model, operation, transport string) (context.Context, func(error)) {
+func (c *Client) beginMeasurement(ctx context.Context, model, operation, transport string) (context.Context, func(error)) {
 	m := &gatewayMeasurement{started: time.Now(), phase: "marshal"}
 	meta := requestctx.MetadataFromContext(ctx)
 	parent := meta.OperationID

@@ -89,11 +89,11 @@ type LinkDegradation struct {
 }
 
 // NewClientFunc constructs a chat client for a provider transport (startup
-// wires llm.NewGatewayClient plus the subscription transports).
+// wires llm/api plus the subscription transports).
 type NewClientFunc func(provider string, endpoint config.ProviderEndpoint, virtualKey string) llm.Chatter
 
 // ListModelsFunc fetches one provider's model listing (startup wires the
-// llm.GatewayClient implementation plus subscription catalogs). Nil makes
+// llm/api implementation plus subscription catalogs). Nil makes
 // every provider report unavailable instead of panicking.
 type ListModelsFunc func(ctx context.Context, provider string, endpoint config.ProviderEndpoint, virtualKey string) ([]llm.ModelEntry, error)
 

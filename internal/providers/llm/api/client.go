@@ -1,4 +1,4 @@
-package llm
+package api
 
 import (
 	"bufio"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 const (
@@ -30,68 +31,8 @@ const (
 	openCodeSessionHeader = "x-opencode-session"
 )
 
-// ChatHTTPError describes a non-success response from the chat completion endpoint.
-type ChatHTTPError struct {
-	StatusCode int
-	// Body is bounded request-local provider text used only for narrow retry
-	// classification. Error intentionally excludes it because providers may
-	// reflect prompt content in error responses.
-	Body string
-}
-
-func (e *ChatHTTPError) Error() string {
-	return fmt.Sprintf("LLM gateway chat returned HTTP %d", e.StatusCode)
-}
-
-// HTTPStatusCode exposes the bounded provider status to telemetry.
-func (e *ChatHTTPError) HTTPStatusCode() int { return e.StatusCode }
-
-// IsPermanentChatProviderError reports request failures that should not be retried unchanged.
-func IsPermanentChatProviderError(err error) bool {
-	var httpErr *ChatHTTPError
-	return errors.As(err, &httpErr) && httpErr.StatusCode >= http.StatusBadRequest && httpErr.StatusCode < http.StatusInternalServerError && httpErr.StatusCode != http.StatusRequestTimeout && httpErr.StatusCode != http.StatusTooEarly && httpErr.StatusCode != http.StatusTooManyRequests
-}
-
-// IsTemporaryOllamaToolParserError identifies a narrow upstream Ollama/Qwen
-// tool-parser failure. Remove this workaround when the provider no longer
-// turns malformed generated tool markup into HTTP 500 responses.
-func IsTemporaryOllamaToolParserError(err error) bool {
-	var httpErr *ChatHTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusInternalServerError {
-		return false
-	}
-	body := strings.ToLower(httpErr.Body)
-	return strings.Contains(body, "expected element type") ||
-		strings.Contains(body, "xml syntax error") ||
-		(strings.Contains(body, "xml") && strings.Contains(body, "unexpected eof"))
-}
-
-// IsOllamaModelRunnerStoppedError identifies the upstream failure returned when
-// Ollama stops a model runner while processing a request.
-func IsOllamaModelRunnerStoppedError(err error) bool {
-	var httpErr *ChatHTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusInternalServerError {
-		return false
-	}
-	return strings.Contains(strings.ToLower(httpErr.Body), "model runner has unexpectedly stopped")
-}
-
-// IsContextLengthExceededError identifies provider rejections caused by a
-// request exceeding the active model context window.
-func IsContextLengthExceededError(err error) bool {
-	var httpErr *ChatHTTPError
-	if !errors.As(err, &httpErr) {
-		return false
-	}
-	body := strings.ToLower(httpErr.Body)
-	return strings.Contains(body, "context size") ||
-		strings.Contains(body, "context length") ||
-		strings.Contains(body, "context window") ||
-		strings.Contains(body, "too many tokens")
-}
-
-// GatewayClient interacts with the LLM gateway's OpenAI-compatible REST API.
-type GatewayClient struct {
+// Client interacts with an OpenAI-compatible REST API.
+type Client struct {
 	BaseURL      string
 	APIKey       string
 	VirtualKey   string
@@ -101,9 +42,9 @@ type GatewayClient struct {
 	log          *config.Logger
 }
 
-// NewGatewayClient creates an LLM gateway client with the given base URL and optional auth.
-func NewGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {
-	return &GatewayClient{
+// NewClient creates an LLM gateway client with the given base URL and optional auth.
+func NewClient(baseURL, apiKey, virtualKey string, log *config.Logger) *Client {
+	return &Client{
 		BaseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:       strings.TrimSpace(apiKey),
 		VirtualKey:   strings.TrimSpace(virtualKey),
@@ -113,7 +54,7 @@ func NewGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *G
 	}
 }
 
-func (c *GatewayClient) applyHeaders(req *http.Request) {
+func (c *Client) applyHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(req.Header.Get("User-Agent")) == "" {
 		req.Header.Set("User-Agent", gatewayUserAgent)
@@ -176,7 +117,7 @@ func decodeToolArguments(raw string) map[string]interface{} {
 	return args
 }
 
-func mapToGatewayMessages(msgs []ChatMessage) []gatewayMessage {
+func mapToGatewayMessages(msgs []llm.ChatMessage) []gatewayMessage {
 	result := make([]gatewayMessage, len(msgs))
 	callNames := make(map[string]string)
 	for i, m := range msgs {
@@ -245,8 +186,8 @@ func contentToString(content interface{}) string {
 	}
 }
 
-func mapFromGatewayMessage(m gatewayMessage) ChatMessage {
-	msg := ChatMessage{
+func mapFromGatewayMessage(m gatewayMessage) llm.ChatMessage {
+	msg := llm.ChatMessage{
 		Role:       m.Role,
 		Content:    contentToString(m.Content),
 		Name:       m.Name,
@@ -254,11 +195,11 @@ func mapFromGatewayMessage(m gatewayMessage) ChatMessage {
 		ToolCallID: m.ToolCallID,
 	}
 	if len(m.ToolCalls) > 0 {
-		msg.ToolCalls = make([]ToolCall, len(m.ToolCalls))
+		msg.ToolCalls = make([]llm.ToolCall, len(m.ToolCalls))
 		for i, tc := range m.ToolCalls {
-			msg.ToolCalls[i] = ToolCall{
+			msg.ToolCalls[i] = llm.ToolCall{
 				ID: tc.ID,
-				Function: ToolFunction{
+				Function: llm.ToolFunction{
 					Name:         tc.Function.Name,
 					Arguments:    decodeToolArguments(tc.Function.Arguments),
 					RawArguments: tc.Function.Arguments,
@@ -315,7 +256,7 @@ func (e *embedHTTPError) Error() string {
 }
 func (e *embedHTTPError) HTTPStatusCode() int { return e.StatusCode }
 
-func (c *GatewayClient) doAsyncRequest(ctx context.Context, method, endpoint string, body []byte, sessionID string) (*http.Response, []byte, error) {
+func (c *Client) doAsyncRequest(ctx context.Context, method, endpoint string, body []byte, sessionID string) (*http.Response, []byte, error) {
 	if m := measurementFromContext(ctx); m != nil {
 		m.phase = "submit"
 		if method == http.MethodGet {
@@ -367,7 +308,7 @@ func decodeAsyncJob(rawBody []byte) (gatewayAsyncJob, error) {
 	return job, nil
 }
 
-func (c *GatewayClient) runAsync(ctx context.Context, submitPath string, payload []byte, sessionID string) (json.RawMessage, int, error) {
+func (c *Client) runAsync(ctx context.Context, submitPath string, payload []byte, sessionID string) (json.RawMessage, int, error) {
 	submitEndpoint := c.BaseURL + submitPath
 	resp, rawBody, err := c.doAsyncRequest(ctx, http.MethodPost, submitEndpoint, payload, sessionID)
 	if err != nil {
@@ -453,24 +394,38 @@ func (c *GatewayClient) runAsync(ctx context.Context, submitPath string, payload
 	}
 }
 
-// Embed submits text through Bifrost's async embeddings endpoint and polls for vectors.
-func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (_ *EmbedResponse, err error) {
-	ctx, complete := c.beginMeasurement(ctx, req.Model, "embedding", "async")
+// Embed submits text through sync /v1/embeddings first and falls back to
+// Bifrost async polling when the sync endpoint is unavailable.
+func (c *Client) Embed(ctx context.Context, req llm.EmbedRequest) (_ *llm.EmbedResponse, err error) {
+	ctx, complete := c.beginMeasurement(ctx, req.Model, "embedding", "sync")
 	defer func() { complete(err) }()
 	payloadBytes, err := json.Marshal(gatewayEmbeddingRequest{Model: req.Model, Input: req.Input})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
 	}
-	rawBody, _, err := c.runAsync(ctx, "/v1/async/embeddings", payloadBytes, "")
 	requestLog := c.requestLog(ctx, req.Model)
+	rawBody, status, err := c.postSync(ctx, "/v1/embeddings", payloadBytes, "")
 	if err != nil {
-		var httpErr *asyncHTTPError
-		if errors.As(err, &httpErr) {
-			measurementFromContext(ctx).httpStatus = httpErr.StatusCode
-			requestLog.Debug("provider.gateway.embed.http_error", "LLM gateway embedding HTTP failure", config.F("phase", "http"), config.ErrorField(httpErr))
-			return nil, &embedHTTPError{StatusCode: httpErr.StatusCode}
+		return nil, err
+	}
+	if status != http.StatusOK {
+		if status != http.StatusNotFound && status != http.StatusMethodNotAllowed && status != http.StatusNotImplemented && status != http.StatusAccepted {
+			if m := measurementFromContext(ctx); m != nil {
+				m.httpStatus = status
+			}
+			requestLog.Debug("provider.gateway.embed.http_error", "LLM gateway embedding HTTP failure", config.F("phase", "http"), config.F("http_status", status))
+			return nil, &embedHTTPError{StatusCode: status}
 		}
-		return nil, fmt.Errorf("LLM gateway async embed failed: %w", err)
+		rawBody, _, err = c.runAsync(ctx, "/v1/async/embeddings", payloadBytes, "")
+		if err != nil {
+			var httpErr *asyncHTTPError
+			if errors.As(err, &httpErr) {
+				measurementFromContext(ctx).httpStatus = httpErr.StatusCode
+				requestLog.Debug("provider.gateway.embed.http_error", "LLM gateway embedding HTTP failure", config.F("phase", "http"), config.ErrorField(httpErr))
+				return nil, &embedHTTPError{StatusCode: httpErr.StatusCode}
+			}
+			return nil, fmt.Errorf("LLM gateway async embed failed: %w", err)
+		}
 	}
 
 	var gatewayResp gatewayEmbeddingResponse
@@ -492,12 +447,48 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (_ *EmbedRe
 	for _, datum := range gatewayResp.Data {
 		embeddings = append(embeddings, datum.Embedding)
 	}
-	return &EmbedResponse{Model: gatewayResp.Model, Embeddings: embeddings}, nil
+	return &llm.EmbedResponse{Model: gatewayResp.Model, Embeddings: embeddings}, nil
 }
 
-// Chat streams synchronous requests and polls Bifrost async jobs for non-streaming requests.
-func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCallback func(chunk ChatMessage)) (_ *ChatResponse, err error) {
-	transport := "async"
+func (c *Client) postSync(ctx context.Context, path string, payloadBytes []byte, sessionID string) (rawBody []byte, status int, err error) {
+	endpoint := c.BaseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to build embedding request: %w", err)
+	}
+	c.applyHeaders(req)
+	applySessionHeader(req, sessionID)
+	if m := measurementFromContext(ctx); m != nil {
+		m.phase = "submit"
+		m.submitted = ctx.Err() == nil && req.URL.Host != "" && (req.URL.Scheme == "http" || req.URL.Scheme == "https")
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		return nil, 0, fmt.Errorf("LLM gateway embedding request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if m := measurementFromContext(ctx); m != nil {
+		m.httpStatus = resp.StatusCode
+		m.phase = "read"
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read embedding response: %w", err)
+	}
+	if len(body) > 2<<20 {
+		return nil, resp.StatusCode, fmt.Errorf("embedding response oversize")
+	}
+	return body, resp.StatusCode, nil
+}
+
+// Chat sends OpenAI-compatible chat requests. Streaming uses SSE; non-streaming
+// tries sync POST /v1/chat/completions first and falls back to Bifrost async
+// polling only when the sync endpoint is unavailable.
+func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallback func(chunk llm.ChatMessage)) (_ *llm.ChatResponse, err error) {
+	transport := "sync"
 	if req.Stream {
 		transport = "streaming"
 	}
@@ -508,52 +499,144 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 		sessionID = sessionIDFromContext(ctx)
 	}
 	gatewayReq := gatewayChatRequest{Model: req.Model, User: req.User, Messages: mapToGatewayMessages(req.Messages), Tools: req.Tools, ToolChoice: req.ToolChoice, ParallelToolCalls: req.ParallelToolCalls, Temperature: req.Temperature, TopP: req.TopP, FrequencyPenalty: req.FrequencyPenalty, PresencePenalty: req.PresencePenalty, Seed: req.Seed, Stop: req.Stop, MaxTokens: req.MaxTokens, ResponseFormat: responseFormat(req.Format), Stream: req.Stream}
-	payloadBytes, err := json.Marshal(gatewayReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal chat request: %w", err)
+	if req.Stream {
+		gatewayReq.StreamOptions = &gatewayStreamOptions{IncludeUsage: true}
 	}
 
 	startedAt := time.Now()
 	if req.Stream {
-		measurementFromContext(ctx).phase = "submit"
-		endpoint := fmt.Sprintf("%s/v1/chat/completions", c.BaseURL)
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create chat stream request: %w", err)
-		}
-		c.applyHeaders(httpReq)
-		applySessionHeader(httpReq, sessionID)
-		measurementFromContext(ctx).submitted = ctx.Err() == nil && httpReq.URL.Host != "" && (httpReq.URL.Scheme == "http" || httpReq.URL.Scheme == "https")
-		resp, err := c.HTTPClient.Do(httpReq)
-		if err != nil {
-			return nil, fmt.Errorf("LLM gateway chat stream request failed: %w", err)
-		}
-		defer resp.Body.Close()
-		if chatStreamCallback == nil {
-			chatStreamCallback = func(ChatMessage) {}
-		}
-		chatResp, streamErr := c.readChatStream(ctx, resp, req.Model, startedAt, chatStreamCallback)
-		if streamErr != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return chatResp, streamErr
+		return c.doStreamChat(ctx, gatewayReq, req.Model, sessionID, startedAt, chatStreamCallback)
 	}
-	rawBody, _, err := c.runAsync(ctx, "/v1/async/chat/completions", payloadBytes, sessionID)
-	if err != nil {
-		var httpErr *asyncHTTPError
-		if errors.As(err, &httpErr) {
-			return nil, &ChatHTTPError{StatusCode: httpErr.StatusCode, Body: httpErr.Body}
-		}
-		return nil, fmt.Errorf("LLM gateway async chat failed: %w", err)
-	}
-	return c.decodeChatResponse(ctx, rawBody, req.Model, startedAt)
+	return c.doSyncChatWithFallback(ctx, gatewayReq, req.Model, sessionID, startedAt)
 }
 
-func (c *GatewayClient) requestLog(ctx context.Context, model string) *config.Logger {
+func (c *Client) doStreamChat(ctx context.Context, gatewayReq gatewayChatRequest, model, sessionID string, startedAt time.Time, chatStreamCallback func(chunk llm.ChatMessage)) (*llm.ChatResponse, error) {
+	payloadBytes, err := json.Marshal(gatewayReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal chat request: %w", err)
+	}
+	measurementFromContext(ctx).phase = "submit"
+	endpoint := fmt.Sprintf("%s/v1/chat/completions", c.BaseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create chat stream request: %w", err)
+	}
+	c.applyHeaders(httpReq)
+	applySessionHeader(httpReq, sessionID)
+	measurementFromContext(ctx).submitted = ctx.Err() == nil && httpReq.URL.Host != "" && (httpReq.URL.Scheme == "http" || httpReq.URL.Scheme == "https")
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("LLM gateway chat stream request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if chatStreamCallback == nil {
+		chatStreamCallback = func(llm.ChatMessage) {}
+	}
+	chatResp, streamErr := c.readChatStream(ctx, resp, model, startedAt, chatStreamCallback)
+	if streamErr != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return chatResp, streamErr
+}
+
+// doSyncChatWithFallback tries sync chat, retries once on provider-specific
+// field aliases, and falls back to async polling for Bifrost-style gateways.
+func (c *Client) doSyncChatWithFallback(ctx context.Context, gatewayReq gatewayChatRequest, model, sessionID string, startedAt time.Time) (*llm.ChatResponse, error) {
+	rawBody, status, bodySnippet, err := c.postSyncChat(ctx, gatewayReq, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusOK {
+		return c.decodeChatResponse(ctx, rawBody, model, startedAt)
+	}
+	// Alias retry: some providers only accept max_completion_tokens.
+	if status == http.StatusBadRequest && gatewayReq.MaxTokens != nil && gatewayReq.MaxCompletionTokens == nil && containsFold(bodySnippet, "max_completion_tokens") {
+		gatewayReq.MaxCompletionTokens = gatewayReq.MaxTokens
+		gatewayReq.MaxTokens = nil
+		rawBody, status, bodySnippet, err = c.postSyncChat(ctx, gatewayReq, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if status == http.StatusOK {
+			return c.decodeChatResponse(ctx, rawBody, model, startedAt)
+		}
+	}
+	// Alias retry: older servers reject parallel_tool_calls.
+	if status == http.StatusBadRequest && gatewayReq.ParallelToolCalls != nil && containsFold(bodySnippet, "parallel_tool_calls") {
+		gatewayReq.ParallelToolCalls = nil
+		rawBody, status, bodySnippet, err = c.postSyncChat(ctx, gatewayReq, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if status == http.StatusOK {
+			return c.decodeChatResponse(ctx, rawBody, model, startedAt)
+		}
+	}
+	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented || status == http.StatusAccepted {
+		payloadBytes, err := json.Marshal(gatewayReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal chat request: %w", err)
+		}
+		rawBody, _, err := c.runAsync(ctx, "/v1/async/chat/completions", payloadBytes, sessionID)
+		if err != nil {
+			var httpErr *asyncHTTPError
+			if errors.As(err, &httpErr) {
+				return nil, &llm.ChatHTTPError{StatusCode: httpErr.StatusCode, Body: httpErr.Body}
+			}
+			return nil, fmt.Errorf("LLM gateway async chat failed: %w", err)
+		}
+		return c.decodeChatResponse(ctx, rawBody, model, startedAt)
+	}
+	return nil, &llm.ChatHTTPError{StatusCode: status, Body: bodySnippet}
+}
+
+func containsFold(haystack, needle string) bool {
+	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
+}
+
+func (c *Client) postSyncChat(ctx context.Context, gatewayReq gatewayChatRequest, sessionID string) (rawBody []byte, status int, snippet string, err error) {
+	payloadBytes, err := json.Marshal(gatewayReq)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to marshal chat request: %w", err)
+	}
+	endpoint := fmt.Sprintf("%s/v1/chat/completions", c.BaseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to create chat request: %w", err)
+	}
+	c.applyHeaders(httpReq)
+	applySessionHeader(httpReq, sessionID)
+	if m := measurementFromContext(ctx); m != nil {
+		m.phase = "submit"
+		m.submitted = ctx.Err() == nil && httpReq.URL.Host != "" && (httpReq.URL.Scheme == "http" || httpReq.URL.Scheme == "https")
+	}
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, "", ctx.Err()
+		}
+		return nil, 0, "", fmt.Errorf("LLM gateway chat request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if m := measurementFromContext(ctx); m != nil {
+		m.httpStatus = resp.StatusCode
+		m.phase = "read"
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("failed to read chat response: %w", err)
+	}
+	if len(body) > 2<<20 {
+		return nil, resp.StatusCode, "", &llm.ChatHTTPError{StatusCode: resp.StatusCode, Body: "response oversize"}
+	}
+	return body, resp.StatusCode, bodySnippet(body), nil
+}
+
+func (c *Client) requestLog(ctx context.Context, model string) *config.Logger {
 	return c.log.Server("provider.gateway", append(requestctx.LogFields(ctx), config.F("model", model))...)
 }
 
-func (c *GatewayClient) decodeChatResponse(ctx context.Context, rawBody []byte, model string, startedAt time.Time) (*ChatResponse, error) {
+func (c *Client) decodeChatResponse(ctx context.Context, rawBody []byte, model string, startedAt time.Time) (*llm.ChatResponse, error) {
 	if m := measurementFromContext(ctx); m != nil {
 		m.phase = "decode"
 	}
@@ -580,22 +663,32 @@ func (c *GatewayClient) decodeChatResponse(ctx context.Context, rawBody []byte, 
 		msg.Role = "assistant"
 	}
 	durationMS := time.Since(startedAt).Milliseconds()
+	doneReason := normalizeFinishReason(choice.FinishReason)
 	if m := measurementFromContext(ctx); m != nil {
-		m.doneReason = choice.FinishReason
+		m.doneReason = doneReason
 	}
 
-	return &ChatResponse{
+	return &llm.ChatResponse{
 		Model:            firstNonEmpty(gatewayResp.Model, model),
 		Message:          msg,
 		PromptTokens:     gatewayResp.Usage.PromptTokens,
 		CompletionTokens: gatewayResp.Usage.CompletionTokens,
 		TotalTokens:      gatewayResp.Usage.TotalTokens,
 		DurationMS:       durationMS,
-		DoneReason:       choice.FinishReason,
+		DoneReason:       doneReason,
 	}, nil
 }
 
-func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response, model string, startedAt time.Time, chatStreamCallback func(chunk ChatMessage)) (*ChatResponse, error) {
+func normalizeFinishReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "function_call":
+		return "tool_calls"
+	default:
+		return strings.TrimSpace(reason)
+	}
+}
+
+func (c *Client) readChatStream(ctx context.Context, resp *http.Response, model string, startedAt time.Time, chatStreamCallback func(chunk llm.ChatMessage)) (*llm.ChatResponse, error) {
 	requestLog := c.requestLog(ctx, model)
 	m := measurementFromContext(ctx)
 	if m == nil {
@@ -610,12 +703,12 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 			return nil, fmt.Errorf("failed to read chat stream response body: %w", readErr)
 		}
 		snippet := bodySnippet(rawBody)
-		err := &ChatHTTPError{StatusCode: resp.StatusCode, Body: snippet}
+		err := &llm.ChatHTTPError{StatusCode: resp.StatusCode, Body: snippet}
 		requestLog.Debug("provider.gateway.chat.http_error", "LLM gateway chat HTTP failure", config.F("phase", "http"), config.ErrorField(err))
 		return nil, err
 	}
 
-	var final ChatResponse
+	var final llm.ChatResponse
 	final.Model = model
 	toolParts := map[int]*gatewayStreamToolCall{}
 	scanner := bufio.NewScanner(resp.Body)
@@ -660,9 +753,9 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 		if !ok {
 			continue
 		}
-		final.DoneReason = choice.FinishReason
+		final.DoneReason = normalizeFinishReason(choice.FinishReason)
 		if choice.FinishReason != "" {
-			m.doneReason = choice.FinishReason
+			m.doneReason = normalizeFinishReason(choice.FinishReason)
 		}
 		content := contentToString(choice.Delta.Content)
 		thinking := firstNonEmpty(choice.Delta.ReasoningContent, choice.Delta.Thinking, choice.Delta.Reasoning)
@@ -673,17 +766,22 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 		if thinking != "" {
 			final.Message.Role = "assistant"
 			final.Message.Thinking += thinking
-			chatStreamCallback(ChatMessage{Role: "assistant", Thinking: thinking})
+			chatStreamCallback(llm.ChatMessage{Role: "assistant", Thinking: thinking})
 		}
 		if content != "" {
 			final.Message.Role = "assistant"
 			final.Message.Content += content
-			chatStreamCallback(ChatMessage{Role: "assistant", Content: content})
+			chatStreamCallback(llm.ChatMessage{Role: "assistant", Content: content})
 		}
 		for _, tc := range choice.Delta.ToolCalls {
 			idx := tc.Index
 			part, ok := toolParts[idx]
 			if !ok {
+				part = &gatewayStreamToolCall{}
+				toolParts[idx] = part
+			} else if idx == 0 && tc.Function.Name != "" && part.Name != "" && tc.Function.Name != part.Name {
+				// Some providers omit the index: disambiguate concurrent calls by name.
+				idx = len(toolParts)
 				part = &gatewayStreamToolCall{}
 				toolParts[idx] = part
 			}
@@ -713,7 +811,7 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 			if part == nil || part.Name == "" {
 				continue
 			}
-			final.Message.ToolCalls = append(final.Message.ToolCalls, ToolCall{ID: firstNonEmpty(part.ID, fmt.Sprintf("call_stream_%d", i+1)), Function: ToolFunction{Name: part.Name, Arguments: decodeToolArguments(part.Arguments), RawArguments: part.Arguments}})
+			final.Message.ToolCalls = append(final.Message.ToolCalls, llm.ToolCall{ID: firstNonEmpty(part.ID, fmt.Sprintf("call_stream_%d", i+1)), Function: llm.ToolFunction{Name: part.Name, Arguments: decodeToolArguments(part.Arguments), RawArguments: part.Arguments}})
 		}
 	}
 	final.DurationMS = time.Since(startedAt).Milliseconds()

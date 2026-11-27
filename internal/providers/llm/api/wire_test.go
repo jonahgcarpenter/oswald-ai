@@ -1,17 +1,19 @@
-package llm
+package api
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 func TestMapToGatewayMessagesSerializesImagesAsDataURLs(t *testing.T) {
-	messages := mapToGatewayMessages([]ChatMessage{
+	messages := mapToGatewayMessages([]llm.ChatMessage{
 		{
 			Role:    "user",
 			Content: "Analyze this image and describe what you see.",
-			Images: []InputImage{
+			Images: []llm.InputImage{
 				{MimeType: "image/jpeg", Data: "abc123"},
 			},
 		},
@@ -59,8 +61,8 @@ func TestMapToGatewayMessagesSerializesImagesAsDataURLs(t *testing.T) {
 
 func TestGatewayAlignsBridgeResultWireNameWithoutMutation(t *testing.T) {
 	const content = "<untrusted_tool_result source=\"mcp__github__create_issue\">\ndata\n</untrusted_tool_result>"
-	input := []ChatMessage{
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_3", Function: ToolFunction{Name: "tool_call"}}}},
+	input := []llm.ChatMessage{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_3", Function: llm.ToolFunction{Name: "tool_call"}}}},
 		{Role: "tool", ToolName: "mcp__github__create_issue", ToolCallID: "call_3", Content: content},
 	}
 	wire := mapToGatewayMessages(input)
@@ -70,10 +72,10 @@ func TestGatewayAlignsBridgeResultWireNameWithoutMutation(t *testing.T) {
 }
 
 func TestMapToGatewayMessagesKeepsMultimodalToolResultsCorrelated(t *testing.T) {
-	messages := mapToGatewayMessages([]ChatMessage{
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "text-call", Function: ToolFunction{Name: "text_tool"}}, {ID: "vision-call", Function: ToolFunction{Name: "vision_analyze"}}}},
+	messages := mapToGatewayMessages([]llm.ChatMessage{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "text-call", Function: llm.ToolFunction{Name: "text_tool"}}, {ID: "vision-call", Function: llm.ToolFunction{Name: "vision_analyze"}}}},
 		{Role: "tool", ToolCallID: "text-call", Content: "text result"},
-		{Role: "tool", ToolCallID: "vision-call", Content: "Question: Inspect", Images: []InputImage{{MimeType: "image/png", Data: "abc123", Geometry: &ImageGeometry{SourceWidth: 100, SourceHeight: 80, Width: 100, Height: 80}}}},
+		{Role: "tool", ToolCallID: "vision-call", Content: "Question: Inspect", Images: []llm.InputImage{{MimeType: "image/png", Data: "abc123", Geometry: &llm.ImageGeometry{SourceWidth: 100, SourceHeight: 80, Width: 100, Height: 80}}}},
 	})
 	if len(messages) != 3 || messages[1].Content != "text result" || messages[1].ToolCallID != "text-call" || messages[2].Role != "tool" || messages[2].ToolCallID != "vision-call" {
 		t.Fatal("tool result correlation or text-only result changed")

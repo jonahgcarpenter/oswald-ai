@@ -5,9 +5,10 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/api"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/claude"
 )
 
 // subscriptionClientFor builds the chat client for one provider endpoint.
@@ -30,7 +31,7 @@ func subscriptionClientFor(profileRoot, provider string, endpoint config.Provide
 		}
 		return client
 	default:
-		return llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, virtualKey, log)
+		return api.NewClient(endpoint.URL, endpoint.APIKey, virtualKey, log)
 	}
 }
 
@@ -52,7 +53,7 @@ func subscriptionListModels(ctx context.Context, profileRoot, provider string, e
 		}
 		return claude.StaticModels(), nil
 	default:
-		return llm.NewGatewayClient(endpoint.URL, endpoint.APIKey, virtualKey, log).ListModels(ctx)
+		return api.NewClient(endpoint.URL, endpoint.APIKey, virtualKey, log).ListModels(ctx)
 	}
 }
 

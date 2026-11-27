@@ -20,6 +20,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/api"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
@@ -148,7 +149,7 @@ func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ai := agent.NewAgent(llm.NewGatewayClient(model.URL, "", "", log), reg, "test-model", "test-provider", soul.NewProfileStore(dir, "default", soulPath), memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(api.NewClient(model.URL, "", "", log), reg, "test-model", "test-provider", soul.NewProfileStore(dir, "default", soulPath), memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	commandService, err := commands.NewServiceWithCommands()
 	if err != nil {

@@ -20,8 +20,8 @@ func TestProductionLoggingContract(t *testing.T) {
 	// Exact forwarding expressions, not blanket file exceptions. The worker
 	// wrapper's callers are checked below; the other sites select fixed literals.
 	reviewedEvents := map[string]string{
-		"internal/providers/llm/telemetry.go#beginMeasurement": "event",
-		"internal/providers/web/telemetry.go#BeginSearch":      "event",
+		"internal/providers/llm/api/telemetry.go#beginMeasurement": "event",
+		"internal/providers/web/telemetry.go#BeginSearch":          "event",
 		// logFailure forwards fixed source literals supplied by its callers.
 		"internal/app/startup/serve.go#logFailure": "event",
 	}

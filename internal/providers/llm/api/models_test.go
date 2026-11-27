@@ -1,4 +1,4 @@
-package llm
+package api
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 func TestListModelsReturnsEntries(t *testing.T) {
@@ -36,13 +38,13 @@ func TestListModelsReturnsEntries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "api-key", "virtual-key", nil)
+	client := NewClient(server.URL, "api-key", "virtual-key", nil)
 	models, err := client.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
 
-	want := []ModelEntry{
+	want := []llm.ModelEntry{
 		{ID: "model-alpha", Window: 128000},
 		{ID: "model-beta"},
 		{ID: "model-zero"},
@@ -65,12 +67,12 @@ func TestListModelsAcceptsNestedContextLength(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", nil)
+	client := NewClient(server.URL, "", "", nil)
 	models, err := client.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
-	if len(models) != 1 || models[0] != (ModelEntry{ID: "model-nested", Window: 200000}) {
+	if len(models) != 1 || models[0] != (llm.ModelEntry{ID: "model-nested", Window: 200000}) {
 		t.Fatalf("models = %+v", models)
 	}
 }
@@ -85,12 +87,12 @@ func TestListModelsAcceptsLimitContext(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", nil)
+	client := NewClient(server.URL, "", "", nil)
 	models, err := client.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
-	want := []ModelEntry{
+	want := []llm.ModelEntry{
 		{ID: "muse-spark-1.3-contributor", Window: 1048576},
 		{ID: "model-top-context", Window: 64000},
 		{ID: "model-limits", Window: 32000},
@@ -114,7 +116,7 @@ func TestListModelsHTTPStatusErrors(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewGatewayClient(server.URL, "api-key", "virtual-key", nil)
+			client := NewClient(server.URL, "api-key", "virtual-key", nil)
 			_, err := client.ListModels(context.Background())
 			if err == nil {
 				t.Fatal("ListModels succeeded on a non-success status")
@@ -135,7 +137,7 @@ func TestListModelsMalformedBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "api-key", "virtual-key", nil)
+	client := NewClient(server.URL, "api-key", "virtual-key", nil)
 	_, err := client.ListModels(context.Background())
 	if !errors.Is(err, errModelsListMalformed) {
 		t.Fatalf("error = %v, want errModelsListMalformed", err)
@@ -148,7 +150,7 @@ func TestListModelsOversizeBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "api-key", "virtual-key", nil)
+	client := NewClient(server.URL, "api-key", "virtual-key", nil)
 	_, err := client.ListModels(context.Background())
 	if !errors.Is(err, errModelsListOversize) {
 		t.Fatalf("error = %v, want errModelsListOversize", err)
@@ -163,7 +165,7 @@ func TestListModelsContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "api-key", "virtual-key", nil)
+	client := NewClient(server.URL, "api-key", "virtual-key", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -183,7 +185,7 @@ func TestListModelsTransportErrorIsLaundered(t *testing.T) {
 	serverURL := server.URL
 	server.Close()
 
-	client := NewGatewayClient(serverURL, "api-key", "virtual-key", nil)
+	client := NewClient(serverURL, "api-key", "virtual-key", nil)
 	_, err := client.ListModels(context.Background())
 	if !errors.Is(err, errModelsListUnavailable) {
 		t.Fatalf("error = %v, want errModelsListUnavailable", err)
@@ -199,7 +201,7 @@ func TestListModelsNilLogger(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "api-key", "", nil)
+	client := NewClient(server.URL, "api-key", "", nil)
 	models, err := client.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels with nil logger: %v", err)
@@ -225,7 +227,7 @@ func TestListModelsEntryCap(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", nil)
+	client := NewClient(server.URL, "", "", nil)
 	models, err := client.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)

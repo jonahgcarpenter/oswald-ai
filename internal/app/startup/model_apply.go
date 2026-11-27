@@ -5,7 +5,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/api"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 )
 
@@ -66,7 +66,7 @@ func buildModelApplier(handles map[string]modelRoutingHandles, rootLog *config.L
 				}
 				continue
 			}
-			client := llm.NewGatewayClient(nextCfg.LLMGatewayURL, nextCfg.LLMGatewayAPIKey, nextCfg.LLMGatewayVirtualKey, rootLog)
+			client := api.NewClient(nextCfg.LLMGatewayURL, nextCfg.LLMGatewayAPIKey, nextCfg.LLMGatewayVirtualKey, rootLog)
 			summarizer, err := compaction.NewSummarizer(client, nextCfg.LLMGatewayModel)
 			if err != nil {
 				log.Warn("config.reload.apply_failed", "failed to apply live model routing; keeping previous runtime view", config.F("profile", name), config.ErrorField(err))

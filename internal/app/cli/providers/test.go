@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/claude"
 )
 
 func testCmd(t *target, args []string, stdout, stderr io.Writer) int {

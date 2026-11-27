@@ -1,4 +1,4 @@
-package llm
+package api
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 const reflectedSoulCanary = "SOUL_CANARY_DO_NOT_LOG_OR_RETURN"
@@ -52,10 +53,10 @@ func TestGatewayClientPostsImageInsideCorrelatedToolResult(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"job-vision","status":"pending"}`))
 	}))
 	defer server.Close()
-	client := newTestGatewayClient(server.URL, "test-key", "test-virtual-key", config.NewLogger(config.LevelError))
-	_, err := client.Chat(context.Background(), ChatRequest{Model: "test-model", Messages: []ChatMessage{
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "vision", Function: ToolFunction{Name: "vision_analyze"}}}},
-		{Role: "tool", ToolCallID: "vision", Content: "Question: Inspect", Images: []InputImage{{MimeType: "image/png", Data: "abc123"}}},
+	client := newTestClient(server.URL, "test-key", "test-virtual-key", config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), llm.ChatRequest{Model: "test-model", Messages: []llm.ChatMessage{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "vision", Function: llm.ToolFunction{Name: "vision_analyze"}}}},
+		{Role: "tool", ToolCallID: "vision", Content: "Question: Inspect", Images: []llm.InputImage{{MimeType: "image/png", Data: "abc123"}}},
 	}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +65,7 @@ func TestGatewayClientPostsImageInsideCorrelatedToolResult(t *testing.T) {
 
 func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/async/chat/completions" && r.URL.Path != "/v1/async/chat/completions/job-1" {
+		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer api-key" {
@@ -86,20 +87,19 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 					t.Fatalf("ordinary request included %s: %+v", field, body)
 				}
 			}
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"id":"job-1","status":"pending","created_at":"2026-01-01T00:00:00Z"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"id":"job-1","status":"completed","status_code":200,"result":{
+			_, _ = w.Write([]byte(`{
 			"model":"served-model",
 			"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}],
 			"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
-		}}`))
+		}`))
+			return
+		}
+		t.Fatalf("unexpected method %s", r.Method)
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL+"/", "api-key", "virtual-key", config.NewLogger(config.LevelError))
-	resp, err := client.Chat(context.Background(), ChatRequest{Model: "test-model", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}, nil)
+	client := newTestClient(server.URL+"/", "api-key", "virtual-key", config.NewLogger(config.LevelError))
+	resp, err := client.Chat(context.Background(), llm.ChatRequest{Model: "test-model", Messages: []llm.ChatMessage{{Role: "user", Content: "hi"}}}, nil)
 	if err != nil {
 		t.Fatalf("Chat returned error: %v", err)
 	}
@@ -125,8 +125,8 @@ func TestGatewayClientChatSendsSessionHeaderAndUA(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := newTestGatewayClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
-		if _, err := client.Chat(context.Background(), ChatRequest{Model: "m", Stream: true, SessionID: "sess-123"}, nil); err != nil {
+		client := newTestClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
+		if _, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m", Stream: true, SessionID: "sess-123"}, nil); err != nil {
 			t.Fatalf("Chat: %v", err)
 		}
 	})
@@ -148,8 +148,8 @@ func TestGatewayClientChatSendsSessionHeaderAndUA(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := newTestGatewayClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
-		if _, err := client.Chat(context.Background(), ChatRequest{Model: "m", SessionID: "sess-456"}, nil); err != nil {
+		client := newTestClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
+		if _, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m", SessionID: "sess-456"}, nil); err != nil {
 			t.Fatalf("Chat: %v", err)
 		}
 	})
@@ -165,8 +165,8 @@ func TestGatewayClientChatSendsSessionHeaderAndUA(t *testing.T) {
 		defer server.Close()
 
 		ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{SessionID: "ctx-session"})
-		client := newTestGatewayClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
-		if _, err := client.Chat(ctx, ChatRequest{Model: "m", Stream: true}, nil); err != nil {
+		client := newTestClient(server.URL, "api-key", "", config.NewLogger(config.LevelError))
+		if _, err := client.Chat(ctx, llm.ChatRequest{Model: "m", Stream: true}, nil); err != nil {
 			t.Fatalf("Chat: %v", err)
 		}
 	})
@@ -179,10 +179,10 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 			return
 		}
 		var body struct {
-			Tools             []Tool     `json:"tools"`
-			ToolChoice        ToolChoice `json:"tool_choice"`
-			ParallelToolCalls *bool      `json:"parallel_tool_calls"`
-			Temperature       *float64   `json:"temperature"`
+			Tools             []llm.Tool     `json:"tools"`
+			ToolChoice        llm.ToolChoice `json:"tool_choice"`
+			ParallelToolCalls *bool          `json:"parallel_tool_calls"`
+			Temperature       *float64       `json:"temperature"`
 		}
 		payload, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -198,7 +198,7 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 		if _, exists := fields["max_tokens"]; exists {
 			t.Fatal("forced tool request included max_tokens")
 		}
-		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "batch_submit" || body.ToolChoice != ToolChoiceRequired || body.ParallelToolCalls == nil || *body.ParallelToolCalls {
+		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "batch_submit" || body.ToolChoice != llm.ToolChoiceRequired || body.ParallelToolCalls == nil || *body.ParallelToolCalls {
 			t.Fatalf("unexpected forced tool request: %+v", body)
 		}
 		if body.Temperature == nil || *body.Temperature != 0 {
@@ -223,17 +223,17 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 	maximum := 5
 	minimumImportance, maximumImportance := 1.0, 5.0
 	additional := false
-	tool := Tool{Type: "function", Function: ToolDefinition{Name: "batch_submit", Parameters: ToolParameters{
-		Type: "object", Properties: map[string]ToolParameterProperty{"items": {
-			Type: "array", MaxItems: &maximum, Items: &ToolParameterProperty{Type: "object", AdditionalProperties: &additional, Properties: map[string]ToolParameterProperty{
+	tool := llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: "batch_submit", Parameters: llm.ToolParameters{
+		Type: "object", Properties: map[string]llm.ToolParameterProperty{"items": {
+			Type: "array", MaxItems: &maximum, Items: &llm.ToolParameterProperty{Type: "object", AdditionalProperties: &additional, Properties: map[string]llm.ToolParameterProperty{
 				"importance": {Type: "integer", Minimum: &minimumImportance, Maximum: &maximumImportance},
 			}},
 		}},
 	}}}
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	parallelToolCalls := false
 	temperature := 0.0
-	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature}, nil)
+	_, err := client.Chat(context.Background(), llm.ChatRequest{Model: "model", Tools: []llm.Tool{tool}, ToolChoice: llm.ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,8 +253,8 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	if _, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	if _, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("Chat HTTP error = %v, want HTTP 502", err)
 	}
 
@@ -262,7 +262,7 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 		req.Header.Set("x-test-case", "bad-json")
 		return http.DefaultTransport.RoundTrip(req)
 	})
-	if _, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "decode LLM gateway async response") {
+	if _, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "decode LLM gateway async response") {
 		t.Fatalf("Chat decode error = %v, want async decode error", err)
 	}
 }
@@ -285,8 +285,8 @@ func TestGatewayClientAsyncChatPollsUntilCompleted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	resp, err := client.Chat(context.Background(), ChatRequest{Model: "model"}, nil)
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	resp, err := client.Chat(context.Background(), llm.ChatRequest{Model: "model"}, nil)
 	if err != nil || resp.Message.Content != "complete" || polls != 2 {
 		t.Fatalf("response=%+v polls=%d err=%v", resp, polls, err)
 	}
@@ -303,9 +303,9 @@ func TestGatewayClientAsyncChatMapsTerminalFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	_, err := client.Chat(context.Background(), ChatRequest{Model: "model"}, nil)
-	var httpErr *ChatHTTPError
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), llm.ChatRequest{Model: "model"}, nil)
+	var httpErr *llm.ChatHTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("error=%T %v, want typed 429", err, err)
 	}
@@ -322,8 +322,8 @@ func TestGatewayClientAsyncChatHonorsCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	_, err := client.Chat(ctx, ChatRequest{Model: "model"}, nil)
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	_, err := client.Chat(ctx, llm.ChatRequest{Model: "model"}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v, want context cancellation", err)
 	}
@@ -336,11 +336,11 @@ func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	_, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
-	var httpErr *ChatHTTPError
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m"}, nil)
+	var httpErr *llm.ChatHTTPError
 	if !errors.As(err, &httpErr) {
-		t.Fatalf("Chat error = %T %v, want *ChatHTTPError", err, err)
+		t.Fatalf("Chat error = %T %v, want *llm.ChatHTTPError", err, err)
 	}
 	if httpErr.StatusCode != http.StatusInternalServerError || !strings.Contains(httpErr.Body, "XML syntax error") || !strings.Contains(httpErr.Body, reflectedSoulCanary) {
 		t.Fatalf("unexpected typed error: %+v", httpErr)
@@ -354,7 +354,7 @@ func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
 			t.Fatalf("%s exposed reflected provider content: %q", label, text)
 		}
 	}
-	if !IsTemporaryOllamaToolParserError(err) {
+	if !llm.IsTemporaryOllamaToolParserError(err) {
 		t.Fatalf("expected temporary parser error classification: %v", err)
 	}
 }
@@ -364,8 +364,8 @@ func TestPermanentChatProviderErrorClassification(t *testing.T) {
 		status int
 		want   bool
 	}{{http.StatusBadRequest, true}, {http.StatusUnauthorized, true}, {http.StatusNotFound, true}, {http.StatusRequestTimeout, false}, {http.StatusTooEarly, false}, {http.StatusTooManyRequests, false}, {http.StatusInternalServerError, false}} {
-		err := &ChatHTTPError{StatusCode: test.status, Body: "provider content"}
-		if got := IsPermanentChatProviderError(err); got != test.want {
+		err := &llm.ChatHTTPError{StatusCode: test.status, Body: "provider content"}
+		if got := llm.IsPermanentChatProviderError(err); got != test.want {
 			t.Fatalf("status=%d permanent=%v want=%v", test.status, got, test.want)
 		}
 	}
@@ -375,15 +375,15 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 	tests := []struct {
 		name    string
 		handler http.HandlerFunc
-		call    func(*GatewayClient) error
+		call    func(*Client) error
 	}{
 		{
 			name: "chat response error",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"message":"%s"}}`, reflectedSoulCanary)))
 			},
-			call: func(client *GatewayClient) error {
-				_, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
+			call: func(client *Client) error {
+				_, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m"}, nil)
 				return err
 			},
 		},
@@ -393,8 +393,8 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte(fmt.Sprintf("data: {\"error\":{\"message\":%q}}\n\n", reflectedSoulCanary)))
 			},
-			call: func(client *GatewayClient) error {
-				_, err := client.Chat(context.Background(), ChatRequest{Model: "m", Stream: true}, func(ChatMessage) {})
+			call: func(client *Client) error {
+				_, err := client.Chat(context.Background(), llm.ChatRequest{Model: "m", Stream: true}, func(llm.ChatMessage) {})
 				return err
 			},
 		},
@@ -404,8 +404,8 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 				w.WriteHeader(http.StatusBadGateway)
 				_, _ = w.Write([]byte(reflectedSoulCanary))
 			},
-			call: func(client *GatewayClient) error {
-				_, err := client.Embed(context.Background(), EmbedRequest{Model: "m", Input: "input"})
+			call: func(client *Client) error {
+				_, err := client.Embed(context.Background(), llm.EmbedRequest{Model: "m", Input: "input"})
 				return err
 			},
 		},
@@ -414,8 +414,8 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 			handler: func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"message":"%s"}}`, reflectedSoulCanary)))
 			},
-			call: func(client *GatewayClient) error {
-				_, err := client.Embed(context.Background(), EmbedRequest{Model: "m", Input: "input"})
+			call: func(client *Client) error {
+				_, err := client.Embed(context.Background(), llm.EmbedRequest{Model: "m", Input: "input"})
 				return err
 			},
 		},
@@ -427,7 +427,7 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 			defer server.Close()
 			var err error
 			logs := captureLogs(t, func(log *config.Logger) {
-				client := newTestGatewayClient(server.URL, "", "", log)
+				client := newTestClient(server.URL, "", "", log)
 				err = tt.call(client)
 			})
 			if err == nil {
@@ -461,16 +461,16 @@ func TestTemporaryOllamaToolParserErrorClassification(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "element type", err: &ChatHTTPError{StatusCode: 500, Body: `expected element type <function> but have <parameter>`}, want: true},
-		{name: "xml syntax", err: &ChatHTTPError{StatusCode: 500, Body: `XML syntax error on line 7: unexpected EOF`}, want: true},
-		{name: "unrelated 500", err: &ChatHTTPError{StatusCode: 500, Body: `out of memory`}, want: false},
-		{name: "wrong status", err: &ChatHTTPError{StatusCode: 400, Body: `XML syntax error: unexpected EOF`}, want: false},
+		{name: "element type", err: &llm.ChatHTTPError{StatusCode: 500, Body: `expected element type <function> but have <parameter>`}, want: true},
+		{name: "xml syntax", err: &llm.ChatHTTPError{StatusCode: 500, Body: `XML syntax error on line 7: unexpected EOF`}, want: true},
+		{name: "unrelated 500", err: &llm.ChatHTTPError{StatusCode: 500, Body: `out of memory`}, want: false},
+		{name: "wrong status", err: &llm.ChatHTTPError{StatusCode: 400, Body: `XML syntax error: unexpected EOF`}, want: false},
 		{name: "ordinary error", err: errors.New("XML syntax error: unexpected EOF"), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsTemporaryOllamaToolParserError(tt.err); got != tt.want {
-				t.Fatalf("IsTemporaryOllamaToolParserError() = %v, want %v", got, tt.want)
+			if got := llm.IsTemporaryOllamaToolParserError(tt.err); got != tt.want {
+				t.Fatalf("llm.IsTemporaryOllamaToolParserError() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -482,15 +482,15 @@ func TestOllamaModelRunnerStoppedErrorClassification(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "runner stopped", err: &ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped, this may be due to resource limitations`}, want: true},
-		{name: "unrelated 500", err: &ChatHTTPError{StatusCode: 500, Body: `out of memory`}, want: false},
-		{name: "wrong status", err: &ChatHTTPError{StatusCode: 502, Body: `model runner has unexpectedly stopped`}, want: false},
+		{name: "runner stopped", err: &llm.ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped, this may be due to resource limitations`}, want: true},
+		{name: "unrelated 500", err: &llm.ChatHTTPError{StatusCode: 500, Body: `out of memory`}, want: false},
+		{name: "wrong status", err: &llm.ChatHTTPError{StatusCode: 502, Body: `model runner has unexpectedly stopped`}, want: false},
 		{name: "ordinary error", err: errors.New("model runner has unexpectedly stopped"), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsOllamaModelRunnerStoppedError(tt.err); got != tt.want {
-				t.Fatalf("IsOllamaModelRunnerStoppedError() = %v, want %v", got, tt.want)
+			if got := llm.IsOllamaModelRunnerStoppedError(tt.err); got != tt.want {
+				t.Fatalf("llm.IsOllamaModelRunnerStoppedError() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -502,16 +502,16 @@ func TestContextLengthExceededErrorClassification(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "maximum context length", err: &ChatHTTPError{StatusCode: 400, Body: "maximum context length exceeded"}, want: true},
-		{name: "context window", err: fmt.Errorf("wrapped: %w", &ChatHTTPError{StatusCode: 413, Body: "request exceeds the context window"}), want: true},
-		{name: "too many tokens", err: &ChatHTTPError{StatusCode: 400, Body: "too many tokens in prompt"}, want: true},
-		{name: "unrelated rejection", err: &ChatHTTPError{StatusCode: 400, Body: "invalid tool schema"}, want: false},
+		{name: "maximum context length", err: &llm.ChatHTTPError{StatusCode: 400, Body: "maximum context length exceeded"}, want: true},
+		{name: "context window", err: fmt.Errorf("wrapped: %w", &llm.ChatHTTPError{StatusCode: 413, Body: "request exceeds the context window"}), want: true},
+		{name: "too many tokens", err: &llm.ChatHTTPError{StatusCode: 400, Body: "too many tokens in prompt"}, want: true},
+		{name: "unrelated rejection", err: &llm.ChatHTTPError{StatusCode: 400, Body: "invalid tool schema"}, want: false},
 		{name: "ordinary error", err: errors.New("context length exceeded"), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsContextLengthExceededError(tt.err); got != tt.want {
-				t.Fatalf("IsContextLengthExceededError() = %v, want %v", got, tt.want)
+			if got := llm.IsContextLengthExceededError(tt.err); got != tt.want {
+				t.Fatalf("llm.IsContextLengthExceededError() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -520,22 +520,18 @@ func TestContextLengthExceededErrorClassification(t *testing.T) {
 func TestGatewayClientEmbedParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			if r.URL.Path != "/v1/async/embeddings" {
-				t.Fatalf("path = %q, want /v1/async/embeddings", r.URL.Path)
+			if r.URL.Path != "/v1/embeddings" {
+				t.Fatalf("path = %q, want /v1/embeddings", r.URL.Path)
 			}
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"id":"embed-job","status":"pending"}`))
+			_, _ = w.Write([]byte(`{"model":"embed-model","data":[{"embedding":[1.5,2.5]}]}`))
 			return
 		}
-		if r.URL.Path != "/v1/async/embeddings/embed-job" {
-			t.Fatalf("unexpected poll path %q", r.URL.Path)
-		}
-		_, _ = w.Write([]byte(`{"id":"embed-job","status":"completed","status_code":200,"result":{"model":"embed-model","data":[{"embedding":[1.5,2.5]}]}}`))
+		t.Fatalf("unexpected method %s path %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	resp, err := client.Embed(context.Background(), EmbedRequest{Model: "embed-model", Input: "text"})
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	resp, err := client.Embed(context.Background(), llm.EmbedRequest{Model: "embed-model", Input: "text"})
 	if err != nil {
 		t.Fatalf("Embed returned error: %v", err)
 	}
@@ -559,9 +555,9 @@ func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T)
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	var chunks []ChatMessage
-	resp, err := client.Chat(context.Background(), ChatRequest{Model: "fallback-model", Stream: true}, func(chunk ChatMessage) {
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	var chunks []llm.ChatMessage
+	resp, err := client.Chat(context.Background(), llm.ChatRequest{Model: "fallback-model", Stream: true}, func(chunk llm.ChatMessage) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -606,8 +602,8 @@ func TestGatewayClientChatStreamSupportsNilCallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
-	resp, err := client.Chat(context.Background(), ChatRequest{Model: "model", Stream: true}, nil)
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	resp, err := client.Chat(context.Background(), llm.ChatRequest{Model: "model", Stream: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +636,7 @@ func TestGatewayClientNilCallbackStreamCancellation(t *testing.T) {
 			defer server.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			client := newTestGatewayClient(server.URL, "", "", log)
+			client := newTestClient(server.URL, "", "", log)
 			// Cancel on the next body read, after the parser consumed the usage frame.
 			// This synchronizes partial telemetry without needing a progress callback.
 			client.HTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -650,7 +646,7 @@ func TestGatewayClientNilCallbackStreamCancellation(t *testing.T) {
 				}
 				return resp, err
 			})
-			_, err := client.Chat(ctx, ChatRequest{Model: "model", Stream: true}, nil)
+			_, err := client.Chat(ctx, llm.ChatRequest{Model: "model", Stream: true}, nil)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Chat error=%v, want cancellation", err)
 			}
@@ -717,10 +713,10 @@ func TestGatewayClientChatStreamCancellationStopsAcceptedRequest(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	client := newTestClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.Chat(ctx, ChatRequest{Model: "model", Stream: true}, func(ChatMessage) {
+		_, err := client.Chat(ctx, llm.ChatRequest{Model: "model", Stream: true}, func(llm.ChatMessage) {
 			select {
 			case established <- struct{}{}:
 			default:
@@ -752,8 +748,8 @@ func TestGatewayClientChatStreamCancellationStopsAcceptedRequest(t *testing.T) {
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
-func newTestGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {
-	client := NewGatewayClient(baseURL, apiKey, virtualKey, log)
+func newTestClient(baseURL, apiKey, virtualKey string, log *config.Logger) *Client {
+	client := NewClient(baseURL, apiKey, virtualKey, log)
 	client.pollInterval = time.Millisecond
 	return client
 }

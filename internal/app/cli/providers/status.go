@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/chatgpt"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/claude"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/chatgpt"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm/claude"
 )
 
 // statusCmd prints every provider's auth state on one screen so the model

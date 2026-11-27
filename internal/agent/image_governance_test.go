@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
@@ -97,7 +97,7 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 							return
 						}
 						uploads = append(uploads, decoded.Bounds().Size())
-						_ = json.NewEncoder(w).Encode(map[string]string{"name": comfy_ui.InputFilename, "subfolder": comfy_ui.InputSubfolder, "type": "input"})
+						_ = json.NewEncoder(w).Encode(map[string]string{"name": image_generate.InputFilename, "subfolder": image_generate.InputSubfolder, "type": "input"})
 					case "/prompt":
 						submissions++
 						_, _ = w.Write([]byte(`{"prompt_id":"job"}`))

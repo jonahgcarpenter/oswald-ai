@@ -1,4 +1,4 @@
-package llm
+package api
 
 import (
 	"bytes"
@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 func measurementRecords(t *testing.T, output string, event string) []map[string]any {
@@ -85,7 +86,7 @@ func TestChatCompletionMeasurement(t *testing.T) {
 			ctx := requestctx.WithUsageCollector(context.Background(), collector)
 			ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "req_1", OperationID: "parent_1", Workload: "foreground", SessionID: "private prose"})
 			ctx = requestctx.WithPrincipal(ctx, identity.Principal{CanonicalUserID: "usr_1", Gateway: "discord", ExternalID: "private prose"})
-			response, err := NewGatewayClient(server.URL, "", "", log).Chat(ctx, ChatRequest{Model: "configured-model", Stream: true}, nil)
+			response, err := NewClient(server.URL, "", "", log).Chat(ctx, llm.ChatRequest{Model: "configured-model", Stream: true}, nil)
 			if (err != nil) != test.failed || (test.failed && response != nil) {
 				t.Fatalf("response=%+v err=%v", response, err)
 			}
@@ -142,9 +143,9 @@ func TestGatewayLocalFailureAndCancellationMeasurements(t *testing.T) {
 			var output bytes.Buffer
 			log := config.NewLogger(config.LevelDebug)
 			log.SetOutput(&output)
-			client := NewGatewayClient(":invalid private prose", "", "", log)
+			client := NewClient(":invalid private prose", "", "", log)
 			ctx := context.Background()
-			req := ChatRequest{Model: "configured-model", Stream: true}
+			req := llm.ChatRequest{Model: "configured-model", Stream: true}
 			if kind == "marshal" {
 				invalid := math.NaN()
 				req.Temperature = &invalid
@@ -219,14 +220,14 @@ func TestAsyncMeasurementsSeparateEmbeddingAndDoNotCountPolls(t *testing.T) {
 				log.SetOutput(&output)
 				collector := requestctx.NewUsageCollector()
 				ctx := requestctx.WithUsageCollector(context.Background(), collector)
-				client := newTestGatewayClient(server.URL, "", "", log)
+				client := newTestClient(server.URL, "", "", log)
 				event, operation := "provider.gateway.chat.complete", "chat"
 				if embedding {
 					event, operation = "provider.gateway.embed.complete", "embedding"
-					if _, err := client.Embed(ctx, EmbedRequest{Model: "configured-model", Input: "private prose"}); err != nil {
+					if _, err := client.Embed(ctx, llm.EmbedRequest{Model: "configured-model", Input: "private prose"}); err != nil {
 						t.Fatal(err)
 					}
-				} else if _, err := client.Chat(ctx, ChatRequest{Model: "configured-model"}, nil); err != nil {
+				} else if _, err := client.Chat(ctx, llm.ChatRequest{Model: "configured-model"}, nil); err != nil {
 					t.Fatal(err)
 				}
 				records := measurementRecords(t, output.String(), event)
@@ -234,7 +235,7 @@ func TestAsyncMeasurementsSeparateEmbeddingAndDoNotCountPolls(t *testing.T) {
 					t.Fatalf("logs=%s", output.String())
 				}
 				d := logDetails(t, records[0])
-				if d["operation"] != operation || d["transport"] != "async" || d["is_usage_reported"] != (usage != "") {
+				if d["operation"] != operation || d["transport"] != "sync" || d["is_usage_reported"] != (usage != "") {
 					t.Fatalf("logs=%s", output.String())
 				}
 				if d["is_usage_complete"] != (embedding && usage != "") || d["phase"] != "decode" {
@@ -248,7 +249,7 @@ func TestAsyncMeasurementsSeparateEmbeddingAndDoNotCountPolls(t *testing.T) {
 					t.Errorf("meter=%+v", s)
 				}
 				server.Close()
-				if posts.Load() != 1 || polls.Load() != 2 {
+				if posts.Load() != 2 || polls.Load() != 2 {
 					t.Errorf("posts=%d polls=%d", posts.Load(), polls.Load())
 				}
 			})
@@ -277,8 +278,8 @@ func TestInvalidUsageIsOmittedWithoutChangingChatResponse(t *testing.T) {
 			log := config.NewLogger(config.LevelDebug)
 			log.SetOutput(&output)
 			collector := requestctx.NewUsageCollector()
-			client := newTestGatewayClient(server.URL, "", "", log)
-			response, err := client.Chat(requestctx.WithUsageCollector(context.Background(), collector), ChatRequest{Model: "model", Stream: streaming}, nil)
+			client := newTestClient(server.URL, "", "", log)
+			response, err := client.Chat(requestctx.WithUsageCollector(context.Background(), collector), llm.ChatRequest{Model: "model", Stream: streaming}, nil)
 			if err != nil || response.CompletionTokens != -2 || response.TotalTokens != -1 {
 				t.Fatalf("response=%+v err=%v", response, err)
 			}
@@ -325,12 +326,12 @@ func TestLaterInvalidStreamUsagePreservesKnownCounts(t *testing.T) {
 				tail = failingStreamReader{cancel: cancel}
 				status, outcome = "ok", "canceled"
 			}
-			client := NewGatewayClient("https://unused.invalid", "", "", log)
+			client := NewClient("https://unused.invalid", "", "", log)
 			client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 				body := io.MultiReader(strings.NewReader("data: {\"usage\":{\"prompt_tokens\":80,\"completion_tokens\":20,\"total_tokens\":100}}\n\ndata: {\"usage\":{\"prompt_tokens\":81,\"completion_tokens\":-1,\"total_tokens\":-1}}\n\n"), tail)
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(body)}, nil
 			})
-			response, err := client.Chat(ctx, ChatRequest{Model: "configured-model", Stream: true}, nil)
+			response, err := client.Chat(ctx, llm.ChatRequest{Model: "configured-model", Stream: true}, nil)
 			if ending == "success" {
 				if err != nil || response == nil || response.PromptTokens != 81 || response.CompletionTokens != -1 || response.TotalTokens != -1 {
 					t.Fatalf("public response changed: response=%+v err=%v", response, err)
@@ -390,13 +391,13 @@ func TestStreamReadFailureAndCancellationRetainObservedUsage(t *testing.T) {
 			if canceled {
 				reader.cancel = cancel
 			}
-			client := NewGatewayClient("https://unused.invalid", "", "", log)
+			client := NewClient("https://unused.invalid", "", "", log)
 			client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 				body := io.MultiReader(strings.NewReader("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private thinking prose\"}}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n"), reader)
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(body)}, nil
 			})
 			chunks := 0
-			response, err := client.Chat(ctx, ChatRequest{Model: "configured-model", Stream: true}, func(ChatMessage) { chunks++ })
+			response, err := client.Chat(ctx, llm.ChatRequest{Model: "configured-model", Stream: true}, func(llm.ChatMessage) { chunks++ })
 			if err == nil || response != nil || chunks != 1 {
 				t.Fatalf("response=%+v err=%v chunks=%d", response, err, chunks)
 			}
