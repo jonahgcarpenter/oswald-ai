@@ -5,8 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
@@ -16,8 +14,12 @@ import (
 // the cause after cleanup; it never calls os.Exit. The terminal banner is only
 // rendered when stdout is a terminal *os.File.
 //
-// `oswald restart` signals the local oswald-server process to exit gracefully;
-// the supervisor (container runtime or service manager) restarts it in place.
+// `oswald restart` signals the local oswald-server process with SIGTERM.
+// The first SIGTERM drains instead of exiting: cron tickers stop, the broker
+// stops admission (new prompts get a retry notice), and in-flight turns run
+// to a bounded grace timeout before the supervisor restarts the service in
+// place. SIGINT, a second signal, or `oswald restart --force` (SIGKILL) skip
+// the drain and exit immediately.
 // Load-bearing changes (context windows, listeners, credentials, profiles,
 // plugins, and remaining sections) never restart automatically: mutating CLI
 // commands print "run `oswald restart` to apply" and non-hot watcher hits only
@@ -36,9 +38,7 @@ func Serve(ctx context.Context, root string, stdout io.Writer) error {
 	rootLog := config.NewLogger(cfg.LogLevel)
 	log := rootLog.Server("app")
 	log.Debug("app.config.loaded", "loaded runtime configuration", config.F("log_level", cfg.LogLevel.String()))
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	err = Run(ctx, cfg, rootLog, stdout)
-	stop()
 	if err != nil {
 		var startupErr *Error
 		if errors.As(err, &startupErr) {

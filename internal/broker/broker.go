@@ -21,6 +21,15 @@ import (
 
 const requestQueueSize = 10
 
+// DrainNoticeText is the user-facing reply for work rejected while the
+// server is draining for a restart. It names no internals: the reader only
+// needs to know to retry shortly.
+const DrainNoticeText = "Oswald is restarting, please retry in a couple of seconds"
+
+// restartDrainTimeout bounds one graceful drain: in-flight turns finish,
+// then the server exits even if a turn is still running.
+const restartDrainTimeout = 5 * time.Minute
+
 var (
 	// ErrQueueFull indicates that the broker has reached its global work limit.
 	ErrQueueFull = errors.New("broker queue full")
@@ -402,7 +411,7 @@ func (b *Broker) trySteer(req *Request) (bool, error) {
 	b.mu.Lock()
 	if !b.accepting {
 		b.mu.Unlock()
-		reason, text := "shutting_down", "request rejected: broker shutting down"
+		reason, text := "shutting_down", DrainNoticeText
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
 			config.F("profile", req.Principal.CanonicalUserID),
@@ -510,7 +519,7 @@ func (b *Broker) submitEnqueue(req *Request) error {
 		text := "request rejected: broker queue full"
 		if errors.Is(err, ErrShuttingDown) {
 			reason = "shutting_down"
-			text = "request rejected: broker shutting down"
+			text = DrainNoticeText
 		}
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
@@ -726,7 +735,7 @@ func (b *Broker) requeueSteer(key LaneKey, entry *steerEntry) {
 		text := "request rejected: broker queue full"
 		if errors.Is(err, ErrShuttingDown) {
 			reason = "shutting_down"
-			text = "request rejected: broker shutting down"
+			text = DrainNoticeText
 		}
 		b.log.Warn("broker.request.rejected", "rejected requeued steer",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
@@ -920,6 +929,55 @@ func (b *Broker) TryAcquireLowPriority(parent context.Context) (context.Context,
 		})
 	}
 	return ctx, release, true
+}
+
+// BeginDrain stops admission so new work (and steers) is rejected with the
+// restart notice, and revokes the background permit so low-priority work
+// frees capacity for the turns already running. Admitted lane work is
+// untouched: running and queued turns keep their workers and fences.
+// Idempotent; Shutdown remains the hard stop that cancels leftovers.
+func (b *Broker) BeginDrain() {
+	b.mu.Lock()
+	if !b.accepting {
+		b.mu.Unlock()
+		return
+	}
+	b.accepting = false
+	if b.background != nil {
+		b.background.cancel()
+	}
+	queued := b.outstanding + b.steerCount
+	started := b.started
+	b.mu.Unlock()
+	b.log.Debug("broker.drain.started", "draining broker for restart", config.F("queued_request_count", queued), config.F("workers_started", started))
+}
+
+// Draining reports whether the broker has stopped admission for a restart.
+func (b *Broker) Draining() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.accepting
+}
+
+// WaitIdle blocks until all admitted work completes or the timeout elapses,
+// reporting whether the broker went idle. It never cancels work itself:
+// callers fall through to Shutdown to cancel leftovers on timeout.
+func (b *Broker) WaitIdle(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		b.workWG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		b.log.Debug("broker.drain.complete", "broker drain complete")
+		return true
+	case <-timer.C:
+		b.log.Warn("broker.drain.timeout", "broker drain timed out with work still running", config.F("status", "degraded"))
+		return false
+	}
 }
 
 // Shutdown rejects new work, cancels active agent requests, drains accepted lanes, and stops workers.

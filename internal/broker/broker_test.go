@@ -736,7 +736,7 @@ func TestBrokerRejectsAfterShutdown(t *testing.T) {
 	}
 	select {
 	case result := <-req.ResponseChan:
-		if result.Response == nil || result.Response.Response != "request rejected: broker shutting down" {
+		if result.Response == nil || result.Response.Response != DrainNoticeText {
 			t.Fatalf("late result=%+v", result)
 		}
 	default:

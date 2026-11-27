@@ -32,7 +32,8 @@ import (
 // mutating CLI commands print "run `oswald restart` to apply" and the watcher
 // only logs an advisory `config.reload.restart_required`. Restart is explicit
 // so the model batches edits and restarts once, never killing its own turn
-// with an automatic rebuild.
+// with an automatic rebuild; the first SIGTERM drains in-flight turns before
+// exit (see startup.awaitShutdown).
 const (
 	reloadPollInterval = 2 * time.Second
 	reloadSettleDelay  = 500 * time.Millisecond

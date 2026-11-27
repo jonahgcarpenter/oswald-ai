@@ -46,6 +46,9 @@ func TestRestartSignalsServer(t *testing.T) {
 	if gotPID != 4321 || gotSig != syscall.SIGTERM {
 		t.Fatalf("signal = pid %d sig %v, want pid 4321 SIGTERM", gotPID, gotSig)
 	}
+	if out := stdout.String(); !strings.Contains(out, "after all responses have been sent") {
+		t.Fatalf("restart output = %q, want the drain message", out)
+	}
 }
 
 func TestRestartForceSendsSIGKILL(t *testing.T) {

@@ -41,6 +41,11 @@ type AgentResult struct {
 // AgentFunc executes one scheduled agent turn and waits for its result.
 type AgentFunc func(ctx context.Context, call AgentCall) (AgentResult, error)
 
+// ErrShuttingDown reports a turn that never ran because the server is
+// draining for a restart. The dispatcher records it without burning retries
+// or failure-streak accounting.
+var ErrShuttingDown = errors.New("server is shutting down")
+
 // Sender delivers finished job output to a conversation. DeliverMention
 // carries a groupchat mention (address plus header line); senders that tap
 // natively may fold it into one message, others bubble the header and thread
@@ -295,6 +300,14 @@ func (d *Dispatcher) runAgentDispatch(ctx context.Context, job *Job, started tim
 		cancel()
 		if agentErr == nil {
 			break
+		}
+		if errors.Is(agentErr, ErrShuttingDown) {
+			// Restart drain: the turn never ran, so record it without
+			// burning retries or failure-streak accounting.
+			ex := Execution{JobID: job.ID, Instant: job.SlotUnix, StartedUnix: started.Unix(), FinishedUnix: d.now().Unix(), Status: "agent_queued", Delivered: false, DeliveryError: agentErr.Error()}
+			d.Store.appendLedger(ex)
+			d.recordRun(job, ex.Status, ex.DeliveryError, false)
+			return ex, "", nil
 		}
 		status := "error"
 		if errors.Is(agentErr, context.DeadlineExceeded) {
